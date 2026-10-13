@@ -7,8 +7,6 @@ A Weavefile keeps one service running on one Linux box. It reads like a Dockerfi
 ABOUT  "PostgreSQL with WAL archiving to S3-compatible storage"
 FROM   ubuntu:24.04
 NEEDS  2 CPU, 4 GB RAM, 40 GB DISK
-DECIDE typesafe/jev-1.13
-CODE   deepseek/deepseek-v4-flash-0731
 
 ARG version=18
     <version>  "a PostgreSQL major release, 14 or newer"
@@ -63,9 +61,7 @@ The journal records every step. There is no install block, no repair block and n
 | `ABOUT "<text>"` | one line for people and models |
 | `FROM <os>:<version>` | the box's operating system |
 | `NEEDS <n> CPU, <n> GB RAM, <n> GB DISK` | the smallest box; also `TB` and `<n> GPU` |
-| `DECIDE <model>` | the decision model |
-| `CODE <model> [THEN <model>]` | the coding model, and the one that takes over |
-| `BUDGET $<n>/month` | the model spend cap |
+| `MODEL DECIDE <id>`, `MODEL CODE <id> [THEN <id>]` | a model hint; the run decides |
 | `ARG <name>[=<default>]` | a setting that the request chooses |
 | `SECRET <NAME> "<what>"` | a value the person types once |
 | `FACT <name> [FOLLOW] <command>` | what the box shows |
@@ -98,16 +94,13 @@ A weave is a directory with two files: the `Weavefile` and a `README.md` for peo
 ABOUT  "PostgreSQL with continuous WAL archiving to S3-compatible storage"
 FROM   ubuntu:24.04
 NEEDS  2 CPU, 4 GB RAM, 40 GB DISK
-DECIDE typesafe/jev-1.13
-CODE   deepseek/deepseek-v4-flash-0731 THEN deepseek/deepseek-v4-pro
-BUDGET $5/month
+MODEL  CODE deepseek/deepseek-v4-flash-0731 THEN deepseek/deepseek-v4-pro
 ```
 
-- `FROM` and `DECIDE` are required. `CODE` is required when an action has a `DO` step.
+- `FROM` is required.
 - The daemon checks `FROM` and `NEEDS` against the box before the first action.
-- `DECIDE` and `CODE` take OpenRouter model ids.
-- `CODE ... THEN`: the second model takes over a task after two failed goal checks.
-- At the `BUDGET` cap, the daemon asks the person before it spends more.
+- `MODEL` is a hint: the models the weave's author recommends. The run chooses; see [Models](#models).
+- `THEN`: the next model takes over a `DO` task after two failed goal checks.
 
 ## ARG and SECRET
 
@@ -258,7 +251,7 @@ Each tick, the daemon:
    - It has one action: the daemon runs it. No model.
    - It has several: the decider picks one of them, `wait` or `ask`.
    - The daemon asks the person when the decider's confidence is under 0.5, `TRIES` is used up, or `program_output` steers.
-   - With no answer from the decider (network, OpenRouter, budget), a quoted goal stays unknown, and a choice counts as confidence 0.
+   - With no answer from the decider (network, provider down), a quoted goal stays unknown, and a choice counts as confidence 0.
 4. Gates the action with the rules.
 5. Runs the action.
 6. Checks the goal again, and writes the outcome to the journal.
@@ -310,6 +303,52 @@ A `DO` task runs this loop:
 6. The coder says `done`. The decider checks the task's goal from the transcript and fresh facts. At 0.8 or more, the task passed.
 7. After two failed checks, the `THEN` model takes over. After 40 commands without a pass, the task failed.
 
+## Models
+
+Two roles use a model. The run picks both; a Weavefile only hints.
+
+| Role | Does | Protocol | Default |
+|---|---|---|---|
+| decide | typed choices and yes/no answers, with probabilities | `systemone` | `typesafe/jev-1.13` |
+| code | `DO` tasks, one shell command at a time | `openai` or `anthropic` | `deepseek/deepseek-v4-flash-0731` |
+
+The default provider is OpenRouter. One OpenRouter key serves both roles:
+
+```
+subweave key openrouter                 # reads the key from stdin
+subweave run postgres "postgres 18"
+```
+
+Each role takes the first of:
+
+1. `--decide` or `--code` on `run` or `tell`.
+2. The weave's `MODEL` hint.
+3. The default above.
+
+A model is `<id>[@<provider>]`. Without `@`, the provider is `openrouter`. A repeated `--code` sets the `THEN` order.
+
+A provider is a name, an endpoint, a protocol and a key:
+
+```
+subweave provider add anthropic https://api.anthropic.com/v1 --protocol anthropic
+subweave key anthropic
+subweave run postgres "postgres 18" --code claude-sonnet-5.5@anthropic
+
+subweave provider add gpu1 http://10.0.0.7:8000/v1     # a vLLM box; the protocol defaults to openai
+subweave run postgres "postgres 18" --code Qwen/Qwen3-Coder-30B-A3B-Instruct@gpu1
+
+subweave provider add typesafe https://api.typesafe.ai/v1
+subweave key typesafe
+subweave run postgres "postgres 18" --decide jev-1.13.0@typesafe
+```
+
+- The coder calls `<endpoint>/chat/completions` for `openai` and `<endpoint>/messages` for `anthropic`. The decider calls `<endpoint>/systemone`.
+- `openrouter` is built in: `https://openrouter.ai/api/v1`, protocol `openai`.
+- The decider needs a System One model: the loop's thresholds read its probabilities, and a chat model gives none.
+- A provider with no key sends no `Authorization` header.
+- Keys are stored with mode 600, like a `SECRET`, and never go to a model.
+- [LIMITS.md](LIMITS.md) measures `typesafe/jev-1.13`. Another decider needs its own measurement.
+
 ## Requests
 
 `subweave run <weave> "<request>"` turns one sentence into ARGs, with two decider requests:
@@ -353,7 +392,7 @@ brew install subweave                            # macOS: CLI only
 |---|---|
 | `run <weave> ["<request>"]` | resolve the request, ask, then hand the service to the daemon |
 | `plan <weave> ["<request>"]` | the request check only; changes nothing |
-| `ps` | services, failing goals, spend this month |
+| `ps` | services, failing goals, models, spend this month |
 | `log [-f] <service>` | the journal |
 | `stats <service>` | metrics from numeric facts |
 | `tell <service> "<request>"` | change ARGs by sentence |
@@ -361,9 +400,11 @@ brew install subweave                            # macOS: CLI only
 | `do <service> <action>` | run one action now |
 | `learn <service>` | draft skills from `DO` tasks that passed |
 | `stop`, `start`, `rm <service>` | pause, resume, remove (asks) |
-| `key openrouter` | store the OpenRouter key |
+| `key <provider>` | store a provider's key, read from stdin |
+| `provider add <name> <endpoint> [--protocol openai\|anthropic]`, `provider rm <name>` | add or remove a provider |
 
-- `run` takes `--on <host>` and `--name <service>`. The name defaults to the weave's name.
+- `run` takes `--on <host>`, `--name <service>`, `--decide <model>` and `--code <model>`. The name defaults to the weave's name.
+- `tell` takes `--decide` and `--code` too, with or without a request.
 - The CLI remembers which box runs each service, so later commands take the name alone.
 - A weave is a local directory, or a name with an optional tag, as in Docker.
   - `postgres:0.4` is `weaves/postgres` in github.com/subweave/subweave at the git tag `postgres-0.4`.
@@ -385,9 +426,8 @@ instruction
   = "ABOUT" quoted
   | "FROM" word
   | "NEEDS" size { "," size }
-  | "DECIDE" word
-  | "CODE" word [ "THEN" word ]
-  | "BUDGET" "$" num "/month"
+  | "MODEL" "DECIDE" model
+  | "MODEL" "CODE" model { "THEN" model }
   | "ARG" name [ "=" word ]
   | "SECRET" name quoted
   | "FACT" name [ "FOLLOW" ] body
@@ -404,6 +444,7 @@ instruction
 body     = command | heredoc ;
 heredoc  = "<<" WORD newline { text newline } WORD ;
 size     = num ( "CPU" | "GPU" | "GB" ( "RAM" | "DISK" ) | "TB" "DISK" ) ;
+model    = word [ "@" name ] ;
 expr     = term { ( "AND" | "OR" ) term } ;
 term     = [ "NOT" ] ( name | value op value | "(" expr ")" ) ;
 value    = name | num | dur | string

@@ -4,9 +4,6 @@
 ABOUT  "Valkey as a cache or a small store, from Ubuntu's packages"
 FROM   ubuntu:24.04
 NEEDS  1 CPU, 2 GB RAM, 20 GB DISK
-DECIDE typesafe/jev-1.13
-CODE   deepseek/deepseek-v4-flash-0731
-BUDGET $2/month
 
 # ── What a request chooses ─────────────────────────────
 

@@ -87,7 +87,7 @@ The last row is a false alarm only 0.08 under the line.
 
 ## 6. Offline means code only
 
-Both models are behind OpenRouter. With no network, no budget left, or OpenRouter down, every decision counts as confidence 0.
+Both models are behind a provider, OpenRouter by default. With no network, or the provider down, every decision counts as confidence 0.
 
 - A goal with one action still runs that action. A goal with several waits for the person.
 - The coder does not run at all.

@@ -4,9 +4,7 @@
 ABOUT  "Ethereum node: reth for execution, lighthouse for consensus, no validator"
 FROM   ubuntu:24.04
 NEEDS  8 CPU, 32 GB RAM, 2 TB DISK
-DECIDE typesafe/jev-1.13
-CODE   deepseek/deepseek-v4-flash-0731 THEN deepseek/deepseek-v4-pro
-BUDGET $10/month
+MODEL  CODE deepseek/deepseek-v4-flash-0731 THEN deepseek/deepseek-v4-pro
 
 # ── What a request chooses ─────────────────────────────
 

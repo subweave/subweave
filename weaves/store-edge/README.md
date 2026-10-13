@@ -33,5 +33,5 @@ This weave has no coder and no `fix`. Every goal has one action or none, so it k
 
 - A slot takes one word of the request, so the till list has commas and no spaces.
 - Telegraf's disk buffer is marked experimental by InfluxData. A long outage can fill the disk: `trim` frees logs, never metrics, and then the person is asked.
-- `BUDGET` is `$1/month` per box, `$300` for the chain. The `quiet` check every 30 minutes costs about `$0.03` a month per box at the measured `$0.000022` a decision.
+- The `quiet` check every 30 minutes is the only model call: about `$0.03` a month per box, `$10` for the chain, at the measured `$0.000022` a decision.
 - No fleet view. `subweave ps` reaches 300 boxes one SSH session at a time.

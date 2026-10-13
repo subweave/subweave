@@ -13,10 +13,12 @@ check the goals ──► a goal fails ──► the decider picks an action ─
 ```
 
 - **Code** checks numbers, runs commands and enforces named rules.
-- **The decider** ([Jev](https://docs.typesafe.ai), a System One model) turns the request into ARGs, picks the next action and judges text. Each decision costs about $0.00002.
-- **The coder** (DeepSeek) does the open-ended tasks, one gated shell command at a time.
+- **The decider** (default [Jev](https://docs.typesafe.ai), a System One model) turns the request into ARGs, picks the next action and judges text. Each decision costs about $0.00002.
+- **The coder** (default DeepSeek) does the open-ended tasks, one gated shell command at a time.
 
-Both models run through [OpenRouter](https://openrouter.ai). The format is in [WEAVEFILE.md](WEAVEFILE.md): capital keywords, as in a Dockerfile, and one file per service.
+The run picks both models; a Weavefile only hints. One [OpenRouter](https://openrouter.ai) key runs every weave here; any OpenAI- or Anthropic-compatible endpoint can serve the coder ([Models](WEAVEFILE.md#models)).
+
+The format is in [WEAVEFILE.md](WEAVEFILE.md): capital keywords, as in a Dockerfile, and one file per service.
 
 ```weavefile
 FACT disk  df --output=pcent /var/lib/postgresql | tail -1 | tr -dc 0-9

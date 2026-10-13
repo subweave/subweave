@@ -4,9 +4,6 @@
 ABOUT  "Paper Minecraft server with RCON, world backups and Paper build updates"
 FROM   ubuntu:24.04
 NEEDS  4 CPU, 8 GB RAM, 50 GB DISK
-DECIDE typesafe/jev-1.13
-CODE   deepseek/deepseek-v4-flash-0731
-BUDGET $2/month
 
 # ── What a request chooses ─────────────────────────────
 

@@ -5,8 +5,6 @@
 ABOUT  "Telegraf in a shop: forwards local metrics, and buffers them to disk while the uplink is down"
 FROM   ubuntu:24.04
 NEEDS  2 CPU, 4 GB RAM, 64 GB DISK
-DECIDE typesafe/jev-1.13
-BUDGET $1/month
 
 # ── What a request chooses ─────────────────────────────
 

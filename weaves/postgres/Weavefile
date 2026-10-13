@@ -4,9 +4,7 @@
 ABOUT  "PostgreSQL with continuous WAL archiving to S3-compatible storage"
 FROM   ubuntu:24.04
 NEEDS  2 CPU, 4 GB RAM, 40 GB DISK
-DECIDE typesafe/jev-1.13
-CODE   deepseek/deepseek-v4-flash-0731 THEN deepseek/deepseek-v4-pro
-BUDGET $5/month
+MODEL  CODE deepseek/deepseek-v4-flash-0731 THEN deepseek/deepseek-v4-pro
 
 # ── What a request chooses ─────────────────────────────
 

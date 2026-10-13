@@ -4,9 +4,7 @@
 ABOUT  "vLLM serving one open-weights model behind an OpenAI-compatible API"
 FROM   ubuntu:24.04
 NEEDS  8 CPU, 1 GPU, 64 GB RAM, 500 GB DISK
-DECIDE typesafe/jev-1.13
-CODE   deepseek/deepseek-v4-flash-0731 THEN deepseek/deepseek-v4-pro
-BUDGET $5/month
+MODEL  CODE deepseek/deepseek-v4-flash-0731 THEN deepseek/deepseek-v4-pro
 
 # ── What a request chooses ─────────────────────────────
 
