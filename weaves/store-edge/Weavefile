@@ -1,0 +1,61 @@
+# A metrics relay in each shop's back office. Every goal has one action or none,
+# so the box keeps working with no uplink and no model.
+#   subweave run store-edge "shop 114, tills 10.0.4.11,10.0.4.12, ship to https://influx.acme.example org acme bucket shops"
+
+weave   store-edge 0.3
+about   "Telegraf in a shop: collects local metrics and forwards them, buffering to disk while the uplink is down"
+needs   ubuntu 24.04, 2 cpu, 4 GB memory, 64 GB disk
+decide  typesafe/jev-1.13
+budget  $1 a month
+
+setting shop
+  <shop>                              "the shop number"
+setting tills
+  <addresses>                         "the IP addresses of the shop's tills, separated by commas, no spaces"
+setting central
+  <url> org <org> bucket <bucket>     "the central InfluxDB v2 server, its organization and its bucket"
+setting influx_token secret "the token for the central InfluxDB"
+
+fact telegraf    = command -v telegraf
+fact configured  = grep -qxF 'SHOP={shop}' /etc/default/telegraf && grep -qxF 'TILLS={addresses}' /etc/default/telegraf && grep -qxF 'INFLUX_URL={url}' /etc/default/telegraf
+fact valid       = set -a && . /etc/default/telegraf && telegraf --config /etc/telegraf/telegraf.conf --config-directory /etc/telegraf/telegraf.d --test > /dev/null 2>&1
+fact up          = systemctl is-active -q telegraf
+fact uplink      = curl -s -o /dev/null -w '%{http_code}' --max-time 5 {url}/ping
+fact buffer      = du -sm /var/lib/telegraf/buffer | cut -f1
+fact disk        = df --output=pcent /var/lib/telegraf | tail -1 | tr -dc 0-9
+fact unreachable = for a in $(echo '{addresses}' | tr ',' ' '); do ping -c1 -W2 $a > /dev/null || echo $a; done | wc -l
+fact logs        tail journalctl -f -u telegraf | grep --line-buffered -E ' [EW]! '
+
+goal installed                      telegraf
+goal configured  after installed    configured and valid
+goal running     after configured   up
+goal room        after installed    disk < 90                                             every 10m
+goal draining    after running      uplink != "204" or buffer < 50 or buffer < prev(buffer)   every 15m
+goal tills       after running      unreachable == 0                                      every 5m
+goal quiet       after running      "the new lines in `logs` show nothing that needs a person"   every 30m
+
+action install for installed "install Telegraf from the InfluxData apt repository":
+  run curl -fsSL -o /tmp/influxdata-archive.key https://repos.influxdata.com/influxdata-archive.key
+  run gpg --show-keys --with-fingerprint --with-colons /tmp/influxdata-archive.key 2>&1 | grep -q '^fpr:\+24C975CBA61A024EE1B631787C3D57159FC2F927:$'
+  run gpg --dearmor < /tmp/influxdata-archive.key > /etc/apt/keyrings/influxdata-archive.gpg
+  run echo 'deb [signed-by=/etc/apt/keyrings/influxdata-archive.gpg] https://repos.influxdata.com/debian stable main' > /etc/apt/sources.list.d/influxdata.list
+  run apt-get update && apt-get install -y telegraf
+
+action configure for configured "install the weave's Telegraf config with this shop's settings, then restart Telegraf":
+  run install -m 644 {weave}/telegraf.conf /etc/telegraf/telegraf.conf
+  run printf 'SHOP=%s\nTILLS=%s\nINFLUX_URL=%s\nINFLUX_ORG=%s\nINFLUX_BUCKET=%s\nINFLUX_TOKEN=%s\n' '{shop}' '{addresses}' '{url}' '{org}' '{bucket}' "$INFLUX_TOKEN" > /etc/default/telegraf && chmod 600 /etc/default/telegraf
+  run printf '[[inputs.ping]]\n  urls = ["%s"]\n' "$(echo '{addresses}' | sed 's/,/", "/g')" > /etc/telegraf/telegraf.d/tills.conf
+  run systemctl restart telegraf
+
+action restart for running, draining "restart Telegraf":
+  run systemctl restart telegraf
+
+action trim for room "delete old journal files and the apt cache; never the metric buffer":
+  run journalctl --vacuum-size=200M
+  run apt-get clean
+
+# `tills` and `quiet` have no action: the box cannot fix a till, so it tells the person.
+
+never "delete files in /var/lib/telegraf/buffer"
+never "send metrics anywhere but {url}"
+never "change the shop's network, router or tills"

@@ -1,0 +1,84 @@
+# An Ethereum node: reth for execution, lighthouse for consensus. No validator.
+#   subweave run ethereum "full node holding only 1000 blocks"
+
+weave   ethereum 0.3
+about   "Ethereum node: reth for execution, lighthouse for consensus, no validator"
+needs   ubuntu 24.04, 8 cpu, 32 GB memory, 2 TB disk
+decide  typesafe/jev-1.13
+code    deepseek/deepseek-v4-flash-0731 then deepseek/deepseek-v4-pro
+budget  $10 a month
+
+setting network = mainnet
+  mainnet             "Ethereum mainnet"
+  sepolia             "the Sepolia testnet"
+  hoodi               "the Hoodi testnet"
+setting history = full
+  archive             "every historical state; about 3 TB on mainnet"
+  full                "all blocks and receipts, recent state only"
+  last <blocks> blocks "prune everything older than this many blocks"
+setting rpc = local
+  local               "JSON-RPC on localhost only"
+  private             "JSON-RPC on the private network"
+
+fact clients  = command -v reth && command -v lighthouse
+fact up       = systemctl is-active -q reth && systemctl is-active -q lighthouse
+fact head     = curl -s localhost:8545 -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber"}' | jq -r .result | xargs printf '%d'
+fact peers    = curl -s localhost:8545 -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"net_peerCount"}' | jq -r .result | xargs printf '%d'
+fact behind   = curl -s localhost:5052/eth/v1/node/syncing | jq -r .data.sync_distance
+fact engine_open = ss -ltnH 'sport = :8551' | awk '$4 !~ /^(127\.0\.0\.1|\[::1\]):/' | wc -l
+fact disk     = df --output=pcent /var/lib/eth | tail -1 | tr -dc 0-9
+fact outdated = for c in paradigmxyz/reth:reth sigp/lighthouse:lighthouse; do t=$(curl -s https://api.github.com/repos/${c%%:*}/releases/latest | jq -r .tag_name); ${c##*:} --version | grep -q "${t#v}" || echo ${c##*:}; done | wc -l
+fact releases = for r in paradigmxyz/reth sigp/lighthouse; do curl -s https://api.github.com/repos/$r/releases/latest | jq -c --arg r $r '{repo: $r, tag_name, notes: .body[:1500]}'; done
+fact logs     tail journalctl -f -u reth -u lighthouse | grep --line-buffered -E 'WARN|ERRO|CRIT'
+
+goal installed                    clients
+goal running    after installed   up
+goal sealed     after running     engine_open == 0
+goal room       after installed   disk < 85                     every 5m
+goal peered     after running     peers >= 5                    every 5m
+goal synced     after running     behind < 64                   every 10m
+goal moving     after synced      head > prev(head)             every 5m
+goal current    after synced      outdated == 0                 every 1d
+goal quiet      after running     "the new lines in `logs` show nothing that needs action"   every 15m
+
+action install for installed "install reth and lighthouse and run them as services":
+  do  "install the latest reth and lighthouse releases from GitHub after checking their signatures; run them as the systemd services reth and lighthouse, data in /var/lib/eth, one JWT secret at /etc/eth/jwt.hex; network {network}; history '{history}'; JSON-RPC '{rpc}'; lighthouse starts from a checkpoint"
+
+action restart for running, moving, quiet "restart reth and lighthouse; the fix when a client crashed, hung or stopped following the chain and nothing on disk is wrong":
+  run systemctl restart reth lighthouse
+
+action seal for sealed "make the engine API listen on localhost only and restart reth; for port 8551 open beyond localhost":
+  do  "make reth's engine API listen on 127.0.0.1:8551 only, then restart reth"
+
+action add-peers for peered "open the p2p ports 30303 and 9000 and restart both clients; for few peers while the ports are closed":
+  run ufw allow 30303 && ufw allow 9000
+  run systemctl restart reth lighthouse
+
+action free-disk for room "delete old journal files; for a disk filled by logs, not by chain data":
+  run journalctl --vacuum-size=500M
+
+action update for current "install the newest reth or lighthouse release and keep the old binary in /opt/eth/previous; for a routine release or a security fix":
+  do  "upgrade each client that has a newer release; copy its old binary to /opt/eth/previous first; restart it"
+
+action rollback for running, synced, moving "put back the binaries from /opt/eth/previous and restart; for a client that broke right after an update":
+  run install -m 755 /opt/eth/previous/* /usr/local/bin/
+  run systemctl restart reth lighthouse
+
+action resync for synced, moving "delete both databases and sync again from a checkpoint; for a corrupt database that a restart does not fix":
+  run systemctl stop reth lighthouse
+  run rm -rf /var/lib/eth/reth /var/lib/eth/lighthouse/beacon
+  run systemctl start reth lighthouse
+
+action fix "find the cause and fix it, for anything the other actions do not cover":
+  do  "make this hold again: {goal}"
+
+never "run a validator or hold staking keys"
+never "expose the engine API, port 8551, beyond localhost"
+ask   before resync
+ask   if blocks < 10064        # reth keeps 10064 blocks for reorgs by default
+ask   "before an upgrade that needs database or config changes"
+ask   "before stopping the node for more than 10 minutes"
+
+skill reth-pruning     "reth prune settings: history kept per segment, full and minimal modes"
+skill checkpoint-sync  "starting lighthouse from a recent finalized checkpoint"
+skill client-upgrades  "upgrading reth and lighthouse, and rolling back"

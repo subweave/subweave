@@ -1,0 +1,74 @@
+# One open-weights model behind an OpenAI-compatible API, on one GPU box.
+#   subweave run vllm "serve Qwen/Qwen3-8B to our app servers on the private network"
+
+weave   vllm 0.3
+about   "vLLM serving one open-weights model behind an OpenAI-compatible API"
+needs   ubuntu 24.04, 8 cpu, 1 gpu, 64 GB memory, 500 GB disk
+decide  typesafe/jev-1.13
+code    deepseek/deepseek-v4-flash-0731 then deepseek/deepseek-v4-pro
+budget  $5 a month
+
+setting model
+  <model>     "a Hugging Face model id, like Qwen/Qwen3-8B"
+setting access = local
+  local       "the API on localhost only"
+  private     "the API on the private network, with an API key"
+setting vllm_api_key secret "the key clients send as a bearer token"       # vLLM reads VLLM_API_KEY
+setting hf_token     secret "a Hugging Face token, for gated models"        # huggingface_hub reads HF_TOKEN
+
+fact gpu       = nvidia-smi -L
+fact vllm      = /opt/vllm/bin/vllm --version
+fact up        = curl -sf localhost:8000/health
+fact served    = curl -s localhost:8000/v1/models -H "Authorization: Bearer $VLLM_API_KEY" | jq -r '.data[0].id'
+fact waiting   = curl -s localhost:8000/metrics | awk '/^vllm:num_requests_waiting[{ ]/ {s += $2} END {print s + 0}'
+fact kv        = curl -s localhost:8000/metrics | awk '/^vllm:kv_cache_usage_perc[{ ]/ {s = $2} END {print int(s * 100)}'
+fact preempted = curl -s localhost:8000/metrics | awk '/^vllm:num_preemptions_total[{ ]/ {s += $2} END {print s + 0}'
+fact xid       = journalctl -k --since -10min | grep -c 'NVRM: Xid'
+fact xid_lines = journalctl -k --since -10min | grep 'NVRM: Xid' | tail -5
+fact disk      = df --output=pcent /root/.cache | tail -1 | tr -dc 0-9
+fact logs      tail journalctl -f -u vllm | grep --line-buffered -E 'WARNING|ERROR|Traceback'
+
+goal driver                         gpu
+goal installed    after driver      vllm
+goal running      after installed   up
+goal serving      after running     served == model
+goal gpu-healthy  after driver      xid == 0                                              every 5m
+goal keeping-up   after running     waiting < 20 and preempted - prev(preempted) < 50     every 5m
+goal room         after installed   disk < 90                                             every 10m
+goal quiet        after running     "the new lines in `logs` show nothing that needs action"   every 10m
+
+action install-driver for driver "install the NVIDIA server driver and reboot; for a GPU box with no driver":
+  run apt-get install -y ubuntu-drivers-common
+  run ubuntu-drivers install --gpgpu
+  run systemctl reboot
+
+action install for installed "install vLLM into /opt/vllm and run it as the vllm service":
+  do  "install the latest vLLM release with uv into /opt/vllm; run `vllm serve {model}` on port 8000 as the systemd service vllm; access '{access}'; the service reads VLLM_API_KEY and HF_TOKEN from /etc/vllm/env, mode 600"
+
+action restart for running, gpu-healthy, keeping-up, quiet "restart the vllm service; fixes a hung engine, a crash, or an application Xid error (13, 31, 43) when the GPU is healthy":
+  run systemctl restart vllm
+
+action serve for serving "point the vllm service at {model} and restart it; for a running server that serves another model":
+  do  "change the model in the vllm unit to {model}, keeping the other flags that still fit it, and restart vllm"
+
+action lower-concurrency for keeping-up "lower --max-num-seqs so fewer requests share the KV cache; for sustained preemptions or a full KV cache":
+  do  "lower --max-num-seqs in the vllm unit by a quarter, restart vllm, and say the new value"
+
+action reboot for gpu-healthy, running "reboot the box; for NVIDIA Xid errors after which the GPU stays unusable":
+  run systemctl reboot
+
+action free-disk for room "remove Hugging Face cache entries for models other than {model}":
+  do  "free space in /root/.cache/huggingface by removing models other than {model}"
+
+action fix "find the cause and fix it, for anything the other actions do not cover":
+  do  "make this hold again: {goal}"
+
+never "serve a model other than {model}"
+never "open port 8000 to the internet"
+ask   before reboot
+ask   before install-driver
+ask   "before changing the NVIDIA driver or CUDA version"
+ask   "before a vLLM upgrade"
+
+skill vllm-serving  "vllm serve flags, memory and concurrency settings, and its metrics"
+skill nvidia-xid    "what NVIDIA Xid error numbers mean, and which ones software cannot fix"
