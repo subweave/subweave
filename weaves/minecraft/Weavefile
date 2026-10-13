@@ -1,87 +1,162 @@
 # A Paper Minecraft server for a club, a class or a group of friends.
 #   subweave run minecraft "survival server for 20 friends, whitelist only, back up every 6 hours"
 
-weave   minecraft 0.3
-about   "Paper Minecraft server with RCON, world backups and Paper build updates"
-needs   ubuntu 24.04, 4 cpu, 8 GB memory, 50 GB disk
-decide  typesafe/jev-1.13
-code    deepseek/deepseek-v4-flash-0731
-budget  $2 a month
+ABOUT  "Paper Minecraft server with RCON, world backups and Paper build updates"
+FROM   ubuntu:24.04
+NEEDS  4 CPU, 8 GB RAM, 50 GB DISK
+DECIDE typesafe/jev-1.13
+CODE   deepseek/deepseek-v4-flash-0731
+BUDGET $2/month
 
-setting version = 26.2
-  <version>     "a Minecraft version that Paper builds for, like 26.2"
-setting players = 20
-  <players>     "the most players online at once"
-setting mode = survival
-  survival      "survival mode"
-  creative      "creative mode"
-setting join = whitelist
-  whitelist     "only players on the whitelist"
-  open          "anyone with the address"
-setting backups = 6h
-  <backups>     "how often to back up the world, like 6h"
-setting mcrcon_pass secret "the RCON password"     # mcrcon reads MCRCON_PASS
+# ── What a request chooses ─────────────────────────────
 
-fact java     = java -version 2>&1 | grep -q 'version "25'
-fact paper    = test -f /opt/minecraft/paper.jar
-fact up       = systemctl is-active -q minecraft
-fact rcon     = mcrcon -c list > /dev/null
-fact players  = mcrcon -c list | grep -oE 'There are [0-9]+' | tr -dc 0-9
-fact tps      = mcrcon -c tps | grep -oE '[0-9]+\.[0-9]+' | head -1
-fact build    = cat /opt/minecraft/build
-fact skip     = cat /opt/minecraft/skip-build
-fact latest   = curl -s https://fill.papermc.io/v3/projects/paper/versions/{version}/builds/latest | jq -r .id
-fact disk     = df --output=pcent /opt/minecraft | tail -1 | tr -dc 0-9
-fact logs     tail tail -F /opt/minecraft/logs/latest.log | grep --line-buffered -E '/(WARN|ERROR)\]: '    # never chat
+ARG version=26.2
+    <version>      "a Minecraft version that Paper builds for, like 26.2"
+ARG max_players=20
+    <max_players>  "the most players online at once"
+ARG mode=survival
+    survival       "survival mode"
+    creative       "creative mode"
+ARG join=whitelist
+    whitelist      "only players on the whitelist"
+    open           "anyone with the address"
+ARG backups=6h
+    <backups>      "how often to back up the world, like 6h"
 
-goal runtime                      java
-goal installed   after runtime    paper
-goal running     after installed  up and rcon
-goal smooth      after running    players == 0 or tps >= 18                       every 5m
-goal room        after installed  disk < 85                                       every 10m
-goal saved       after running    since(backup) < backups
-goal current     after running    build == latest or latest == skip or players > 0   every 1h
-goal quiet       after running    "the new lines in `logs` show nothing that needs action"   every 15m
+# mcrcon reads MCRCON_PASS
+SECRET MCRCON_PASS "the RCON password"
 
-action install-java for runtime "install Java 25 from Ubuntu's packages":
-  run apt-get install -y openjdk-25-jre-headless
+# ── What the box shows ─────────────────────────────────
 
-action install for installed "set up Paper {version}, server.properties, RCON and the minecraft service":
-  do  "create the user minecraft and /opt/minecraft; download the latest Paper {version} build from the Fill API, check its sha256, and write its build id to /opt/minecraft/build; accept the EULA; server.properties: max-players {players}, gamemode {mode}, whitelist on only when join is 'whitelist' (it is '{join}'), RCON on port 25575 with the password in $MCRCON_PASS; install mcrcon into /usr/local/bin; run the server as the systemd service minecraft with Paper's recommended JVM flags"
+FACT java     java -version 2>&1 | grep -q 'version "25'
+FACT paper    test -f /opt/minecraft/paper.jar
+FACT up       systemctl is-active -q minecraft
+FACT rcon     mcrcon -c list > /dev/null
+FACT players  mcrcon -c list | grep -oE 'There are [0-9]+' | tr -dc 0-9
+FACT tps      mcrcon -c tps | grep -oE '[0-9]+\.[0-9]+' | head -1
+FACT build    cat /opt/minecraft/build
+FACT skip     cat /opt/minecraft/skip-build
+FACT latest   curl -s https://fill.papermc.io/v3/projects/paper/versions/$version/builds/latest \
+                | jq -r .id
+FACT disk     df --output=pcent /opt/minecraft | tail -1 | tr -dc 0-9
+# WARN and ERROR lines only: never chat, which players write.
+FACT logs     FOLLOW tail -F /opt/minecraft/logs/latest.log \
+                | grep --line-buffered -E '/(WARN|ERROR)\]: '
 
-action restart for running, smooth "warn players, then restart the server; the fix when it crashed, or stays slow with players online":
-  run mcrcon -c "say Restarting in 30 seconds" || true
-  run sleep 30
-  run systemctl restart minecraft
+# ── What must hold ─────────────────────────────────────
 
-action backup for saved "save the world and archive it to /var/backups/minecraft, keeping the newest 14":
-  run mkdir -p /var/backups/minecraft && mcrcon -c save-off "save-all flush" && tar -czf /var/backups/minecraft/world-$(date +%Y%m%d-%H%M).tgz -C /opt/minecraft world world_nether world_the_end; s=$?; mcrcon -c save-on; exit $s
-  run ls -1t /var/backups/minecraft/world-*.tgz | tail -n +15 | xargs -r rm
+GOAL runtime                                  java
+GOAL installed  AFTER runtime                 paper
+GOAL running    AFTER installed               up AND rcon
+GOAL smooth     AFTER running    EVERY 5m     players == 0 OR tps >= 18
+GOAL room       AFTER installed  EVERY 10m    disk < 85
+GOAL saved      AFTER running                 SINCE(backup) < backups
+GOAL current    AFTER running    EVERY 1h     build == latest OR latest == skip OR players > 0
+GOAL quiet      AFTER running    EVERY 15m \
+     "the new lines in `logs` show nothing that needs action"
 
-action update for current "install the newest Paper build for {version} and restart, while nobody plays":
-  run curl -fsS https://fill.papermc.io/v3/projects/paper/versions/{version}/builds/latest > /tmp/paper.json
-  run curl -fsSL -o /opt/minecraft/paper.jar.new "$(jq -r '.downloads."server:default".url' /tmp/paper.json)"
-  run echo "$(jq -r '.downloads."server:default".checksums.sha256' /tmp/paper.json)  /opt/minecraft/paper.jar.new" | sha256sum -c -
-  run cd /opt/minecraft && cp paper.jar paper.jar.previous && cp build build.previous && mv paper.jar.new paper.jar && jq -r .id /tmp/paper.json > build
-  run systemctl restart minecraft
+# ── What the loop may do ───────────────────────────────
 
-action rollback for running, smooth "put back the previous Paper build, skip the new one, and restart; for a server that broke right after an update":
-  run cd /opt/minecraft && cp build skip-build && mv paper.jar.previous paper.jar && mv build.previous build
-  run systemctl restart minecraft
+ACTION install-java FOR runtime
+  WHEN "Java 25 is missing"
+  RUN  apt-get install -y openjdk-25-jre-headless
 
-action restore for running, quiet "put back the newest world backup; for a corrupt world that stops the server from starting":
-  run systemctl stop minecraft
-  run t=$(date +%Y%m%d%H%M) && for w in world world_nether world_the_end; do mv /opt/minecraft/$w /opt/minecraft/$w.before-restore-$t; done
-  run tar -xzf "$(ls -1t /var/backups/minecraft/world-*.tgz | head -1)" -C /opt/minecraft
-  run systemctl start minecraft
+ACTION install FOR installed
+  WHEN "Paper is missing"
+  DO <<EOF
+    Create the user minecraft and /opt/minecraft.
+    Download the latest Paper $version build from the Fill API, check its sha256,
+    and write its build id to /opt/minecraft/build. Accept the EULA.
+    server.properties: max-players $max_players, gamemode $mode,
+    whitelist on only when join is 'whitelist' (it is '$join'),
+    RCON on port 25575 with the password in $MCRCON_PASS.
+    Install mcrcon into /usr/local/bin.
+    Run the server as the systemd service minecraft, with Paper's recommended JVM flags.
+  EOF
 
-action fix "find the cause and fix it, for anything the other actions do not cover":
-  do  "make this hold again without touching the worlds: {goal}"
+ACTION restart FOR running, smooth
+  WHEN "the server crashed, or stays slow with players online"
+  RUN  mcrcon -c "say Restarting in 30 seconds" || true
+  RUN  sleep 30
+  RUN  systemctl restart minecraft
 
-never "op a player, or change the whitelist or bans"
-never "delete or reset a world"
-never "open the RCON port 25575 to the internet"
-ask   before restore
-ask   "before changing the Minecraft version: a world cannot go back to an older one"
+ACTION backup FOR saved
+  WHEN "the last world backup is older than $backups"
+  RUN <<EOF
+    mkdir -p /var/backups/minecraft
+    mcrcon -c save-off "save-all flush"
+    trap 'mcrcon -c save-on' EXIT
+    tar -czf /var/backups/minecraft/world-$(date +%Y%m%d-%H%M).tgz \
+      -C /opt/minecraft world world_nether world_the_end
+  EOF
+  RUN  ls -1t /var/backups/minecraft/world-*.tgz | tail -n +15 | xargs -r rm
 
-skill paper-server  "Paper downloads, JVM flags, server.properties and RCON"
+ACTION update FOR current
+  WHEN "a newer Paper build for $version exists, and nobody plays"
+  RUN <<EOF
+    cd /opt/minecraft
+    curl -fsS https://fill.papermc.io/v3/projects/paper/versions/$version/builds/latest > /tmp/paper.json
+    jar=$(jq -r '.downloads."server:default".url' /tmp/paper.json)
+    sum=$(jq -r '.downloads."server:default".checksums.sha256' /tmp/paper.json)
+    curl -fsSL -o paper.jar.new "$jar"
+    echo "$sum  paper.jar.new" | sha256sum -c -
+    cp paper.jar paper.jar.previous && cp build build.previous
+    mv paper.jar.new paper.jar && jq -r .id /tmp/paper.json > build
+    systemctl restart minecraft
+  EOF
+
+ACTION rollback FOR running, smooth
+  WHEN "the server broke right after an update"
+  RUN <<EOF
+    cd /opt/minecraft
+    cp build skip-build && mv paper.jar.previous paper.jar && mv build.previous build
+    systemctl restart minecraft
+  EOF
+
+ACTION restore FOR running, quiet
+  WHEN "a corrupt world stops the server from starting"
+  RUN <<EOF
+    systemctl stop minecraft
+    t=$(date +%Y%m%d%H%M)
+    for w in world world_nether world_the_end; do
+      mv /opt/minecraft/$w /opt/minecraft/$w.before-restore-$t
+    done
+    tar -xzf "$(ls -1t /var/backups/minecraft/world-*.tgz | head -1)" -C /opt/minecraft
+    systemctl start minecraft
+  EOF
+
+ACTION fix
+  WHEN "no other action fits, or the fitting ones already failed"
+  DO   "make the failing goal hold again without touching the worlds"
+
+# ── Rules ──────────────────────────────────────────────
+
+NEVER "op a player, or change the whitelist or bans"
+NEVER "delete or reset a world"
+NEVER "open the RCON port 25575 to the internet"
+ASK   BEFORE restore
+ASK   "before changing the Minecraft version: a world cannot go back to an older one"
+
+# ── What the coder reads ───────────────────────────────
+
+SKILL paper-server WHEN "Paper downloads, JVM flags, server.properties and RCON" <<EOF
+      api=https://fill.papermc.io/v3/projects/paper/versions/$version
+      curl -s $api/builds/latest | jq '.id, .downloads."server:default"'
+      curl -s $api | jq -r '.version.java.version.minimum, .version.java.flags.recommended[]'
+
+  The second command gives the minimum Java release and Paper's recommended JVM flags.
+  Add -Xms and -Xmx at about 70% of the box's memory.
+
+  | server.properties               | value                          |
+  |---------------------------------|--------------------------------|
+  | max-players                     | $max_players                   |
+  | gamemode                        | $mode                          |
+  | white-list, enforce-whitelist   | true for whitelist             |
+  | enable-rcon / rcon.port         | true / 25575                   |
+  | rcon.password                   | from $MCRCON_PASS; never echo  |
+
+  RCON listens on every address: allow 25565/tcp in ufw, and nothing for 25575.
+  mcrcon is not in Ubuntu: install the release binary from github.com/Tiiffi/mcrcon.
+  It reads MCRCON_PASS, MCRCON_HOST and MCRCON_PORT; -c turns off colour codes.
+  Accept the EULA with eula=true in /opt/minecraft/eula.txt.
+EOF

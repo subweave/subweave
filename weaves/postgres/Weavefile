@@ -1,96 +1,206 @@
 # PostgreSQL on one box, archiving WAL to S3-compatible storage.
-#   subweave run postgres "postgres 18 for our app, private network, backups to s3://acme-pg/db1 on https://fsn1.your-objectstorage.com"
+#   subweave run postgres "postgres 18, private network, backups to s3://acme-pg/db1"
 
-weave   postgres 0.3
-about   "PostgreSQL with continuous WAL archiving to S3-compatible storage"
-needs   ubuntu 24.04, 2 cpu, 4 GB memory, 40 GB disk
-decide  typesafe/jev-1.13
-code    deepseek/deepseek-v4-flash-0731 then deepseek/deepseek-v4-pro
-budget  $5 a month
+ABOUT  "PostgreSQL with continuous WAL archiving to S3-compatible storage"
+FROM   ubuntu:24.04
+NEEDS  2 CPU, 4 GB RAM, 40 GB DISK
+DECIDE typesafe/jev-1.13
+CODE   deepseek/deepseek-v4-flash-0731 THEN deepseek/deepseek-v4-pro
+BUDGET $5/month
 
-setting version = 18
-  <version>   "a PostgreSQL major release, 14 or newer"
-setting access = local
-  local       "connections from this box only"
-  private     "connections from the private network, with a password and TLS"
-setting bucket
-  <bucket>    "an S3 URL for backups, like s3://acme-pg/db1"
-setting endpoint = aws
-  aws         "Amazon S3"
-  <endpoint>  "the HTTPS endpoint of another S3-compatible store"
-setting keep = 7
-  <keep>      "daily base backups to keep"
-setting aws_access_key_id     secret "the access key for the backup bucket"
-setting aws_secret_access_key secret "the secret key for the backup bucket"
+# ── What a request chooses ─────────────────────────────
 
-fact pg       = test -x /usr/lib/postgresql/{version}/bin/postgres
-fact walg     = command -v wal-g
-fact up       = pg_isready -q
-fact major    = sudo -u postgres psql -Atc "select current_setting('server_version_num')::int / 10000"
-fact listen   = sudo -u postgres psql -Atc "show listen_addresses"
-fact hba      = grep -v '^#' /etc/postgresql/{version}/main/pg_hba.conf | grep .
-fact archive_failing = sudo -u postgres psql -Atc "select coalesce(last_failed_time > last_archived_time, last_failed_time is not null)::int from pg_stat_archiver"
-fact disk     = df --output=pcent /var/lib/postgresql | tail -1 | tr -dc 0-9
-fact conns    = sudo -u postgres psql -Atc "select count(*) from pg_stat_activity where backend_type = 'client backend'"
-fact max_conns = sudo -u postgres psql -Atc "show max_connections"
-fact minor    = apt-get update -qq && apt-get -s install --only-upgrade postgresql-{version} | grep -c '^Inst'
-fact logs     tail tail -F /var/log/postgresql/postgresql-{version}-main.log | grep --line-buffered -E 'WARNING|ERROR|FATAL|PANIC'
-fact kernel   tail journalctl -k -f -p warning
+ARG version=18
+    <version>   "a PostgreSQL major release, 14 or newer"
+ARG access=local
+    local       "connections from this box only"
+    private     "connections from the private network, with a password and TLS"
+ARG bucket
+    <bucket>    "an S3 URL for backups, like s3://acme-pg/db1"
+ARG endpoint=aws
+    aws         "Amazon S3"
+    <endpoint>  "the HTTPS endpoint of another S3-compatible store"
+ARG keep=7
+    <keep>      "daily base backups to keep"
 
-goal installed                        pg and walg
-goal configured  after installed      "postgres listens and authenticates as access '{access}' asks, with TLS when private: `listen`, `hba`"   every 1h
-goal running     after configured     up
-goal archiving   after running        archive_failing == 0               every 5m
-goal backed      after running        since(backup) < 25h
-goal room        after installed      disk < 85                          every 5m
-goal connections after running        conns < max_conns * 0.8            every 5m
-goal patched     after running        minor == 0                         every 1d
-goal current     after running        major == version
-goal quiet       after running        "the new lines in `logs` and `kernel` show nothing that needs action"   every 10m
+SECRET AWS_ACCESS_KEY_ID     "the access key for the backup bucket"
+SECRET AWS_SECRET_ACCESS_KEY "the secret key for the backup bucket"
 
-action install for installed "install PostgreSQL {version} from the PGDG apt repository, and wal-g":
-  run apt-get install -y postgresql-common curl jq
-  run /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-  run apt-get install -y postgresql-{version}
-  do  "install wal-g for PostgreSQL on Ubuntu 24.04 from the latest github.com/wal-g/wal-g release into /usr/local/bin/wal-g, after checking its .sha256 file"
+# ── What the box shows ─────────────────────────────────
 
-action configure for configured "write the access, TLS, memory and archiving settings, then reload or restart postgres":
-  do  "configure the {version}/main cluster: access '{access}'; memory and connection settings for this box; WAL archiving with wal-g to {bucket} at endpoint '{endpoint}'; restart only when a changed setting needs it"
+FACT pg        test -x /usr/lib/postgresql/$version/bin/postgres
+FACT walg      command -v wal-g
+FACT up        pg_isready -q
+FACT major     sudo -u postgres psql -Atc "show server_version_num" | cut -c1-2
+FACT listen    sudo -u postgres psql -Atc "show listen_addresses"
+FACT hba       grep -v '^#' /etc/postgresql/$version/main/pg_hba.conf | grep .
+FACT archived  sudo -u postgres psql -Atc "select (last_failed_time is null \
+                 or last_archived_time > last_failed_time)::int from pg_stat_archiver"
+FACT disk      df --output=pcent /var/lib/postgresql | tail -1 | tr -dc 0-9
+FACT conns     sudo -u postgres psql -Atc "select count(*) from pg_stat_activity \
+                 where backend_type = 'client backend'"
+FACT max_conns sudo -u postgres psql -Atc "show max_connections"
+FACT minor     apt-get update -qq && \
+                 apt-get -s install --only-upgrade postgresql-$version | grep -c '^Inst' || true
+FACT logs      FOLLOW tail -F /var/log/postgresql/postgresql-$version-main.log \
+                 | grep --line-buffered -E 'WARNING|ERROR|FATAL|PANIC'
+FACT kernel    FOLLOW journalctl -k -f -p warning
 
-action restart for running "restart postgres; the fix when postgres was killed (for example by the kernel out-of-memory killer) or crashed once and nothing on disk is wrong":
-  run systemctl restart postgresql@{version}-main
+# ── What must hold ─────────────────────────────────────
 
-action backup for backed "push a base backup to the bucket, then delete base backups beyond {keep}":
-  run sudo -u postgres wal-g --config /etc/wal-g/wal-g.json backup-push /var/lib/postgresql/{version}/main
-  run sudo -u postgres wal-g --config /etc/wal-g/wal-g.json delete retain FULL {keep} --confirm
+GOAL installed                                    pg AND walg
+GOAL configured  AFTER installed  EVERY 1h \
+     "postgres listens and authenticates as access '$access' asks, \
+      with TLS when private: `listen`, `hba`"
+GOAL running     AFTER configured                 up
+GOAL archiving   AFTER running    EVERY 5m        archived == 1
+GOAL backed      AFTER running                    SINCE(backup) < 25h
+GOAL room        AFTER installed  EVERY 5m        disk < 85
+GOAL connections AFTER running    EVERY 5m        conns < max_conns * 0.8
+GOAL patched     AFTER running    EVERY 1d        minor == 0
+GOAL current     AFTER running                    major == version
+GOAL quiet       AFTER running    EVERY 10m \
+     "the new lines in `logs` and `kernel` show nothing that needs action"
 
-action free-disk for room "delete compressed logs older than 7 days and old journal files; for a disk filled by logs, not by data or WAL":
-  run find /var/log/postgresql -name '*.gz' -mtime +7 -delete
-  run journalctl --vacuum-size=200M
+# ── What the loop may do ───────────────────────────────
 
-action end-idle for connections "end sessions idle in a transaction for over 10 minutes; for connections used up by an app that leaks them":
-  run sudo -u postgres psql -c "select pg_terminate_backend(pid) from pg_stat_activity where state = 'idle in transaction' and now() - state_change > interval '10 minutes'"
+ACTION install FOR installed
+  WHEN "PostgreSQL $version or wal-g is missing"
+  RUN  apt-get install -y postgresql-common curl jq
+  RUN  /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+  RUN  apt-get install -y postgresql-$version
+  RUN <<EOF
+    url=$(curl -fsS https://api.github.com/repos/wal-g/wal-g/releases/latest \
+      | jq -r '.assets[] | select(.name == "wal-g-pg-24.04-amd64.tar.gz") | .browser_download_url')
+    cd /tmp && curl -fsSLO "$url" && curl -fsSL "$url.sha256" | sha256sum -c -
+    tar -xzf wal-g-pg-24.04-amd64.tar.gz && install -m 755 wal-g-pg-24.04-amd64 /usr/local/bin/wal-g
+  EOF
 
-action patch for patched "install the pending PostgreSQL minor release; minor releases keep the data format":
-  run apt-get install -y --only-upgrade postgresql-{version}
+ACTION configure FOR configured
+  WHEN "the access, TLS or archiving settings differ from what the ARGs ask"
+  DO   "configure the $version/main cluster: access '$access'; memory and connection \
+        settings for this box; WAL archiving with wal-g to $bucket at endpoint '$endpoint'. \
+        Restart only when a changed setting needs it."
 
-action upgrade for current "move the main cluster to PostgreSQL {version} with pg_upgradecluster; the old cluster stays on disk":
-  do  "upgrade the main cluster to PostgreSQL {version}"
+ACTION restart FOR running
+  WHEN "postgres was killed, for example by the out-of-memory killer, \
+        or crashed once, and nothing on disk is wrong"
+  RUN  systemctl restart postgresql@$version-main
 
-action restore for running, quiet "restore the newest backup into a fresh data directory; for data loss or corruption that postgres reports":
-  do  "restore the newest wal-g backup and replay the archived WAL; move the old data directory aside, never delete it"
+ACTION backup FOR backed
+  WHEN "the last base backup is older than a day"
+  RUN  sudo -u postgres wal-g --config /etc/wal-g/wal-g.json \
+         backup-push /var/lib/postgresql/$version/main
+  RUN  sudo -u postgres wal-g --config /etc/wal-g/wal-g.json \
+         delete retain FULL $keep --confirm
 
-action fix "find the cause and fix it, for anything the other actions do not cover":
-  do  "make this hold again without losing data: {goal}"
+ACTION free-disk FOR room
+  WHEN "the disk is full of old logs, not of data or WAL"
+  RUN  find /var/log/postgresql -name '*.gz' -mtime +7 -delete
+  RUN  journalctl --vacuum-size=200M
 
-never "drop or truncate a database, or delete table rows"
-never "accept connections from the internet"
-never "turn off WAL archiving"
-ask   before restore
-ask   before upgrade
-ask   "before dropping a PostgreSQL cluster"
+ACTION end-idle FOR connections
+  WHEN "an app holds connections idle in a transaction for over 10 minutes"
+  RUN <<EOF
+    sudo -u postgres psql -c "select pg_terminate_backend(pid) from pg_stat_activity
+      where state = 'idle in transaction' and now() - state_change > interval '10 minutes'"
+  EOF
 
-skill wal-g          "configuring wal-g, archive_command and base backups"
-skill wal-g-restore  "restoring the newest wal-g backup into a fresh data directory"
-skill pg-upgrade     "moving a cluster to a new PostgreSQL major release with pg_upgradecluster"
-skill pg-tuning      "memory, connection and WAL settings for a box's size"
+ACTION patch FOR patched
+  WHEN "a PostgreSQL minor release is pending; minor releases keep the data format"
+  RUN  apt-get install -y --only-upgrade postgresql-$version
+
+ACTION upgrade FOR current
+  WHEN "the running major release is older than $version"
+  DO   "upgrade the main cluster to PostgreSQL $version"
+
+ACTION restore FOR running, quiet
+  WHEN "postgres reports lost or corrupt data"
+  DO   "restore the newest wal-g backup and replay the archived WAL"
+
+ACTION fix
+  WHEN "no other action fits, or the fitting ones already failed"
+  DO   "make the failing goal hold again without losing data"
+
+# ── Rules ──────────────────────────────────────────────
+
+NEVER "drop or truncate a database, or delete table rows"
+NEVER "accept connections from the internet"
+NEVER "turn off WAL archiving"
+ASK   BEFORE restore
+ASK   BEFORE upgrade
+ASK   "before dropping a PostgreSQL cluster"
+
+# ── What the coder reads ───────────────────────────────
+
+SKILL wal-g WHEN "configuring wal-g, archive_command and base backups" <<EOF
+  One config file, /etc/wal-g/wal-g.json, owner postgres, mode 600.
+  Every wal-g command passes `--config /etc/wal-g/wal-g.json`.
+  Write it from the environment, so the keys never appear in a command:
+
+      install -d -o postgres -m 700 /etc/wal-g
+      jq -n --arg p "$bucket" --arg i "$AWS_ACCESS_KEY_ID" --arg k "$AWS_SECRET_ACCESS_KEY" \
+        '{WALG_S3_PREFIX: $p, AWS_ACCESS_KEY_ID: $i, AWS_SECRET_ACCESS_KEY: $k,
+          PGHOST: "/var/run/postgresql", WALG_COMPRESSION_METHOD: "zstd"}' \
+        > /etc/wal-g/wal-g.json
+
+  For an endpoint other than `aws`, add AWS_ENDPOINT, AWS_REGION and
+  AWS_S3_FORCE_PATH_STYLE: "true".
+
+  Archiving, in /etc/postgresql/$version/main/conf.d/archive.conf:
+
+      archive_mode = on
+      archive_command = 'wal-g --config /etc/wal-g/wal-g.json wal-push %p'
+      archive_timeout = 60
+
+  archive_mode needs a restart; archive_command needs only a reload.
+  Run the `backup` action once archiving works: no restore works without a base backup.
+EOF
+
+SKILL wal-g-restore WHEN "restoring the newest wal-g backup into a fresh data directory" <<EOF
+  The old data directory stays on disk. The daemon runs this recipe before it calls the coder:
+
+  ```recipe
+  systemctl stop postgresql@$version-main
+  mv /var/lib/postgresql/$version/main \
+     /var/lib/postgresql/$version/main.before-restore-$(date +%Y%m%d%H%M)
+  sudo -u postgres wal-g --config /etc/wal-g/wal-g.json \
+    backup-fetch /var/lib/postgresql/$version/main LATEST
+  echo "restore_command = 'wal-g --config /etc/wal-g/wal-g.json wal-fetch %f %p'" \
+    > /etc/postgresql/$version/main/conf.d/restore.conf
+  sudo -u postgres touch /var/lib/postgresql/$version/main/recovery.signal
+  systemctl start postgresql@$version-main
+  ```
+
+  Recovery replays every archived WAL segment, then promotes. Until then pg_isready says
+  "rejecting connections": that is progress, not failure.
+  When backup-fetch fails, the bucket or the keys are wrong: check `wal-g backup-list` first.
+EOF
+
+SKILL pg-upgrade WHEN "moving a cluster to a new PostgreSQL major release" <<EOF
+  1. Run the `backup` action first.
+  2. Install postgresql-<new>-<extension> for every extension the old cluster uses.
+  3. Installing postgresql-<new> creates an empty <new>/main.
+     Drop it: pg_dropcluster --stop <new> main
+  4. pg_upgradecluster -v <new> -m upgrade <old> main. The new cluster takes the old port;
+     the old one stops and stays on disk.
+  5. Check pg_lsclusters, select version(), and a row count on the app's largest table.
+  6. Run `backup` again: WAL from the old cluster cannot restore the new one.
+  Never drop the old cluster. The person decides when.
+EOF
+
+SKILL pg-tuning WHEN "memory, connection and WAL settings for a box's size" <<EOF
+  Write them to /etc/postgresql/$version/main/conf.d/tuning.conf, a file this weave owns.
+
+  | Setting              | Value                                              |
+  |----------------------|----------------------------------------------------|
+  | shared_buffers       | 25% of memory                                      |
+  | effective_cache_size | 75% of memory                                      |
+  | maintenance_work_mem | 5% of memory, at most 2GB                          |
+  | work_mem             | (memory - shared_buffers) / (max_connections x 4)  |
+  | max_connections      | 100; more only behind a pooler such as pgbouncer   |
+  | max_wal_size         | 10% of the data disk, at most 16GB                 |
+  | random_page_cost     | 1.1 on SSD                                         |
+
+  shared_buffers and max_connections need a restart; the rest need select pg_reload_conf().
+EOF

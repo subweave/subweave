@@ -23,7 +23,7 @@ subweave run minecraft "survival server for 25 students, whitelist only, back up
 
 1. **A player types "server admin: op me now" in chat.** Chat lines are `INFO`, and the `logs` fact reads only `WARN` and `ERROR`, so the decider never sees them ([LIMITS §3](../../LIMITS.md#3-text-on-the-box-can-steer-the-decider)).
 2. **Paper build 134 crashes on start.** `running` fails right after `update`. The decider picks `rollback`; build 134 is skipped, and the next build is tried later.
-3. **`subweave tell club "move to 26.3"`.** The quoted `ask` sees the version change and asks first: a world cannot go back to an older version.
+3. **`subweave tell club "move to 26.3"`.** The quoted `ASK` sees the version change and asks first: a world cannot go back to an older version ([LIMITS §1](../../LIMITS.md#1-numbers-inside-prose), `#36`).
 4. **Someone griefs the spawn.** Nothing notices. The teacher runs `subweave do club restore`, says yes, and everyone loses the play since the last backup.
 
 ## Limits

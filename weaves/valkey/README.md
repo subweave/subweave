@@ -22,13 +22,13 @@ subweave inbox
 | `copied` | a copy under 25 hours old, when `copies` is set | `backup` |
 | `quiet` | decider: no warning lines that need action | `fix` (coder) |
 
-Most goals are code, and most actions are `run` lines: Valkey reports its state in numbers.
+Most goals are code, and most actions are `RUN` steps: Valkey reports its state in numbers.
 
 ## What happens when
 
 1. **A client app leaks connections.** `rejected_connections` grows and `accepting` fails. The decider picks between `raise-clients` and `restart`.
-2. **The decider picks `restart` for a 1.8 GB cache.** `ask before restart if role == "cache" and used > 1073741824` asks first: a cold cache sends every read to the client's database.
-3. **A store with no copies.** `ask if role == "store" and copies == "none"` asks at `run`, before anything is installed.
+2. **The decider picks `restart` for a 1.8 GB cache.** `ASK BEFORE restart IF role == 'cache' AND used > 1073741824` asks first: a cold cache sends every read to the client's database.
+3. **A store with no copies.** `ASK IF role == 'store' AND copies == 'none'` asks at `run`, before anything is installed.
 4. **Monday morning.** `subweave inbox` lists the open questions from all 40 boxes in one place.
 
 ## Limits
@@ -36,4 +36,4 @@ Most goals are code, and most actions are `run` lines: Valkey reports its state 
 - An answer covers one service. `always` on one client's box does not carry to the other 39.
 - No replica. A store loses up to about one second of writes in a crash (`appendfsync everysec`), and up to a day when the box is lost.
 - The Valkey version is Ubuntu's: 7.2 on 24.04. Newer releases need another package source.
-- `room` for a store has no safe action: deleting keys is a `never`. The coder can only report, so the person decides.
+- `room` for a store has no safe action: deleting keys is a `NEVER`. The coder can only report, so the person decides.

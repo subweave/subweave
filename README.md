@@ -13,10 +13,19 @@ check the goals ──► a goal fails ──► the decider picks an action ─
 ```
 
 - **Code** checks numbers, runs commands and enforces named rules.
-- **The decider** ([Jev](https://docs.typesafe.ai), a System One model) turns the request into settings, picks the next action and judges text. Each decision costs about $0.00002.
+- **The decider** ([Jev](https://docs.typesafe.ai), a System One model) turns the request into ARGs, picks the next action and judges text. Each decision costs about $0.00002.
 - **The coder** (DeepSeek) does the open-ended tasks, one gated shell command at a time.
 
-Both models run through [OpenRouter](https://openrouter.ai). The format is in [WEAVEFILE.md](WEAVEFILE.md).
+Both models run through [OpenRouter](https://openrouter.ai). The format is in [WEAVEFILE.md](WEAVEFILE.md): capital keywords, as in a Dockerfile, and one file per service.
+
+```weavefile
+FACT disk  df --output=pcent /var/lib/postgresql | tail -1 | tr -dc 0-9
+GOAL room  EVERY 5m  disk < 85
+
+ACTION free-disk FOR room
+  WHEN "the disk is full of old logs, not of data or WAL"
+  RUN  journalctl --vacuum-size=200M
+```
 
 ## Example weaves
 
@@ -33,4 +42,8 @@ Each weave's README says what it cannot do. [LIMITS.md](LIMITS.md) says what Sub
 
 ## Status
 
-Design. The format and the six weaves are written; the engine is not. The decider is measured on 21 hand-made cases; no weave has run on a box yet.
+Design. The format and the six weaves are written; the engine is not. The decider is measured on 38 hand-made cases; no weave has run on a box yet.
+
+## License
+
+[MIT](LICENSE)

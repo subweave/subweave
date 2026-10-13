@@ -2,60 +2,116 @@
 # so the box keeps working with no uplink and no model.
 #   subweave run store-edge "shop 114, tills 10.0.4.11,10.0.4.12, ship to https://influx.acme.example org acme bucket shops"
 
-weave   store-edge 0.3
-about   "Telegraf in a shop: collects local metrics and forwards them, buffering to disk while the uplink is down"
-needs   ubuntu 24.04, 2 cpu, 4 GB memory, 64 GB disk
-decide  typesafe/jev-1.13
-budget  $1 a month
+ABOUT  "Telegraf in a shop: forwards local metrics, and buffers them to disk while the uplink is down"
+FROM   ubuntu:24.04
+NEEDS  2 CPU, 4 GB RAM, 64 GB DISK
+DECIDE typesafe/jev-1.13
+BUDGET $1/month
 
-setting shop
-  <shop>                              "the shop number"
-setting tills
-  <addresses>                         "the IP addresses of the shop's tills, separated by commas, no spaces"
-setting central
-  <url> org <org> bucket <bucket>     "the central InfluxDB v2 server, its organization and its bucket"
-setting influx_token secret "the token for the central InfluxDB"
+# ── What a request chooses ─────────────────────────────
 
-fact telegraf    = command -v telegraf
-fact configured  = grep -qxF 'SHOP={shop}' /etc/default/telegraf && grep -qxF 'TILLS={addresses}' /etc/default/telegraf && grep -qxF 'INFLUX_URL={url}' /etc/default/telegraf
-fact valid       = set -a && . /etc/default/telegraf && telegraf --config /etc/telegraf/telegraf.conf --config-directory /etc/telegraf/telegraf.d --test > /dev/null 2>&1
-fact up          = systemctl is-active -q telegraf
-fact uplink      = curl -s -o /dev/null -w '%{http_code}' --max-time 5 {url}/ping
-fact buffer      = du -sm /var/lib/telegraf/buffer | cut -f1
-fact disk        = df --output=pcent /var/lib/telegraf | tail -1 | tr -dc 0-9
-fact unreachable = for a in $(echo '{addresses}' | tr ',' ' '); do ping -c1 -W2 $a > /dev/null || echo $a; done | wc -l
-fact logs        tail journalctl -f -u telegraf | grep --line-buffered -E ' [EW]! '
+ARG shop
+    <shop>                           "the shop number"
+ARG tills
+    <addresses>                      "the IP addresses of the shop's tills, separated by commas, no spaces"
+ARG central
+    <url> org <org> bucket <bucket>  "the central InfluxDB v2 server, its organization and its bucket"
 
-goal installed                      telegraf
-goal configured  after installed    configured and valid
-goal running     after configured   up
-goal room        after installed    disk < 90                                             every 10m
-goal draining    after running      uplink != "204" or buffer < 50 or buffer < prev(buffer)   every 15m
-goal tills       after running      unreachable == 0                                      every 5m
-goal quiet       after running      "the new lines in `logs` show nothing that needs a person"   every 30m
+SECRET INFLUX_TOKEN "the token for the central InfluxDB"
 
-action install for installed "install Telegraf from the InfluxData apt repository":
-  run curl -fsSL -o /tmp/influxdata-archive.key https://repos.influxdata.com/influxdata-archive.key
-  run gpg --show-keys --with-fingerprint --with-colons /tmp/influxdata-archive.key 2>&1 | grep -q '^fpr:\+24C975CBA61A024EE1B631787C3D57159FC2F927:$'
-  run gpg --dearmor < /tmp/influxdata-archive.key > /etc/apt/keyrings/influxdata-archive.gpg
-  run echo 'deb [signed-by=/etc/apt/keyrings/influxdata-archive.gpg] https://repos.influxdata.com/debian stable main' > /etc/apt/sources.list.d/influxdata.list
-  run apt-get update && apt-get install -y telegraf
+# ── What the box shows ─────────────────────────────────
 
-action configure for configured "install the weave's Telegraf config with this shop's settings, then restart Telegraf":
-  run install -m 644 {weave}/telegraf.conf /etc/telegraf/telegraf.conf
-  run printf 'SHOP=%s\nTILLS=%s\nINFLUX_URL=%s\nINFLUX_ORG=%s\nINFLUX_BUCKET=%s\nINFLUX_TOKEN=%s\n' '{shop}' '{addresses}' '{url}' '{org}' '{bucket}' "$INFLUX_TOKEN" > /etc/default/telegraf && chmod 600 /etc/default/telegraf
-  run printf '[[inputs.ping]]\n  urls = ["%s"]\n' "$(echo '{addresses}' | sed 's/,/", "/g')" > /etc/telegraf/telegraf.d/tills.conf
-  run systemctl restart telegraf
+FACT telegraf    command -v telegraf
+FACT configured <<EOF
+  grep -qxF "SHOP=$shop" /etc/default/telegraf &&
+  grep -qxF "TILLS=$addresses" /etc/default/telegraf &&
+  grep -qxF "INFLUX_URL=$url" /etc/default/telegraf
+EOF
+FACT valid <<EOF
+  set -a && . /etc/default/telegraf
+  telegraf --test --config /etc/telegraf/telegraf.conf \
+    --config-directory /etc/telegraf/telegraf.d > /dev/null 2>&1
+EOF
+FACT up          systemctl is-active -q telegraf
+FACT uplink      curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$url/ping"
+FACT buffer      du -sm /var/lib/telegraf/buffer | cut -f1
+FACT disk        df --output=pcent /var/lib/telegraf | tail -1 | tr -dc 0-9
+FACT unreachable <<EOF
+  for a in ${addresses//,/ }; do ping -c1 -W2 "$a" > /dev/null || echo "$a"; done | wc -l
+EOF
+FACT logs        FOLLOW journalctl -f -u telegraf | grep --line-buffered -E ' [EW]! '
 
-action restart for running, draining "restart Telegraf":
-  run systemctl restart telegraf
+# ── What must hold ─────────────────────────────────────
 
-action trim for room "delete old journal files and the apt cache; never the metric buffer":
-  run journalctl --vacuum-size=200M
-  run apt-get clean
+GOAL installed                                   telegraf
+GOAL configured  AFTER installed                 configured AND valid
+GOAL running     AFTER configured                up
+GOAL room        AFTER installed   EVERY 10m     disk < 90
+GOAL draining    AFTER running     EVERY 15m     uplink != 204 OR buffer < 50 OR buffer < PREV(buffer)
+GOAL tills       AFTER running     EVERY 5m      unreachable == 0
+GOAL quiet       AFTER running     EVERY 30m \
+     "the new lines in `logs` show nothing that needs a person"
 
 # `tills` and `quiet` have no action: the box cannot fix a till, so it tells the person.
 
-never "delete files in /var/lib/telegraf/buffer"
-never "send metrics anywhere but {url}"
-never "change the shop's network, router or tills"
+# ── What the loop may do ───────────────────────────────
+
+ACTION install FOR installed
+  WHEN "Telegraf is missing"
+  RUN <<EOF
+    curl -fsSL -o /tmp/influxdata-archive.key https://repos.influxdata.com/influxdata-archive.key
+    gpg --show-keys --with-fingerprint --with-colons /tmp/influxdata-archive.key 2>&1 \
+      | grep -q '^fpr:\+24C975CBA61A024EE1B631787C3D57159FC2F927:$'
+    gpg --dearmor < /tmp/influxdata-archive.key > /etc/apt/keyrings/influxdata-archive.gpg
+    echo 'deb [signed-by=/etc/apt/keyrings/influxdata-archive.gpg]' \
+      'https://repos.influxdata.com/debian stable main' > /etc/apt/sources.list.d/influxdata.list
+    apt-get update && apt-get install -y telegraf
+  EOF
+
+ACTION configure FOR configured
+  WHEN "the Telegraf files differ from this shop's ARGs"
+  ADD <<EOF /etc/telegraf/telegraf.conf
+    [global_tags]
+      shop = "${SHOP}"
+
+    [agent]
+      interval = "10s"
+      flush_interval = "10s"
+      metric_buffer_limit = 1000000
+      buffer_strategy = "disk"
+      buffer_directory = "/var/lib/telegraf/buffer"
+
+    [[inputs.cpu]]
+    [[inputs.mem]]
+    [[inputs.disk]]
+      ignore_fs = ["tmpfs", "devtmpfs", "overlay", "squashfs"]
+    [[inputs.net]]
+
+    [[outputs.influxdb_v2]]
+      urls = ["${INFLUX_URL}"]
+      token = "${INFLUX_TOKEN}"
+      organization = "${INFLUX_ORG}"
+      bucket = "${INFLUX_BUCKET}"
+  EOF
+  RUN <<EOF
+    printf 'SHOP=%s\nTILLS=%s\nINFLUX_URL=%s\nINFLUX_ORG=%s\nINFLUX_BUCKET=%s\nINFLUX_TOKEN=%s\n' \
+      "$shop" "$addresses" "$url" "$org" "$bucket" "$INFLUX_TOKEN" > /etc/default/telegraf
+    chmod 600 /etc/default/telegraf
+    printf '[[inputs.ping]]\n  urls = ["%s"]\n' "${addresses//,/\", \"}" > /etc/telegraf/telegraf.d/tills.conf
+    systemctl restart telegraf
+  EOF
+
+ACTION restart FOR running, draining
+  WHEN "Telegraf stopped, or its buffer stopped draining"
+  RUN  systemctl restart telegraf
+
+ACTION trim FOR room
+  WHEN "the disk is full of logs or the apt cache"
+  RUN  journalctl --vacuum-size=200M
+  RUN  apt-get clean
+
+# ── Rules ──────────────────────────────────────────────
+
+NEVER "delete files in /var/lib/telegraf/buffer"
+NEVER "send metrics anywhere but $url"
+NEVER "change the shop's network, router or tills"

@@ -22,14 +22,14 @@ subweave run ethereum "full node holding only 1000 blocks, RPC on the private ne
 
 ## What happens when
 
-1. **The request says "only 1000 blocks".** The decider fills `blocks = 1000`. `ask if blocks < 10064` is code, so the person is asked before the first action ([LIMITS §1](../../LIMITS.md#1-numbers-inside-prose)).
-2. **The request says "and run a validator too".** `never "run a validator or hold staking keys"` refuses the whole request.
-3. **A release notes a database migration.** `current` fails. The quoted `ask` reads the notes, and the person answers before `update` runs.
+1. **The request says "only 1000 blocks".** The decider fills `blocks = 1000`. `ASK IF blocks < 10064` is code, so the person is asked before the first action ([LIMITS §1](../../LIMITS.md#1-numbers-inside-prose)).
+2. **The request says "and run a validator too".** `NEVER "run a validator or hold staking keys"` refuses the whole request.
+3. **A release notes a database migration.** `current` fails. The quoted `ASK` reads the notes, and the person answers before `update` runs.
 4. **The coder tries `ufw allow 8551/tcp`.** The gate refuses it ([§5](../../LIMITS.md#5-gating-shell-commands-depends-on-their-stated-purpose)). If another change gets through and reth listens beyond localhost, `sealed` fails within a minute.
 
 ## Limits
 
 - First sync takes hours to days. `synced` fails the whole time, and the decider answers `wait` every 10 minutes.
-- `needs` asks for 2 TB, which fits `full` and pruned nodes. An `archive` request needs a bigger disk; the daemon checks `needs`, not the setting.
-- A release note that hides a migration gets past the `ask`. `rollback` puts back binaries, not a migrated database.
+- `NEEDS` asks for 2 TB, which fits `full` and pruned nodes. An `archive` request needs a bigger disk; the daemon checks `NEEDS`, not the ARG.
+- A release note that hides a migration gets past the `ASK`. `rollback` puts back binaries, not a migrated database.
 - No validator, no MEV relay, no slashing protection: the weave refuses them.

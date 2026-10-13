@@ -1,74 +1,137 @@
 # One open-weights model behind an OpenAI-compatible API, on one GPU box.
 #   subweave run vllm "serve Qwen/Qwen3-8B to our app servers on the private network"
 
-weave   vllm 0.3
-about   "vLLM serving one open-weights model behind an OpenAI-compatible API"
-needs   ubuntu 24.04, 8 cpu, 1 gpu, 64 GB memory, 500 GB disk
-decide  typesafe/jev-1.13
-code    deepseek/deepseek-v4-flash-0731 then deepseek/deepseek-v4-pro
-budget  $5 a month
+ABOUT  "vLLM serving one open-weights model behind an OpenAI-compatible API"
+FROM   ubuntu:24.04
+NEEDS  8 CPU, 1 GPU, 64 GB RAM, 500 GB DISK
+DECIDE typesafe/jev-1.13
+CODE   deepseek/deepseek-v4-flash-0731 THEN deepseek/deepseek-v4-pro
+BUDGET $5/month
 
-setting model
-  <model>     "a Hugging Face model id, like Qwen/Qwen3-8B"
-setting access = local
-  local       "the API on localhost only"
-  private     "the API on the private network, with an API key"
-setting vllm_api_key secret "the key clients send as a bearer token"       # vLLM reads VLLM_API_KEY
-setting hf_token     secret "a Hugging Face token, for gated models"        # huggingface_hub reads HF_TOKEN
+# ── What a request chooses ─────────────────────────────
 
-fact gpu       = nvidia-smi -L
-fact vllm      = /opt/vllm/bin/vllm --version
-fact up        = curl -sf localhost:8000/health
-fact served    = curl -s localhost:8000/v1/models -H "Authorization: Bearer $VLLM_API_KEY" | jq -r '.data[0].id'
-fact waiting   = curl -s localhost:8000/metrics | awk '/^vllm:num_requests_waiting[{ ]/ {s += $2} END {print s + 0}'
-fact kv        = curl -s localhost:8000/metrics | awk '/^vllm:kv_cache_usage_perc[{ ]/ {s = $2} END {print int(s * 100)}'
-fact preempted = curl -s localhost:8000/metrics | awk '/^vllm:num_preemptions_total[{ ]/ {s += $2} END {print s + 0}'
-fact xid       = journalctl -k --since -10min | grep -c 'NVRM: Xid'
-fact xid_lines = journalctl -k --since -10min | grep 'NVRM: Xid' | tail -5
-fact disk      = df --output=pcent /root/.cache | tail -1 | tr -dc 0-9
-fact logs      tail journalctl -f -u vllm | grep --line-buffered -E 'WARNING|ERROR|Traceback'
+ARG model
+    <model>   "a Hugging Face model id, like Qwen/Qwen3-8B"
+ARG access=local
+    local     "the API on localhost only"
+    private   "the API on the private network, with an API key"
 
-goal driver                         gpu
-goal installed    after driver      vllm
-goal running      after installed   up
-goal serving      after running     served == model
-goal gpu-healthy  after driver      xid == 0                                              every 5m
-goal keeping-up   after running     waiting < 20 and preempted - prev(preempted) < 50     every 5m
-goal room         after installed   disk < 90                                             every 10m
-goal quiet        after running     "the new lines in `logs` show nothing that needs action"   every 10m
+SECRET VLLM_API_KEY "the key that clients send as a bearer token"
+SECRET HF_TOKEN     "a Hugging Face token, for gated models"
 
-action install-driver for driver "install the NVIDIA server driver and reboot; for a GPU box with no driver":
-  run apt-get install -y ubuntu-drivers-common
-  run ubuntu-drivers install --gpgpu
-  run systemctl reboot
+# ── What the box shows ─────────────────────────────────
 
-action install for installed "install vLLM into /opt/vllm and run it as the vllm service":
-  do  "install the latest vLLM release with uv into /opt/vllm; run `vllm serve {model}` on port 8000 as the systemd service vllm; access '{access}'; the service reads VLLM_API_KEY and HF_TOKEN from /etc/vllm/env, mode 600"
+FACT gpu       nvidia-smi -L
+FACT vllm      /opt/vllm/bin/vllm --version
+FACT up        curl -sf localhost:8000/health
+FACT served    curl -s localhost:8000/v1/models -H "Authorization: Bearer $VLLM_API_KEY" \
+                 | jq -r '.data[0].id'
+FACT waiting   curl -s localhost:8000/metrics \
+                 | awk '/^vllm:num_requests_waiting[{ ]/ {s += $2} END {print s + 0}'
+FACT kv        curl -s localhost:8000/metrics \
+                 | awk '/^vllm:kv_cache_usage_perc[{ ]/ {s = $2} END {print int(s * 100)}'
+FACT preempted curl -s localhost:8000/metrics \
+                 | awk '/^vllm:num_preemptions_total[{ ]/ {s += $2} END {print s + 0}'
+FACT xid       journalctl -k --since -10min | grep -c 'NVRM: Xid' || true
+FACT xid_lines journalctl -k --since -10min | grep 'NVRM: Xid' | tail -5 || true
+FACT disk      df --output=pcent /root/.cache | tail -1 | tr -dc 0-9
+FACT logs      FOLLOW journalctl -f -u vllm | grep --line-buffered -E 'WARNING|ERROR|Traceback'
 
-action restart for running, gpu-healthy, keeping-up, quiet "restart the vllm service; fixes a hung engine, a crash, or an application Xid error (13, 31, 43) when the GPU is healthy":
-  run systemctl restart vllm
+# ── What must hold ─────────────────────────────────────
 
-action serve for serving "point the vllm service at {model} and restart it; for a running server that serves another model":
-  do  "change the model in the vllm unit to {model}, keeping the other flags that still fit it, and restart vllm"
+GOAL driver                                    gpu
+GOAL installed    AFTER driver                 vllm
+GOAL running      AFTER installed              up
+GOAL serving      AFTER running                served == model
+GOAL gpu-healthy  AFTER driver     EVERY 5m    xid == 0
+GOAL keeping-up   AFTER running    EVERY 5m    waiting < 20 AND preempted - PREV(preempted) < 50
+GOAL room         AFTER installed  EVERY 10m   disk < 90
+GOAL quiet        AFTER running    EVERY 10m \
+     "the new lines in `logs` show nothing that needs action"
 
-action lower-concurrency for keeping-up "lower --max-num-seqs so fewer requests share the KV cache; for sustained preemptions or a full KV cache":
-  do  "lower --max-num-seqs in the vllm unit by a quarter, restart vllm, and say the new value"
+# ── What the loop may do ───────────────────────────────
 
-action reboot for gpu-healthy, running "reboot the box; for NVIDIA Xid errors after which the GPU stays unusable":
-  run systemctl reboot
+ACTION install-driver FOR driver
+  WHEN "the box has a GPU and no NVIDIA driver"
+  RUN  apt-get install -y ubuntu-drivers-common
+  RUN  ubuntu-drivers install --gpgpu
+  RUN  systemctl reboot
 
-action free-disk for room "remove Hugging Face cache entries for models other than {model}":
-  do  "free space in /root/.cache/huggingface by removing models other than {model}"
+ACTION install FOR installed
+  WHEN "vLLM is missing"
+  DO <<EOF
+    Install the latest vLLM release with uv into /opt/vllm.
+    Run `vllm serve $model` on port 8000 as the systemd service vllm. Access: $access.
+    The service reads VLLM_API_KEY and HF_TOKEN from /etc/vllm/env, mode 600.
+  EOF
 
-action fix "find the cause and fix it, for anything the other actions do not cover":
-  do  "make this hold again: {goal}"
+ACTION restart FOR running, gpu-healthy, keeping-up, quiet
+  WHEN "the engine hung or crashed, or an application Xid error (13, 31, 43) hit a healthy GPU"
+  RUN  systemctl restart vllm
 
-never "serve a model other than {model}"
-never "open port 8000 to the internet"
-ask   before reboot
-ask   before install-driver
-ask   "before changing the NVIDIA driver or CUDA version"
-ask   "before a vLLM upgrade"
+ACTION serve FOR serving
+  WHEN "the server runs, but serves a model other than $model"
+  DO   "change the model in the vllm unit to $model, keeping the other flags \
+        that still fit it, and restart vllm"
 
-skill vllm-serving  "vllm serve flags, memory and concurrency settings, and its metrics"
-skill nvidia-xid    "what NVIDIA Xid error numbers mean, and which ones software cannot fix"
+ACTION lower-concurrency FOR keeping-up
+  WHEN "requests are preempted for long, or the KV cache is full"
+  DO   "lower --max-num-seqs in the vllm unit by a quarter, restart vllm, and say the new value"
+
+ACTION reboot FOR gpu-healthy, running
+  WHEN "an NVIDIA Xid error left the GPU unusable"
+  RUN  systemctl reboot
+
+ACTION free-disk FOR room
+  WHEN "the model cache holds models other than $model"
+  DO   "free space in /root/.cache/huggingface by removing models other than $model"
+
+ACTION fix
+  WHEN "no other action fits, or the fitting ones already failed"
+  DO   "make the failing goal hold again"
+
+# ── Rules ──────────────────────────────────────────────
+
+NEVER "serve a model other than $model"
+NEVER "open port 8000 to the internet"
+ASK   BEFORE reboot
+ASK   BEFORE install-driver
+ASK   "before changing the NVIDIA driver or CUDA version"
+ASK   "before a vLLM upgrade"
+
+# ── What the coder reads ───────────────────────────────
+
+SKILL vllm-serving WHEN "vllm serve flags, memory and concurrency settings, and its metrics" <<EOF
+      /opt/vllm/bin/vllm serve $model --host <127.0.0.1 or the private address> --port 8000 \
+        --gpu-memory-utilization 0.90 --max-model-len <fits the KV cache> --max-num-seqs <n>
+
+  VLLM_API_KEY turns on bearer auth for /v1, /v2 and /inference. /health and /metrics
+  stay open: keep port 8000 off the internet.
+  Startup logs print the KV cache size and the concurrency for --max-model-len.
+  Out of memory at startup: lower --max-model-len first, then --gpu-memory-utilization.
+
+  | metric                      | means                                    |
+  |-----------------------------|------------------------------------------|
+  | vllm:num_requests_running   | requests in the current batch            |
+  | vllm:num_requests_waiting   | requests queued for a slot               |
+  | vllm:kv_cache_usage_perc    | KV cache in use; 1 is full               |
+  | vllm:num_preemptions_total  | requests evicted and recomputed          |
+
+  A queue with an empty KV cache: raise --max-num-seqs. Preemptions with a full one: lower it.
+EOF
+
+SKILL nvidia-xid WHEN "what NVIDIA Xid errors mean, and which ones software cannot fix" <<EOF
+  The kernel line `NVRM: Xid (PCI:0000:3b:00): 79, ...` carries the Xid after the address.
+
+  | Xid        | usual cause                          | software fix                    |
+  |------------|--------------------------------------|---------------------------------|
+  | 13, 31, 43 | the application                      | restart vllm                    |
+  | 45         | cleanup after a killed process       | none needed                     |
+  | 48, 94, 95 | uncorrectable ECC memory error       | reboot; again: replace the GPU  |
+  | 63, 64     | page retirement or row remapping     | reboot to apply                 |
+  | 74         | NVLink error                         | reboot; again: hardware         |
+  | 79         | the GPU fell off the bus             | reboot; again: hardware         |
+
+  After a reboot: nvidia-smi -q -d ECC,PAGE_RETIREMENT,ROW_REMAPPER.
+  Hardware errors go to the person, with the Xid lines: only the provider can replace a GPU.
+EOF

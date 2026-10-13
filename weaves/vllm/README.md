@@ -22,7 +22,7 @@ subweave run vllm "serve Qwen/Qwen3-8B to our app servers on the private network
 ## What happens when
 
 1. **Traffic doubles at 09:00.** Preemptions climb and `keeping-up` fails. The decider picks between `lower-concurrency` and `restart` from the KV cache use and the logs.
-2. **Xid 79 at night.** `gpu-healthy` fails. The `nvidia-xid` skill says reboot, and `ask before reboot` asks the person first.
+2. **Xid 79 at night.** `gpu-healthy` fails. The `nvidia-xid` skill says reboot, and `ASK BEFORE reboot` asks the person first.
 3. **`subweave tell gpu1 "serve Qwen/Qwen3-14B instead"`.** `serving` fails, because `/v1/models` still names the old model, and `serve` moves the service to the new one.
 
 ## Limits

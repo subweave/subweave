@@ -1,78 +1,117 @@
 # Valkey for one client app: a cache or a small store, from Ubuntu's packages.
 #   subweave run valkey "cache for acme-shop, 2048 MB, private network" --on root@acme-cache --name acme-cache
 
-weave   valkey 0.3
-about   "Valkey as a cache or a small store, from Ubuntu's packages"
-needs   ubuntu 24.04, 1 cpu, 2 GB memory, 20 GB disk
-decide  typesafe/jev-1.13
-code    deepseek/deepseek-v4-flash-0731
-budget  $2 a month
+ABOUT  "Valkey as a cache or a small store, from Ubuntu's packages"
+FROM   ubuntu:24.04
+NEEDS  1 CPU, 2 GB RAM, 20 GB DISK
+DECIDE typesafe/jev-1.13
+CODE   deepseek/deepseek-v4-flash-0731
+BUDGET $2/month
 
-setting role = cache
-  cache          "a cache: no persistence; evicts the least recently used keys when full"
-  store          "a store: append-only file; never evicts; refuses writes when full"
-setting memory = 1024
-  <memory>       "memory for data, in megabytes"
-setting access = local
-  local          "connections from this box only"
-  private        "connections from the private network, with a password"
-setting copies = none
-  none           "no copies off the box"
-  <copies>       "an scp destination for nightly copies, like backup@10.0.0.9:/srv/valkey/acme"
-setting valkeycli_auth secret "the password clients send with AUTH"    # valkey-cli reads VALKEYCLI_AUTH
+# ── What a request chooses ─────────────────────────────
 
-fact valkey     = command -v valkey-server
-fact up         = valkey-cli ping | grep -qx PONG
-fact max        = valkey-cli config get maxmemory | tail -1
-fact policy     = valkey-cli config get maxmemory-policy | tail -1
-fact aof        = valkey-cli config get appendonly | tail -1
-fact auth_on    = [ -n "$(valkey-cli config get requirepass | tail -1)" ]
-fact local_only = [ "$(ss -ltnH 'sport = :6379' | awk '$4 !~ /^(127\.0\.0\.1|\[::1\]):/' | wc -l)" = 0 ]
-fact used       = valkey-cli info memory | awk -F: '/^used_memory:/ {print $2}'
-fact aof_ok     = valkey-cli info persistence | grep -q '^aof_last_write_status:ok'
-fact rejected   = valkey-cli info stats | awk -F: '/^rejected_connections:/ {print $2}'
-fact clients    = valkey-cli info clients | awk -F: '/^connected_clients:/ {print $2}'
-fact logs       tail tail -F /var/log/valkey/valkey-server.log | grep --line-buffered ' # '
+ARG role=cache
+    cache      "a cache: no persistence; evicts the least recently used keys when full"
+    store      "a store: append-only file; never evicts; refuses writes when full"
+ARG memory=1024
+    <memory>   "memory for data, in megabytes"
+ARG access=local
+    local      "connections from this box only"
+    private    "connections from the private network, with a password"
+ARG copies=none
+    none       "no copies off the box"
+    <copies>   "an scp destination for nightly copies, like backup@10.0.0.9:/srv/valkey/acme"
 
-goal installed                      valkey
-goal running      after installed   up
-goal sized        after running     max == memory * 1048576 and ((role == "cache" and policy == "allkeys-lru" and aof == "no") or (role == "store" and policy == "noeviction" and aof == "yes"))
-goal guarded      after running     (access == "local" and local_only) or (access == "private" and auth_on)
-goal room         after running     role == "cache" or used < max * 0.9           every 5m
-goal persisted    after running     role == "cache" or aof_ok                     every 5m
-goal accepting    after running     rejected == prev(rejected)                    every 5m
-goal copied       after running     copies == "none" or since(backup) < 25h
-goal quiet        after running     "the new lines in `logs` show nothing that needs action"   every 15m
+# valkey-cli reads VALKEYCLI_AUTH
+SECRET VALKEYCLI_AUTH "the password that clients send with AUTH"
 
-action install for installed "install valkey-server from Ubuntu's packages":
-  run apt-get install -y valkey-server
+# ── What the box shows ─────────────────────────────────
 
-action size for sized "set memory, eviction and persistence for the role, and save them to valkey.conf":
-  run valkey-cli config set maxmemory {memory}mb
-  run if [ {role} = cache ]; then valkey-cli config set maxmemory-policy allkeys-lru appendonly no; else valkey-cli config set maxmemory-policy noeviction appendonly yes; fi
-  run valkey-cli config rewrite
+FACT valkey     command -v valkey-server
+FACT up         valkey-cli ping | grep -qx PONG
+FACT max        valkey-cli config get maxmemory | tail -1
+FACT policy     valkey-cli config get maxmemory-policy | tail -1
+FACT aof        valkey-cli config get appendonly | tail -1
+FACT auth_on    [ -n "$(valkey-cli config get requirepass | tail -1)" ]
+FACT local_only ! ss -ltnH 'sport = :6379' | awk '$4 !~ /^(127\.0\.0\.1|\[::1\]):/' | grep -q .
+FACT used       valkey-cli info memory | awk -F: '/^used_memory:/ {print $2}'
+FACT aof_ok     valkey-cli info persistence | grep -q '^aof_last_write_status:ok'
+FACT rejected   valkey-cli info stats | awk -F: '/^rejected_connections:/ {print $2}'
+FACT logs       FOLLOW tail -F /var/log/valkey/valkey-server.log | grep --line-buffered ' # '
 
-action guard for guarded "set the password and the listening addresses for access '{access}'":
-  do  "access '{access}': local means valkey listens on 127.0.0.1 and ::1 only; private means it also listens on this box's private address and requires the password in $VALKEYCLI_AUTH; save with CONFIG REWRITE"
+# ── What must hold ─────────────────────────────────────
 
-action restart for running, accepting "restart valkey-server; the fix when it crashed or hangs":
-  run systemctl restart valkey-server
+GOAL installed                                valkey
+GOAL running    AFTER installed               up
+GOAL sized      AFTER running \
+     max == memory * 1048576 AND \
+     ((role == 'cache' AND policy == 'allkeys-lru' AND aof == 'no') OR \
+      (role == 'store' AND policy == 'noeviction'  AND aof == 'yes'))
+GOAL guarded    AFTER running \
+     (access == 'local' AND local_only) OR (access == 'private' AND auth_on)
+GOAL room       AFTER running   EVERY 5m      role == 'cache' OR used < max * 0.9
+GOAL persisted  AFTER running   EVERY 5m      role == 'cache' OR aof_ok
+GOAL accepting  AFTER running   EVERY 5m      rejected == PREV(rejected)
+GOAL copied     AFTER running                 copies == 'none' OR SINCE(backup) < 25h
+GOAL quiet      AFTER running   EVERY 15m \
+     "the new lines in `logs` show nothing that needs action"
 
-action raise-clients for accepting "raise maxclients by half; for rejected connections while memory has room":
-  run valkey-cli config set maxclients $(( $(valkey-cli config get maxclients | tail -1) * 3 / 2 )) && valkey-cli config rewrite
+# ── What the loop may do ───────────────────────────────
 
-action rewrite-aof for persisted "rewrite the append-only file; for AOF write errors after disk space came back":
-  run valkey-cli bgrewriteaof
+ACTION install FOR installed
+  WHEN "valkey-server is missing"
+  RUN  apt-get install -y valkey-server
 
-action backup for copied "copy a fresh RDB snapshot to {copies}":
-  run f=/var/backups/valkey-$(date +%F).rdb && valkey-cli --rdb $f && scp -q $f {copies}/
-  run find /var/backups -name 'valkey-*.rdb' -mtime +3 -delete
+ACTION size FOR sized
+  WHEN "memory, eviction or persistence differ from the role"
+  RUN <<EOF
+    valkey-cli config set maxmemory ${memory}mb
+    if [ "$role" = cache ]; then
+      valkey-cli config set maxmemory-policy allkeys-lru appendonly no
+    else
+      valkey-cli config set maxmemory-policy noeviction appendonly yes
+    fi
+    valkey-cli config rewrite
+  EOF
 
-action fix "find the cause and fix it, for anything the other actions do not cover":
-  do  "make this hold again without deleting keys: {goal}"
+ACTION guard FOR guarded
+  WHEN "the password or the listening addresses differ from access '$access'"
+  DO <<EOF
+    Access is '$access'.
+    local: valkey listens on 127.0.0.1 and ::1 only.
+    private: it also listens on this box's private address,
+    and requires the password in $VALKEYCLI_AUTH.
+    Save with CONFIG REWRITE.
+  EOF
 
-never "flush or delete keys"
-never "turn off the password"
-never "open port 6379 to the internet"
-ask   before restart if role == "cache" and used > 1073741824     # a cold cache sends every read to the client's database
-ask   if role == "store" and copies == "none"
+ACTION restart FOR running, accepting
+  WHEN "valkey-server crashed or hangs"
+  RUN  systemctl restart valkey-server
+
+ACTION raise-clients FOR accepting
+  WHEN "connections are rejected while memory has room"
+  RUN  n=$(valkey-cli config get maxclients | tail -1) && \
+       valkey-cli config set maxclients $(( n * 3 / 2 ))
+  RUN  valkey-cli config rewrite
+
+ACTION rewrite-aof FOR persisted
+  WHEN "AOF writes failed, and disk space came back"
+  RUN  valkey-cli bgrewriteaof
+
+ACTION backup FOR copied
+  WHEN "the last copy is older than a day"
+  RUN  f=/var/backups/valkey-$(date +%F).rdb && valkey-cli --rdb "$f" && scp -q "$f" "$copies/"
+  RUN  find /var/backups -name 'valkey-*.rdb' -mtime +3 -delete
+
+ACTION fix
+  WHEN "no other action fits, or the fitting ones already failed"
+  DO   "make the failing goal hold again without deleting keys"
+
+# ── Rules ──────────────────────────────────────────────
+
+NEVER "flush or delete keys"
+NEVER "turn off the password"
+NEVER "open port 6379 to the internet"
+# A cold cache sends every read to the client's database.
+ASK   BEFORE restart IF role == 'cache' AND used > 1073741824
+ASK   IF role == 'store' AND copies == 'none'
