@@ -25,7 +25,7 @@ The run picks both models; a Weavefile only hints. One [OpenRouter](https://open
 
 The format is in [WEAVEFILE.md](WEAVEFILE.md): capital keywords, as in a Dockerfile, and one file per service. A weave says what, and keeps commands for when the exact command is the knowledge:
 
-```weavefile
+```Dockerfile
 ARG bucket  SHOULD "an S3 URL for base backups and WAL, like s3://acme-pg/db1"
 
 FACT disk  "percent used of the filesystem that holds /var/lib/postgresql, a number"
@@ -38,12 +38,12 @@ ACTION free-disk FOR room WITHIN 10m
 
 `subweave plan` checks a request before anything runs, and shows each finding as an error, an ask, a warning or info:
 
-```
+```bash
 $ subweave plan postgres "postgres 18, private network, backups to acme-pg, keep 14"
 
-error    bucket    `acme-pg` is not an S3 URL for base backups and WAL, like s3://acme-pg/db1   0.04
-info     version   18   0.73
-info     access    private: connections from the private network, with a password and TLS   0.95
+# error    bucket    `acme-pg` is not an S3 URL for base backups and WAL, like s3://acme-pg/db1   0.04
+# info     version   18   0.73
+# info     access    private: connections from the private network, with a password and TLS   0.95
 ```
 
 ## Examples
