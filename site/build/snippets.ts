@@ -12,12 +12,14 @@ subweave channel add slack                         # an incoming-webhook URL, fr
 subweave channel add email ops@acme.dev            # an SMTP URL, from stdin
 subweave channel add webhook https://ops.acme.dev/subweave
 subweave channel add heartbeat https://hc-ping.com/<uuid>`,
-  models: `subweave key openrouter                  # one key serves both models
-subweave run postgres "postgres 18"
-
-subweave provider add gpu1 http://10.0.0.7:8000/v1     # a vLLM box; the protocol defaults to openai
-subweave run postgres "postgres 18" --code Qwen/Qwen3-Coder-30B-A3B-Instruct@gpu1`,
   first: `subweave key openrouter
 subweave plan postgres "postgres 18, private network, backups to s3://acme-pg/db1"
 subweave run postgres "postgres 18, private network, backups to s3://acme-pg/db1" --on root@db1`,
 };
+
+// A Dockerfile as written in August 2024, for "What about costs?": postgres:16.4 was the
+// newest image, and wal-g v3.0.3 the newest release with this file name.
+export const DOCKERFILE = `FROM postgres:16.4-bookworm
+ARG WALG=https://github.com/wal-g/wal-g/releases/download/v3.0.3
+ADD $WALG/wal-g-pg-ubuntu-20.04-amd64.tar.gz /tmp/wal-g.tgz
+RUN tar -xzf /tmp/wal-g.tgz -C /usr/local/bin`;

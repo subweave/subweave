@@ -33,6 +33,16 @@ export function Section({
   );
 }
 
+// A numbered step above its commands: "1 Install the daemon".
+export function Step({ n, children }: { n: number; children: ReactNode }) {
+  return (
+    <p className="step">
+      <span className="step-n">{n}</span>
+      {children}
+    </p>
+  );
+}
+
 // One shell command, coloured at build time, with a copy button.
 export function Command({ name, label }: { name: string; label: string }) {
   const [copied, setCopied] = useState(false);

@@ -4,12 +4,12 @@ import { REPO } from "./links";
 import { Architecture } from "./sections/Architecture";
 import { Catalog } from "./sections/Catalog";
 import { Channels } from "./sections/Channels";
+import { Costs } from "./sections/Costs";
 import { Graph } from "./sections/Graph";
 import { Idea } from "./sections/Idea";
 import { Install } from "./sections/Install";
 import { Learned } from "./sections/Learned";
 import { Loop } from "./sections/Loop";
-import { Models } from "./sections/Models";
 import { Requests } from "./sections/Requests";
 import { Review } from "./sections/Review";
 import { Weavefile } from "./sections/Weavefile";
@@ -29,7 +29,7 @@ export function App() {
     (n: number) => <Channels key="channels" n={n} />,
     (n: number) => <Catalog key="weaves" n={n} onRead={setWeave} />,
     (n: number) => <Review key="review" n={n} />,
-    (n: number) => <Models key="models" n={n} />,
+    (n: number) => <Costs key="costs" n={n} />,
     (n: number) => <Install key="install" n={n} />,
   ];
 

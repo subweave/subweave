@@ -1,14 +1,15 @@
 // Colours the page's code at build time: Weavefiles with the repo's TextMate grammar
-// (editors/weavefile.tmLanguage.json), shell and JSON with Shiki's own grammars.
+// (editors/weavefile.tmLanguage.json), shell, JSON and Dockerfile with Shiki's own grammars.
 // The theme names roles; build output is classes (styles.css colours them for
 // light and dark). Text for a model keeps its own colour, apart from code.
 import { readFileSync } from "node:fs";
 import { createHighlighterCore, type LanguageRegistration, type ThemeRegistration } from "shiki/core";
 import { createOnigurumaEngine } from "shiki/engine/oniguruma";
+import dockerfile from "shiki/langs/dockerfile.mjs";
 import json from "shiki/langs/json.mjs";
 import shellscript from "shiki/langs/shellscript.mjs";
 
-export type Lang = "weavefile" | "shellscript" | "json";
+export type Lang = "weavefile" | "shellscript" | "json" | "dockerfile";
 
 const role = (name: string) => `var(--w-${name})`;
 
@@ -39,6 +40,8 @@ const THEME: ThemeRegistration = {
     { scope: ["support.type.property-name.json"], settings: { foreground: role("name") } },
     { scope: ["string.quoted.double.json"], settings: { foreground: role("model") } },
     { scope: ["constant.numeric.json"], settings: { foreground: role("keyword") } },
+    // Dockerfile: instructions as Weavefile keywords, for the side-by-side.
+    { scope: ["keyword.other.special-method.dockerfile"], settings: { foreground: role("keyword"), fontStyle: "bold" } },
   ],
 };
 
@@ -52,7 +55,7 @@ export async function highlight(
   const grammar = JSON.parse(readFileSync(grammarPath, "utf8")) as LanguageRegistration;
   const highlighter = await createHighlighterCore({
     themes: [THEME],
-    langs: [shellscript, json, { ...grammar, name: "weavefile" }],
+    langs: [shellscript, json, dockerfile, { ...grammar, name: "weavefile" }],
     engine: createOnigurumaEngine(import("shiki/wasm")),
   });
   const out: Record<string, string> = {};

@@ -329,9 +329,42 @@ code.kw {
   margin-bottom: 18px;
 }
 
+.hero-sub {
+  margin-top: 20px;
+  max-width: 32ch;
+  font-size: clamp(18px, 1.9vw, 23px);
+  line-height: 1.35;
+  font-weight: 520;
+  color: var(--accent);
+}
+
 .hero-commands {
   display: grid;
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.step {
+  display: flex;
+  align-items: center;
   gap: 8px;
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 560;
+  color: var(--ink);
+}
+
+.step-n {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--bg);
+  font: 600 11px/1 var(--mono);
 }
 
 .hero-links {
@@ -687,6 +720,17 @@ code.kw {
   fill: var(--model);
 }
 
+.station .station-says {
+  font-family: var(--sans);
+  font-size: 12.5px;
+  font-weight: 560;
+  fill: var(--ink);
+}
+
+.station-model .station-says {
+  fill: var(--model);
+}
+
 .ring-goal {
   font-family: var(--mono);
   font-size: 15px;
@@ -716,7 +760,7 @@ code.kw {
   }
   .loop-card {
     display: grid;
-    grid-template-columns: 120px minmax(0, 1fr);
+    grid-template-columns: 172px minmax(0, 1fr);
     gap: 20px;
     align-items: center;
     text-align: left;
@@ -2084,70 +2128,130 @@ code.kw {
   }
 }
 
-/* ── Models ────────────────────────────────────────── */
+/* ── Costs ─────────────────────────────────────────── */
 
-.roles {
+.cost-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 24px;
+  margin: 0 0 clamp(48px, 6vw, 72px);
+  padding: 0;
+  list-style: none;
 }
 
-.role {
+.cost-card {
   padding-top: 20px;
   border-top: 2px solid var(--ink);
 }
 
-.role-model {
+.cost-card:first-child {
   border-top-color: var(--model);
 }
 
-.role-name {
-  font-family: var(--mono);
-  font-size: 12px;
-  letter-spacing: 0.06em;
+.cost-figure {
+  font-size: clamp(36px, 4.4vw, 52px);
+  font-weight: 620;
+  line-height: 1;
+  letter-spacing: -0.04em;
+}
+
+.cost-card:first-child .cost-figure {
+  color: var(--model);
+}
+
+.cost-note {
+  margin-top: 8px;
+  font: 13px/1.4 var(--mono);
+  color: var(--muted);
+}
+
+.cost-card h3 {
+  margin: 18px 0 6px;
+  font-size: 19px;
+  font-weight: 600;
+}
+
+.cost-card p:last-child {
+  max-width: 52ch;
+  color: var(--ink-2);
+}
+
+.stale-heading {
+  margin: 0 0 20px;
+  font: 500 13px/1.4 var(--mono);
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted);
 }
 
-.role h3 {
-  margin: 6px 0 4px;
-  font-size: 19px;
+.stale {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+}
+
+.stale-side {
+  min-width: 0;
+  margin: 0;
+}
+
+/* Long lines wrap with a hanging indent, so both files read without scrolling. */
+.stale-side .code-block .line {
+  display: block;
+  padding-left: 4ch;
+  text-indent: -4ch;
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-.role h3 code {
-  font-size: 0.92em;
-  font-weight: 500;
+.stale-side figcaption {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  font: 500 13px/1.4 var(--mono);
+  color: var(--ink);
 }
 
-.role-model h3 {
-  color: var(--model);
-}
-
-.figures {
-  margin-top: 14px;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  border-top: 1px solid var(--rule);
-}
-
-.figures div {
-  padding: 12px 0;
-}
-
-.figures dt {
-  font-size: 13px;
+.stale-tag {
   color: var(--muted);
 }
 
-.figures dd {
-  font-size: 20px;
-  font-weight: 560;
-  letter-spacing: -0.02em;
+.stale-side ul {
+  display: grid;
+  gap: 6px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 15px;
+  color: var(--ink-2);
 }
 
-@media (max-width: 760px) {
-  .roles {
+.stale-side li {
+  position: relative;
+  padding-left: 22px;
+}
+
+.stale-side li::before {
+  position: absolute;
+  left: 0;
+  font-weight: 700;
+}
+
+/* Failing is ink, as everywhere on the page; holding is the accent. */
+.is-pinned li::before {
+  content: "✕";
+  color: var(--ink);
+}
+
+.is-intent li::before {
+  content: "✓";
+  color: var(--accent);
+}
+
+@media (max-width: 860px) {
+  .cost-grid,
+  .stale {
     grid-template-columns: minmax(0, 1fr);
     gap: 36px;
   }

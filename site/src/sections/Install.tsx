@@ -1,5 +1,5 @@
 import { Code } from "../components/Code";
-import { Command, Section } from "../components/Section";
+import { Command, Section, Step } from "../components/Section";
 import { REPO } from "../links";
 
 export function Install({ n }: { n: number }) {
@@ -7,8 +7,10 @@ export function Install({ n }: { n: number }) {
     <Section id="install" n={n} kicker="Install" title="One binary: the CLI and the daemon.">
       <div className="install">
         <div className="install-main">
-          <Command name="install" label="Install Subweave on Linux" />
-          <Code name="sh:first" label="First commands" className="shell" />
+          <Step n={1}>Install the daemon</Step>
+          <Command name="install" label="Install the Subweave daemon on Linux" />
+          <Step n={2}>Run a weave</Step>
+          <Code name="sh:first" label="Add a key, plan a request, run it" className="shell" />
         </div>
         <div className="install-links">
           <a className="button" href={REPO}>

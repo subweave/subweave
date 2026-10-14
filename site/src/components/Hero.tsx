@@ -4,7 +4,7 @@ import { goalRows } from "../weave/parse";
 import { useReducedMotion } from "../motion";
 import { REPO } from "../links";
 import { Code } from "./Code";
-import { Command } from "./Section";
+import { Command, Step } from "./Section";
 
 type State = "pending" | "held" | "fail" | "wait";
 
@@ -123,19 +123,29 @@ export function Hero() {
     <header className="hero" id="top">
       <div className="wrap">
         <div className="hero-copy">
-          <h1>
-            DevOps
-            <br />
-            in a box.
-          </h1>
+          <div className="hero-title">
+            <h1>
+              DevOps
+              <br />
+              in a box...
+            </h1>
+            <p className="hero-sub">Like Docker containers, but powered by LLMs and decision models.</p>
+          </div>
           <div className="hero-side">
             <p className="hero-line">
-              Write what one service must keep true. Subweave installs it on your Linux box and keeps it true.
+              Write a runbook for a service in human language. Subweave installs it on your Linux box and maintains it
+              indefinitely.
             </p>
-            <div className="hero-commands">
-              <Command name="install" label="Install Subweave on Linux" />
-              <Command name="run" label="Run the postgres weave" />
-            </div>
+            <ol className="hero-commands">
+              <li>
+                <Step n={1}>Install the daemon</Step>
+                <Command name="install" label="Install the Subweave daemon on Linux" />
+              </li>
+              <li>
+                <Step n={2}>Run a weave</Step>
+                <Command name="run" label="Run the postgres weave" />
+              </li>
+            </ol>
             <p className="hero-links">
               Linux, open source, MIT · <a href={REPO}>GitHub</a> · <a href="#weavefile">Six weaves</a>
             </p>

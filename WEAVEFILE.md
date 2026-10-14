@@ -392,7 +392,7 @@ A weave says what; each box learns how, once, and then runs code.
 | `FACT disk "percent used of …, a number"` | one command, written by the coder | at every check, as code |
 | `DO "delete compressed PostgreSQL logs older than 7 days …"` | the commands of the task that passed | the next time the decider picks this action for this goal |
 
-- **A quoted fact.** The coder writes a command. The decider asks whether it changes anything on the box; at 0.5 or more, the coder writes again. Code runs it and checks the form: a fact compared with a number must print a number.
+- **A quoted fact.** The first check that reads it has the coder write a command. The decider asks whether it changes anything on the box; at 0.5 or more, the coder writes again. Code runs it and checks the form: a fact compared with a number must print a number. A repair shows the models only facts already learned, so a first install waits on no fact its goals do not read yet.
 - **A `DO` step.** When the goal holds after the task, the coder's `done` names the commands that made the fix. The daemon keeps those that exited 0, in order, under the action and the failing goal.
 - **Reuse.** The decider still picks the action by its `WHEN`. The learned steps then run first, in code, through the code rules. When the goal does not hold `WITHIN` its time, the daemon drops them and calls the coder, with their output.
 - A learned command is kept for its exact text after `$name` replacement. A changed `ARG` or a new weave version makes a new one.
@@ -407,7 +407,7 @@ A `DO` task, when no learned steps or recipe made the goal hold:
 
 1. The decider picks the skills.
 2. The coder gets the task, the failing goal, the ARGs, the rules, the facts and the picked skills, and one tool: `shell`.
-3. The coder sends each command with its purpose. The decider gates both against `NEVER` and `ASK`, then the box runs the command.
+3. The coder sends each command with its purpose. The decider asks, for each `NEVER` and `ASK`, whether running the command is a case of it; then the box runs the command.
 4. After a failed command, the decider sorts the error into `missing package`, `permission`, `network`, `config` or `other`. The coder gets that answer with the output.
 5. The coder says `done`, with the commands that made the fix and one line on the cause. The daemon checks the task's goal again with fresh facts; when it holds, the task passed.
 6. After two failed checks, the `THEN` model takes over. After 40 commands without a pass, the task failed.
@@ -604,6 +604,7 @@ brew install subweave                            # macOS: CLI only
 | `version` | this binary's version |
 
 - `run` takes `--on <host>`, `--name <service>`, `--decide <model>`, `--code <model>` and `--yes`. The name defaults to the weave's name.
+- `run --on` sends the box each `SECRET` set in this shell's environment; the box asks for the others.
 - `tell` takes `--decide` and `--code` too, with or without a request.
 - The CLI remembers which box runs each service, so later commands take the name alone.
 - A weave is a local directory, or a name with an optional tag, as in Docker.

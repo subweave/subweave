@@ -157,8 +157,8 @@ function Diagram({ layout, className }: { layout: Layout; className: string }) {
 function Chips({ items, note }: { items: string[]; note?: string }) {
   return (
     <div className="why-chips">
-      {items.map((c) => (
-        <span key={c} className="why-chip">
+      {items.map((c, i) => (
+        <span key={i} className="why-chip">
           {c}
         </span>
       ))}
