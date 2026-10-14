@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type Line } from "../api";
 import { TaskComposer } from "../components/act";
-import { EpisodeCard, Row } from "../components/rows";
+import { EpisodeRow, StepRow } from "../components/rows";
 import { ErrorLine, errorText, Skeleton } from "../components/ui";
 import { useNow } from "../format";
 import { useJournal, useLive } from "../live";
-import { episodes, KIND_CHIPS, routineChecks } from "../model";
+import { KIND_CHIPS, routineChecks, timeline } from "../model";
 import type { ServiceProps } from "./ServiceView";
 
 const PAGE = 200;
 
-export function Activity({ service, detail }: ServiceProps) {
+export function Activity({ service, detail, status }: ServiceProps) {
   const now = useNow(1000);
   const live = useLive();
   const [off, setOff] = useState<Set<string>>(new Set());
@@ -48,7 +48,7 @@ export function Activity({ service, detail }: ServiceProps) {
       setMore(false);
       return;
     }
-    api.journal(service, { ...filter, limit: PAGE }).then(
+    api.journal(service, { ...filter, limit: PAGE, whole: true }).then(
       (r) => {
         if (gen.current !== mine) return;
         setLines(r.lines);
@@ -63,7 +63,7 @@ export function Activity({ service, detail }: ServiceProps) {
     const mine = gen.current;
     setLoadingMore(true);
     api
-      .journal(service, { ...filter, limit: PAGE, before: lines[lines.length - 1].i })
+      .journal(service, { ...filter, limit: PAGE, before: lines[lines.length - 1].i, whole: true })
       .then(
         (r) => {
           if (gen.current !== mine) return;
@@ -94,11 +94,14 @@ export function Activity({ service, detail }: ServiceProps) {
     [kinds, goal, q],
   );
 
+  // A live line joins its episode when the episode is on the page, whatever the filter.
+  const shown = useRef(lines);
+  shown.current = lines;
   useJournal(
     service,
     useCallback(
       (_s: string, l: Line) => {
-        if (!matches(l)) return;
+        if (!matches(l) && !(l.ep && shown.current?.some((x) => x.ep === l.ep))) return;
         if (paused) setHeld((h) => [l, ...h]);
         else setLines((ls) => (ls && !ls.some((x) => x.i === l.i) ? [l, ...ls] : ls));
       },
@@ -116,8 +119,9 @@ export function Activity({ service, detail }: ServiceProps) {
   }
 
   const hidden = useMemo(() => (routine || !lines ? new Set<number>() : routineChecks(lines)), [lines, routine]);
-  const items = useMemo(() => (lines ? episodes(lines) : []), [lines]);
-  const visible = items.filter((it) => (it.type === "line" ? !hidden.has(it.line.i) : true));
+  const running = status?.repair ?? null;
+  const items = useMemo(() => (lines ? timeline(lines, running) : []), [lines, running]);
+  const visible = items.filter((it) => (it.type === "step" ? !hidden.has(it.step.line.i) : it.steps.some((s) => !hidden.has(s.line.i))));
   const routineCount = hidden.size;
 
   const toggle = (label: string) =>
@@ -174,7 +178,7 @@ export function Activity({ service, detail }: ServiceProps) {
       {lines && visible.length === 0 && <p className="empty">{lines.length ? "Only routine checks here. Show them with the switch above." : "No lines match."}</p>}
       <ol className="rows rows-activity">
         {visible.map((it) =>
-          it.type === "line" ? <Row key={it.line.i} line={it.line} now={now} /> : <EpisodeCard key={it.key} ep={it} now={now} hidden={hidden} />,
+          it.type === "step" ? <StepRow key={it.step.line.i} step={it.step} now={now} /> : <EpisodeRow key={it.key} ep={it} now={now} hidden={hidden} />,
         )}
       </ol>
       <div ref={sentinel} className="sentinel">
