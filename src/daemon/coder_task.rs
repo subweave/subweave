@@ -173,7 +173,9 @@ pub(crate) async fn do_task(
     if ctx.coder.is_none() {
         return DoResult::Failed(format!("{}: no coder for the task", work.action));
     }
-    session(ctx, work, &task, &skills, prior, rules_ok).await
+    // No recipe ran: the facts just read still hold for the first coder model.
+    let fresh = ran.is_empty().then_some(values);
+    session(ctx, work, &task, &skills, prior, rules_ok, fresh).await
 }
 
 /// One decider request, one choice per skill: `reached` at 0.5 or more picks it. `work` is
@@ -425,6 +427,7 @@ async fn session(
     skills: &[&Skill],
     prior: &str,
     rules_ok: &[String],
+    mut fresh: Option<Values>,
 ) -> DoResult {
     let coder = ctx.coder.as_ref().expect("checked by the caller");
     let tools = tools(work);
@@ -434,7 +437,10 @@ async fn session(
     let mut start: Option<BTreeMap<String, String>> = None;
     let mut judged = 0usize;
     for i in 0..coder.len() {
-        let values = facts::known(ctx, &facts::all(&ctx.w)).await;
+        let values = match fresh.take() {
+            Some(v) => v,
+            None => facts::known(ctx, &facts::all(&ctx.w)).await,
+        };
         let start = &*start.get_or_insert_with(|| facts::shown(&values));
         let system = system_prompt(ctx, work, task, &values, skills, prior);
         let mut first = match work.goal {
