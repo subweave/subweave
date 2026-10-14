@@ -24,6 +24,7 @@ installed
    ├─ accepting
    ├─ persisted   IF role == 'store'
    ├─ copied   IF copies
+   ├─ patched
    └─ quiet
 ```
 

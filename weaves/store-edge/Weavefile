@@ -10,8 +10,9 @@ NEEDS  2 CPU, 4 GB RAM, 64 GB DISK
 # ── What a request chooses ─────────────────────────────
 
 ARG shop          MUST   "the shop number, like 114"
-ARG central       MUST
-    <url> org <org> bucket <bucket>  "the central InfluxDB v2 server, its organization and its bucket"
+ARG url           MUST   "the URL of the central InfluxDB v2 server, like https://influx.acme.example"
+ARG org           MUST   "the InfluxDB organization, like acme"
+ARG bucket        MUST   "the InfluxDB bucket for every shop's metrics, like shops"
 ARG tills         SHOULD "the IP addresses of the shop's tills, separated by commas with no spaces, \
                           like 10.0.4.11,10.0.4.12"
 ARG interval=10s  MAY    "how often Telegraf collects and sends metrics, a duration like 10s"
@@ -21,7 +22,7 @@ SECRET INFLUX_TOKEN "the token for the central InfluxDB"
 # ── Rules ──────────────────────────────────────────────
 
 NEVER "delete files in /var/lib/telegraf/buffer"
-NEVER "send metrics anywhere but $url"
+NEVER "add a Telegraf output other than the InfluxDB one at $url"
 NEVER "change the shop's network, router or tills"
 NEVER IF interval < 1s
 
@@ -50,7 +51,9 @@ FACT written <<EOF
   grep -qxF "SHOP=$shop" /etc/default/telegraf &&
   grep -qxF "TILLS=$tills" /etc/default/telegraf &&
   grep -qxF "INTERVAL=$interval" /etc/default/telegraf &&
-  grep -qxF "INFLUX_URL=$url" /etc/default/telegraf
+  grep -qxF "INFLUX_URL=$url" /etc/default/telegraf &&
+  grep -qxF "INFLUX_ORG=$org" /etc/default/telegraf &&
+  grep -qxF "INFLUX_BUCKET=$bucket" /etc/default/telegraf
 EOF
 FACT valid <<EOF
   set -a && . /etc/default/telegraf
@@ -116,14 +119,34 @@ ACTION restart FOR running, draining, quiet WITHIN 2m
 
 # ── Disk ───────────────────────────────────────────────
 
-FACT disk  df --output=pcent /var/lib/telegraf | tail -1 | tr -dc 0-9
+FACT disk     df --output=pcent /var/lib/telegraf | tail -1 | tr -dc 0-9
+FACT junk_mb  du -scm /var/log/journal /var/cache/apt/archives | tail -1 | cut -f1
 
 GOAL room  AFTER installed  EVERY 10m  disk < 90
 
-ACTION trim FOR room WITHIN 5m
-  WHEN "the disk is full of logs or the apt cache"
+ACTION trim FOR room WITHIN 5m IF junk_mb > 300
+  WHEN "the systemd journal or the apt cache, not Telegraf's buffer, fills the disk"
   RUN  journalctl --vacuum-size=200M
   RUN  apt-get clean
+
+# ── Firewall and updates ───────────────────────────────
+
+# Telegraf only sends: the shop's network reaches nothing on this box but SSH.
+FACT ufw         ufw status | grep -qx 'Status: active'
+FACT unattended  systemctl is-active -q unattended-upgrades
+
+GOAL fenced   AFTER installed  EVERY 1h  ufw
+GOAL patched  AFTER installed  EVERY 1d  unattended
+
+ACTION fence FOR fenced WITHIN 2m
+  WHEN "the firewall is off"
+  RUN  ufw default deny incoming && ufw default allow outgoing
+  RUN  ufw allow 22/tcp && ufw --force enable
+
+ACTION patch FOR patched WITHIN 10m
+  WHEN "Ubuntu's unattended security upgrades are off"
+  RUN  apt-get install -y unattended-upgrades
+  RUN  systemctl enable --now unattended-upgrades
 
 # ── Tills ──────────────────────────────────────────────
 

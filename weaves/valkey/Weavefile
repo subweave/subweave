@@ -29,6 +29,7 @@ NEVER "change the dir or dbfilename settings at runtime"
 NEVER IF memory < 64
 # A cold cache sends every read to the client's database.
 ASK   BEFORE restart IF role == 'cache' AND used > 1073741824
+ASK   BEFORE patch   IF role == 'cache' AND used > 1073741824 AND pending > 0
 # A store whose only copy is on this box.
 ASK   IF role == 'store' AND NOT copies
 
@@ -62,7 +63,7 @@ FACT up  valkey-cli ping | grep -qx PONG
 
 GOAL running  AFTER installed  up
 
-ACTION restart FOR running, accepting WITHIN 5m
+ACTION restart FOR running WITHIN 5m
   WHEN "valkey-server crashed or hangs"
   RUN  systemctl restart valkey-server
 
@@ -140,7 +141,7 @@ GOAL room       AFTER running  EVERY 5m  used < max * 0.9           IF role == '
 GOAL accepting  AFTER running  EVERY 5m  rejected == PREV(rejected)
 
 ACTION raise-clients FOR accepting WITHIN 5m
-  WHEN "connections are rejected while memory has room"
+  WHEN "the server answers, but rejects new connections at maxclients while memory has room"
   DO   "raise maxclients by half, within the open-file limit of the valkey-server unit, \
         and save it with CONFIG REWRITE"
 
@@ -183,6 +184,22 @@ SKILL valkey-persistence WHEN "AOF write errors, rewrites, RDB copies and restor
   - Restore: stop the server, put the RDB in place as dump.rdb in /var/lib/valkey with
     appendonly no, start, then turn appendonly back on.
 EOF
+
+# ── Updates ────────────────────────────────────────────
+
+# Unattended upgrades skip valkey: its update restarts the server, which empties a cache.
+FACT unattended  grep -q valkey /etc/apt/apt.conf.d/51subweave-valkey && systemctl is-active -q unattended-upgrades
+FACT pending     apt-get -s upgrade | grep -c '^Inst valkey' || true
+
+GOAL patched  AFTER running  EVERY 1d  unattended AND pending == 0
+
+ACTION patch FOR patched WITHIN 15m
+  WHEN "unattended security upgrades are off, or an Ubuntu update of valkey is pending"
+  ADD <<EOF /etc/apt/apt.conf.d/51subweave-valkey
+    Unattended-Upgrade::Package-Blacklist { "valkey"; };
+  EOF
+  RUN  apt-get install -y unattended-upgrades && systemctl enable --now unattended-upgrades
+  RUN  apt-get install -y --only-upgrade valkey-server valkey-tools
 
 # ── Logs ───────────────────────────────────────────────
 

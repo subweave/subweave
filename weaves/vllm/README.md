@@ -22,7 +22,8 @@ driver
    │  ├─ serving
    │  ├─ keeping-up
    │  └─ quiet
-   └─ room
+   ├─ room
+   └─ patched
 ```
 
 ## What happens when

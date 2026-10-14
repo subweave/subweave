@@ -1,0 +1,290 @@
+//! What the CLI and the daemon share on disk. The CLI writes only `inbox/`; the daemon writes
+//! everything under `services/` and is the only reader of `inbox/`.
+
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+use crate::paths;
+
+/// `services/<name>/service.json`: how a service was asked for, as the daemon keeps it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Spec {
+    pub name: String,
+    /// The weave as the person named it: `postgres:0.5`, or a path on the machine that ran `run`.
+    pub weave: String,
+    /// The last request said, by `run` or `tell`.
+    pub request: String,
+    /// ARGs and slots after the request check. An ARG with no value is absent.
+    pub args: BTreeMap<String, String>,
+    /// `<id>[@<provider>]`.
+    pub decide: String,
+    /// The coder chain, `THEN` order.
+    pub code: Vec<String>,
+    /// RFC 3339.
+    pub created: String,
+    pub stopped: bool,
+}
+
+/// Everything `run` hands the daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Bundle {
+    pub spec: Spec,
+    pub weavefile: String,
+    pub readme: Option<String>,
+    /// SECRET name → value. The daemon writes them to `secrets.json`, mode 0600.
+    pub secrets: BTreeMap<String, String>,
+}
+
+/// One file in `inbox/`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Command {
+    /// A new service, or a service run again under the same name (its journal and learned
+    /// commands stay).
+    Run {
+        bundle: Bundle,
+    },
+    /// New ARGs, after the request check; `decide`/`code` replace the models when given.
+    /// `secrets`: SECRETs the new ARGs turn on, merged into `secrets.json`.
+    Tell {
+        service: String,
+        request: String,
+        args: BTreeMap<String, String>,
+        secrets: BTreeMap<String, String>,
+        decide: Option<String>,
+        code: Option<Vec<String>>,
+    },
+    /// Run one action now, through the same rules.
+    Do {
+        service: String,
+        action: String,
+    },
+    /// `word`: `yes`, `no`, `always`, `never` or an action name. `by`: who answered.
+    Answer {
+        n: u64,
+        word: String,
+        by: String,
+    },
+    Stop {
+        service: String,
+    },
+    Start {
+        service: String,
+    },
+    Rm {
+        service: String,
+    },
+    /// Drop a learned fact command or learned steps (`<action>` drops every goal's steps).
+    Forget {
+        service: String,
+        name: String,
+    },
+}
+
+/// One line of `journal.jsonl`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Line {
+    /// RFC 3339, UTC.
+    pub t: String,
+    pub kind: Kind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ok: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// `check`: the facts the goal read. `ask`: the facts shown to the person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<BTreeMap<String, String>>,
+    /// `decide`: the probability of each choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p: Option<BTreeMap<String, f64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// `ask` and `answer`: the ask's number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n: Option<u64>,
+    /// `ask`: the words that answer it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answers: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// A goal checked: `ok` holds or not; no `ok` is unknown.
+    #[default]
+    Check,
+    /// The decider chose: `text` the choice, `p` the probabilities.
+    Decide,
+    /// A rule refused or held an action: `text` the rule.
+    Gate,
+    /// An action ended: `ok` the goal held within its time.
+    Action,
+    /// One shell command: `text` the command, `ok` exit 0.
+    Command,
+    /// A fact command or steps learned: `text` what.
+    Learn,
+    Ask,
+    /// `text` the word, `action` set when the word named one.
+    Answer,
+    /// A message sent to the channels: `text` its title.
+    Message,
+    Note,
+}
+
+/// `services/<name>/learned.json`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Learned {
+    /// Fact name → the command this box learned for it.
+    pub facts: BTreeMap<String, LearnedFact>,
+    /// `<action>/<goal>` → the commands that made the goal hold.
+    pub steps: BTreeMap<String, LearnedSteps>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearnedFact {
+    pub command: String,
+    /// sha256 hex of the fact's quoted text after `$name` replacement: a changed ARG learns again.
+    pub key: String,
+    pub t: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearnedSteps {
+    pub commands: Vec<String>,
+    /// sha256 hex of the action's DO texts after `$name` replacement.
+    pub key: String,
+    pub t: String,
+}
+
+/// `services/<name>/status.json`, rewritten by the daemon after every tick.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Status {
+    pub service: String,
+    pub t: String,
+    /// Graph order.
+    pub goals: Vec<GoalStatus>,
+    /// The action running now and its goal, as `restart for running`.
+    pub repair: Option<String>,
+    /// Open asks, by number.
+    pub asks: Vec<u64>,
+    pub spend_month_usd: f64,
+    pub decide: String,
+    pub code: Vec<String>,
+    pub stopped: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalStatus {
+    pub name: String,
+    pub state: GoalState,
+    /// When the goal last changed state.
+    pub since: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GoalState {
+    Holds,
+    Fails,
+    /// Not checked yet, or a quoted goal the decider could not answer.
+    Unknown,
+    /// Its IF is false, or a goal it comes AFTER is off.
+    Off,
+    /// A goal it comes AFTER does not hold.
+    Waiting,
+}
+
+/// Drop a command into the daemon's inbox, atomically.
+pub fn put(cmd: &Command) -> Result<()> {
+    let dir = paths::inbox();
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let id = uuid::Uuid::now_v7();
+    let tmp = dir.join(format!(".{id}.tmp"));
+    let mut f = std::fs::File::create(&tmp).with_context(|| format!("write {}", tmp.display()))?;
+    f.write_all(&serde_json::to_vec(cmd)?)?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, dir.join(format!("{id}.json")))?;
+    Ok(())
+}
+
+/// Every line of a service's journal; lines that do not parse are skipped.
+pub fn journal(service: &str) -> Result<Vec<Line>> {
+    read_lines(&paths::journal(service))
+}
+
+fn read_lines(path: &Path) -> Result<Vec<Line>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+    };
+    Ok(text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect())
+}
+
+/// Asks in a journal that no `answer` line settled yet, oldest first.
+pub fn open_asks(lines: &[Line]) -> Vec<&Line> {
+    let answered: std::collections::BTreeSet<u64> = lines
+        .iter()
+        .filter(|l| l.kind == Kind::Answer)
+        .filter_map(|l| l.n)
+        .collect();
+    lines
+        .iter()
+        .filter(|l| l.kind == Kind::Ask && l.n.is_some_and(|n| !answered.contains(&n)))
+        .collect()
+}
+
+/// Every service the daemon keeps, by name.
+pub fn names() -> Result<Vec<String>> {
+    let dir = paths::services();
+    let mut out = Vec::new();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e).with_context(|| format!("read {}", dir.display())),
+    };
+    for e in entries {
+        let e = e?;
+        if e.path().join("service.json").is_file() {
+            out.push(e.file_name().to_string_lossy().into_owned());
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+pub fn spec(service: &str) -> Result<Spec> {
+    read_json(&paths::service_json(service))
+}
+
+pub fn status(service: &str) -> Result<Option<Status>> {
+    let p = paths::status(service);
+    if !p.exists() {
+        return Ok(None);
+    }
+    read_json(&p).map(Some)
+}
+
+pub fn learned(service: &str) -> Result<Learned> {
+    let p = paths::learned(service);
+    if !p.exists() {
+        return Ok(Learned::default());
+    }
+    read_json(&p)
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
+}
