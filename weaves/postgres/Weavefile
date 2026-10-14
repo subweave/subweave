@@ -308,7 +308,8 @@ EOF
 # ── Logs ───────────────────────────────────────────────
 
 FACT logs    FOLLOW "new WARNING, ERROR, FATAL and PANIC lines of the PostgreSQL log"
-FACT kernel  FOLLOW journalctl -k -f -n 0 -p warning
+# ufw logs each packet it drops at warning level: scanners, not a fault.
+FACT kernel  FOLLOW journalctl -k -f -n 0 -p warning | grep --line-buffered -v 'UFW BLOCK'
 
 GOAL quiet  AFTER running  EVERY 10m \
      "the new lines in `logs` and `kernel` show nothing that needs action"
