@@ -148,7 +148,7 @@ pub(crate) async fn do_task(
 ) -> DoResult {
     let task = weave::subst(task, &ctx.spec.args);
     let values = facts::known(ctx, &facts::all(&ctx.w)).await;
-    let skills = pick_skills(ctx, work, &task, &values).await;
+    let skills = pick_skills(ctx, Some(work), &task, Some(&values)).await;
     let mut ran = Vec::new();
     'recipes: for s in &skills {
         for r in &s.recipes {
@@ -176,12 +176,13 @@ pub(crate) async fn do_task(
     session(ctx, work, &task, &skills, prior, rules_ok).await
 }
 
-/// One decider request, one choice per skill: `reached` at 0.5 or more picks it.
-async fn pick_skills<'a>(
+/// One decider request, one choice per skill: `reached` at 0.5 or more picks it. `work` is
+/// none for a learn, whose job is the fact's text; `values`, the facts the decider sees.
+pub(crate) async fn pick_skills<'a>(
     ctx: &'a Ctx,
-    work: Work<'_>,
-    task: &str,
-    values: &Values,
+    work: Option<Work<'_>>,
+    job: &str,
+    values: Option<&Values>,
 ) -> Vec<&'a Skill> {
     let Some(decider) = &ctx.decider else {
         return Vec::new();
@@ -216,16 +217,21 @@ async fn pick_skills<'a>(
     let mut state = json!({
         "box": ctx.box_line(),
         "service": ctx.name,
-        "job": task,
-        "facts": facts::shown(values),
+        "job": job,
     });
-    if let Some(goal) = work.goal {
+    if let Some(values) = values {
+        state["facts"] = json!(facts::shown(values));
+    }
+    if let Some(goal) = work.and_then(|w| w.goal) {
         state["failing_goal"] = json!(goals::describe(ctx, goal));
     }
     let answers = match decider.ask(state, questions).await {
         Ok(a) => a,
         Err(e) => {
-            work.note(ctx, format!("decider: {e:#}"));
+            match work {
+                Some(w) => w.note(ctx, format!("decider: {e:#}")),
+                None => ctx.journal().note(None, format!("decider: {e:#}")),
+            }
             return Vec::new();
         }
     };
@@ -244,8 +250,8 @@ async fn pick_skills<'a>(
     let names: Vec<&str> = picked.iter().map(|s| s.name.as_str()).collect();
     ctx.journal().add(Line {
         kind: Kind::Decide,
-        goal: work.goal_name(),
-        action: work.task_action(),
+        goal: work.and_then(|w| w.goal_name()),
+        action: work.and_then(|w| w.task_action()),
         text: Some(format!(
             "skills: {}",
             if names.is_empty() {
@@ -453,7 +459,7 @@ async fn session(
             if commands >= MAX_COMMANDS {
                 break End::Failed(format!("{MAX_COMMANDS} commands without a pass"));
             }
-            let reply = match coder.send(i, sid.as_deref(), &system, &msgs, &tools).await {
+            let reply = match coder.send(i, sid.as_deref(), None, &system, &msgs, &tools).await {
                 Ok(r) => r,
                 Err(e) => {
                     work.note(ctx, format!("{e:#}"));
