@@ -1,45 +1,9 @@
-/* Subweave. One accent (green: keywords, held goals, the person) and one model
-   colour (violet: text that goes to a model). Failing is ink, inverted. */
+/* Tokens live in brand/tokens.css. Failing is ink, inverted. */
+@import "../../brand/tokens.css";
 
 :root {
-  --bg: #f6f6f3;
-  --bg-2: #efefea;
-  --bg-3: #e6e6df;
-  --ink: #15171c;
-  --ink-2: #353942;
-  --muted: #5a5f6b;
-  --rule: #dcdcd4;
-  --rule-2: #c3c3b9;
-  --accent: #0a7552;
-  --accent-ink: #ffffff;
-  --accent-soft: rgb(10 117 82 / 0.09);
-  --model: #6436c4;
-  --model-soft: rgb(100 54 196 / 0.07);
-
-  --sans: "IBM Plex Sans Variable", "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
-  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
   --max: 1200px;
   --gutter: clamp(18px, 4vw, 36px);
-  --radius: 10px;
-  color-scheme: light dark;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0d0f12;
-    --bg-2: #14171c;
-    --bg-3: #1b1f25;
-    --ink: #e8e9ec;
-    --ink-2: #c4c7ce;
-    --muted: #979ca7;
-    --rule: #242930;
-    --rule-2: #3a3f49;
-    --accent: #3fd39c;
-    --accent-ink: #05130d;
-    --accent-soft: rgb(63 211 156 / 0.1);
-    --model: #b9a2ff;
-    --model-soft: rgb(185 162 255 / 0.09);
-  }
 }
 
 /* The request terminal is a screen in both schemes. */
@@ -2340,19 +2304,10 @@ code.kw {
 /* ── Review ─────────────────────────────────────────── */
 
 .review {
-  --red: #c2352b;
-  --amber: #a86a00;
   display: grid;
   grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
   gap: 20px;
   align-items: start;
-}
-
-@media (prefers-color-scheme: dark) {
-  .review {
-    --red: #ff7a6e;
-    --amber: #f2b84b;
-  }
 }
 
 .review-file {
