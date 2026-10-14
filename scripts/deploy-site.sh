@@ -10,6 +10,7 @@ host="${SUBWEAVE_SITE_HOST:-root@steery.dev}"
 proxy=modelstat-caddy
 data=/opt/modelstat/data/caddy
 
+git submodule update --init examples
 (cd site && npm ci --no-audit --no-fund && npm run build)
 cp install.sh site/dist/install.sh
 
