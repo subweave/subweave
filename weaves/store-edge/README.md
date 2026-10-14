@@ -26,7 +26,9 @@ installed
 │     ├─ draining
 │     ├─ quiet
 │     └─ tills-up   IF tills
-└─ room
+├─ room
+├─ fenced
+└─ patched
 ```
 
 ## What happens when

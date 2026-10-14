@@ -110,7 +110,7 @@ FACT served  "the id of the first model that localhost:8000/v1/models lists, \
 GOAL running  AFTER installed  up
 GOAL serving  AFTER running    served == model
 
-ACTION restart FOR running, gpu-healthy, keeping-up, quiet WITHIN 15m
+ACTION restart FOR running, gpu-healthy, quiet WITHIN 15m
   WHEN "the engine hung or crashed, or an application Xid error (13, 31, 43) hit a healthy GPU"
   RUN  systemctl restart vllm
 
@@ -143,7 +143,7 @@ FACT preempted  "the sum of vllm:num_preemptions_total in localhost:8000/metrics
 GOAL keeping-up  AFTER running  EVERY 5m  waiting < 20 AND preempted - PREV(preempted) < 50
 
 ACTION lower-concurrency FOR keeping-up WITHIN 15m
-  WHEN "requests are preempted for long, or the KV cache is full"
+  WHEN "the engine answers, but preempts requests for long or fills its KV cache"
   DO   "lower --max-num-seqs in the vllm unit by a quarter, restart vllm, and say the new value"
 
 SKILL vllm-load WHEN "a growing queue, preemptions, or a full KV cache" <<EOF
@@ -181,6 +181,22 @@ SKILL hf-cache WHEN "the Hugging Face model cache and freeing disk" <<EOF
   - Logs and the journal: journalctl --vacuum-size=500M.
 EOF
 
+# ── Updates ────────────────────────────────────────────
+
+# Unattended upgrades skip the driver and CUDA: a new driver needs a reboot and the person.
+FACT unattended <<EOF
+  grep -q nvidia /etc/apt/apt.conf.d/51subweave-gpu && systemctl is-active -q unattended-upgrades
+EOF
+
+GOAL patched  AFTER installed  EVERY 1d  unattended
+
+ACTION patch FOR patched WITHIN 10m
+  WHEN "Ubuntu's unattended security upgrades are off"
+  ADD <<EOF /etc/apt/apt.conf.d/51subweave-gpu
+    Unattended-Upgrade::Package-Blacklist { "nvidia-"; "libnvidia-"; "cuda-"; };
+  EOF
+  RUN  apt-get install -y unattended-upgrades && systemctl enable --now unattended-upgrades
+
 # ── Logs ───────────────────────────────────────────────
 
 FACT logs  FOLLOW "new WARNING, ERROR and Traceback lines of the vllm service's journal"
@@ -192,4 +208,5 @@ GOAL quiet  AFTER running  EVERY 10m \
 
 ACTION fix WITHIN 30m
   WHEN "no other action fits, or the fitting ones already failed"
-  DO   "make the failing goal hold again"
+  DO   "make the failing goal hold again without deleting the files of $model, changing the driver, \
+        or stopping vllm for longer than a restart"

@@ -268,13 +268,13 @@ ASK   IF blocks < 10064
 
 | Rule | Checked | Then |
 |---|---|---|
-| `NEVER "<text>"` | the request, the decider's picks, each coder command | refused |
+| `NEVER "<text>"` | the request, each coder command | refused |
 | `NEVER IF <expr>` | the ARGs at `plan`, `run` and `tell`, and every action, in code | refused |
-| `ASK "<text>"` | the request, the decider's picks, each coder command | the person answers first |
+| `ASK "<text>"` | the request, each coder command | the person answers first |
 | `ASK BEFORE <action> [IF <expr>]` | every run of that action, in code | the person answers first |
 | `ASK IF <expr>` | the ARGs at `plan`, `run` and `tell`, and every action, in code | the person answers first |
 
-- A quoted rule checks the request and what a model chose or wrote. The author's own text, a `RUN` step or a recipe, passes the code rules only.
+- A quoted rule checks what the person asked and what the coder writes. The author's own text passes the code rules only: an action the decider picks, a `RUN` step, a recipe, a learned step.
 - A rule that turns on a number is code: `NEVER IF version < 14`, not `NEVER "versions before 14"`.
 - After a refusal, the loop picks again or asks the person.
 - The person answers `yes`, `no`, `always` or `never`. The daemon keeps `always` and `never` in the journal for that rule and action, and does not ask again.
@@ -556,11 +556,11 @@ subweave channel test steery
 - `steery`: the daemon raises each ask as a request with its own key, and reads the answer with a long poll, so the box needs no open port. Steery shows the person the facts and the rule; the answer is a signature from the person's device, which the daemon checks before it acts.
 - `heartbeat`: a service such as healthchecks.io alerts when the pings stop. That is the only alert when the whole box is down: see [LIMITS.md](LIMITS.md#9-one-box-no-failover).
 - On the person's computer, `subweave watch` shows every box's messages as system notifications.
-- Channel keys stay on the box in `/etc/subweave/channels`, mode 600. They never go to a model.
+- Channel keys stay on the box in `/etc/subweave/channels.json`, mode 600. They never go to a model.
 
 ## Journal
 
-`/var/lib/subweave/<service>/journal.jsonl`, one JSON object per line:
+`/var/lib/subweave/services/<service>/journal.jsonl`, one JSON object per line:
 
 ```json
 {"t":"2026-10-13T10:02:10Z","goal":"running","kind":"check","ok":false,"facts":{"up":"no"}}
@@ -583,10 +583,11 @@ brew install subweave                            # macOS: CLI only
 | Command | Does |
 |---|---|
 | `plan <weave> ["<request>"]` | the request check and the goal graph; changes nothing |
+| `review <weave>` | score the Weavefile against the authoring rules |
 | `run <weave> ["<request>"]` | the request check, then hand the service to the daemon |
 | `tell <service> "<request>"` | change ARGs by sentence, with the same check |
 | `ps` | services, failing goals, models, spend this month |
-| `log [-f] <service>` | the journal |
+| `log [-f] [--json] [--all] [<service>]` | the journal; `--all` interleaves every service |
 | `stats <service>` | metrics from numeric facts |
 | `inbox`, `answer <n> <word>` | open asks from every service |
 | `watch` | messages from every box, as system notifications on this computer |
@@ -597,6 +598,8 @@ brew install subweave                            # macOS: CLI only
 | `stop`, `start`, `rm <service>` | pause, resume, remove (asks) |
 | `key <provider>` | store a provider's key, read from stdin |
 | `provider add <name> <endpoint> [--protocol openai\|anthropic]`, `provider rm <name>` | add or remove a provider |
+| `daemon [--install]` | run every service; `--install` makes it a systemd unit |
+| `version` | this binary's version |
 
 - `run` takes `--on <host>`, `--name <service>`, `--decide <model>`, `--code <model>` and `--yes`. The name defaults to the weave's name.
 - `tell` takes `--decide` and `--code` too, with or without a request.
@@ -609,6 +612,50 @@ brew install subweave                            # macOS: CLI only
 subweave run postgres:0.5 "postgres 18, private network, backups to s3://acme-pg/db1"
 subweave run ./weaves/postgres "postgres 18"
 ```
+
+Files, as root on Linux. Elsewhere, `~/.config/subweave` and `~/.local/state/subweave`; `SUBWEAVE_CONFIG` and `SUBWEAVE_STATE` override both.
+
+| Path | Holds |
+|---|---|
+| `/etc/subweave/keys/<provider>` | a provider's key, mode 600 |
+| `/etc/subweave/providers.json` | added providers |
+| `/etc/subweave/channels.json` | channels, mode 600 |
+| `/var/lib/subweave/inbox/` | commands from the CLI; the daemon applies and deletes them |
+| `/var/lib/subweave/services/<service>/` | `Weavefile`, `README.md`, `service.json`, `secrets.json` (mode 600), `journal.jsonl`, `learned.json`, `status.json` |
+
+On the person's computer, `~/.config/subweave/boxes.json` maps each service to its box.
+
+## Review
+
+`subweave review <weave>` scores a Weavefile from 0 to 100 against 48 authoring rules, with the decider. It changes nothing and runs no command.
+
+```
+$ subweave review weaves/postgres
+postgres  100/100   48 rules, 221 checks
+```
+
+| Area | Rules | For example |
+|---|---|---|
+| header | 3 | `ABOUT` says what the service is |
+| args | 7 | an ARG's description gives an example |
+| secrets | 3 | a secret never appears in a command line |
+| facts | 6 | a quoted FACT compared with a number says it prints one number |
+| goals | 4 | a quoted goal names the facts it reads in backticks |
+| actions | 11 | two actions for one goal have `WHEN`s that do not overlap |
+| rules | 2 | a quoted rule names something one command can do |
+| skills | 3 | a skill helps with at least one `DO` task |
+| coverage | 9 | a goal keeps the software updated |
+
+- A rule checks each element of its kind: every ARG, every action, every pair of actions for one goal.
+- Code checks what code can; the decider answers the rest, one request per element.
+- Each rule counts by the share of its elements that pass, weighted 3 (error), 2 (warning) or 1 (note).
+- A probe turns rules on: rules about data run only for a service that keeps data.
+
+## Docker
+
+- A weave owns a whole box: packages, kernel settings, disks, firewall, backups and updates. An image holds none of these.
+- Docker is one tool a weave may use, like `apt`: a `RUN docker compose up -d` step, a fact that reads `docker inspect`.
+- Subweave does not build images and does not run in a container.
 
 ## Grammar
 
