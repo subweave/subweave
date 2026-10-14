@@ -111,7 +111,7 @@ EOF
 
 # ── Running ────────────────────────────────────────────
 
-FACT up  pg_isready -q
+FACT up  runuser -u postgres -- pg_isready -q
 
 GOAL running  AFTER configured  up
 
@@ -300,7 +300,7 @@ EOF
 # ── Logs ───────────────────────────────────────────────
 
 FACT logs    FOLLOW "new WARNING, ERROR, FATAL and PANIC lines of the PostgreSQL log"
-FACT kernel  FOLLOW journalctl -k -f -p warning
+FACT kernel  FOLLOW journalctl -k -f -n 0 -p warning
 
 GOAL quiet  AFTER running  EVERY 10m \
      "the new lines in `logs` and `kernel` show nothing that needs action"

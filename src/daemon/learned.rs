@@ -21,6 +21,8 @@ use super::{now, save_json, sh};
 const TRIES: usize = 3;
 /// After a quoted fact could not be learned, the next try waits this long.
 const RELEARN: Duration = Duration::from_secs(600);
+/// A FOLLOW command still running after this long follows; one that ended does not.
+const FOLLOW_PROBE: Duration = Duration::from_secs(5);
 const FACT_SYSTEM: &str = "You write one bash command that reads a fact on this box. The \
     command must only read: never install, write, delete, restart or refresh a cache. It runs \
     as `bash -eo pipefail -c <command>` with a 60 second limit, and the ARGs are environment \
@@ -251,7 +253,8 @@ async fn learn(
         .ok_or_else(|| anyhow!("no decider to check the command"))?;
     let form = form(&ctx.w, &fact.name);
     let reads = if fact.follow {
-        "it keeps running and prints new lines as they come; each check reads the lines printed since the last one"
+        "it keeps running and prints new lines as they come, never old ones (`tail -n 0 -F`, \
+         `journalctl -f -n 0`); each check reads the lines printed since the last one"
     } else {
         match form {
             Form::Exit => "its exit status: exit 0 when it holds, non-zero when not",
@@ -350,7 +353,22 @@ async fn learn(
             last = format!("`{command}` changes the box ({p:.2})");
             continue;
         }
-        if form != Form::Exit && !fact.follow {
+        if fact.follow {
+            let o = sh(&command, &ctx.env, FOLLOW_PROBE).await;
+            if let Some(c) = o.code {
+                let shown = ctx.redact(&super::cap(&o.both(), 2000));
+                answer(
+                    &mut msgs,
+                    format!(
+                        "It ended with exit {c} within {}s and printed this:\n{shown}\nA FOLLOW \
+                         command keeps running and prints new lines as they come.",
+                        FOLLOW_PROBE.as_secs()
+                    ),
+                );
+                last = format!("`{command}` ended with exit {c}: it does not follow");
+                continue;
+            }
+        } else if form != Form::Exit {
             let o = sh(&command, &ctx.env, Duration::from_secs(60)).await;
             let printed = o.stdout.trim();
             if form == Form::Number

@@ -397,6 +397,15 @@ impl Loop {
                     facts: &values,
                     prev: prev.as_ref(),
                 };
+                // A fact this box cannot read yet (a quoted fact not learned) leaves the
+                // goal unknown: a repair cannot make an unread fact hold.
+                let unread = goals::needs(w, g)
+                    .into_iter()
+                    .any(|n| !values.contains_key(&n));
+                if unread {
+                    self.record(g, None, &values);
+                    continue;
+                }
                 if g.when.as_ref().is_some_and(|e| !expr::holds(e, &scope)) {
                     self.set(&g.name, GoalState::Off, false);
                     continue;

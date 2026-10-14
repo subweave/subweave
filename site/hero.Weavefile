@@ -4,7 +4,7 @@ ARG    bucket      SHOULD "an S3 URL for backups, like s3://acme-pg/db1"
 NEVER  "drop or truncate a database, or delete table rows"
 ASK    BEFORE restore
 
-FACT up        pg_isready -q
+FACT up        runuser -u postgres -- pg_isready -q
 FACT archived  "1 when WAL archiving works, else 0"
 
 GOAL running                              up

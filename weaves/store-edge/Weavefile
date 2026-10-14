@@ -105,7 +105,7 @@ ACTION configure FOR configured WITHIN 5m
 FACT up      systemctl is-active -q telegraf
 FACT uplink  curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$url/ping"
 FACT buffer  du -sm /var/lib/telegraf/buffer | cut -f1
-FACT logs    FOLLOW journalctl -f -u telegraf | grep --line-buffered -E ' [EW]! '
+FACT logs    FOLLOW journalctl -f -n 0 -u telegraf | grep --line-buffered -E ' [EW]! '
 
 GOAL running   AFTER configured             up
 GOAL draining  AFTER running     EVERY 15m  uplink != 204 OR buffer < 50 OR buffer < PREV(buffer)

@@ -15,7 +15,7 @@ NEVER IF version < 14
 NEVER "drop or truncate a database"
 ASK   BEFORE restore
 
-FACT up        pg_isready -q
+FACT up        runuser -u postgres -- pg_isready -q
 FACT archived  "1 when WAL archiving is on and has no failure newer than its last success, else 0"
 
 GOAL running                               up
@@ -153,9 +153,9 @@ Each `ARG`, slot and `SECRET` is an environment variable for every command, the 
 ## FACT
 
 ```weavefile
-FACT up        pg_isready -q
+FACT up        runuser -u postgres -- pg_isready -q
 FACT disk      "percent used of the filesystem that holds /var/lib/postgresql, a number"
-FACT kernel    FOLLOW journalctl -k -f -p warning
+FACT kernel    FOLLOW journalctl -k -f -n 0 -p warning
 FACT logs      FOLLOW "new WARNING, ERROR, FATAL and PANIC lines of the PostgreSQL log"
 ```
 
@@ -165,6 +165,8 @@ FACT logs      FOLLOW "new WARNING, ERROR, FATAL and PANIC lines of the PostgreS
 - `FACT <name> "<what>"`: the box learns the command. See [Learned commands](#learned-commands).
   - Say the form: "a number", "1 … else 0", or "exits 0 when …".
 - `FOLLOW`: the command keeps running. The value is the lines printed since the last check.
+  - Print only lines written after it starts: `tail -n 0 -F`, `journalctl -f -n 0`. Without `-n 0` both replay old lines, and the first check judges them as new.
+- A command that connects to the service connects as a role that exists: `runuser -u postgres -- pg_isready -q`. As root, each check writes a failed login to the log the weave reads.
 - Commands run as root in `bash -eo pipefail`, with a 60 second limit for a `FACT` and 30 minutes for a `RUN`.
 - The daemon runs a fact only when a goal that is due needs it. A goal that is off reads no facts.
 - In a decider request, numbers and exit results go under `facts`. Other text goes under `program_output`.
@@ -223,6 +225,7 @@ A code condition:
 - Two values that both read as numbers compare as numbers: `major == version`. Two durations compare as durations.
 - A name with no value makes its comparison false. In a command, it is an empty variable.
 - On a goal's first check, `PREV()` has no value, so the goal waits for the second check.
+- A goal that reads a quoted fact the box has not learned stays unknown, and no repair runs for it.
 
 A quoted condition goes to the decider as one yes/no question. Its backticked names say which facts it reads. All quoted goals due in one tick share one decider request. A threshold is code, never prose: see [LIMITS.md](LIMITS.md#1-numbers-inside-prose).
 

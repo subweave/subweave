@@ -224,7 +224,7 @@ EOF
 # ── Logs ───────────────────────────────────────────────
 
 # WARN and ERROR lines only: never chat, which players write.
-FACT logs  FOLLOW tail -F /opt/minecraft/logs/latest.log \
+FACT logs  FOLLOW tail -n 0 -F /opt/minecraft/logs/latest.log \
              | grep --line-buffered -E '/(WARN|ERROR)\]: '
 
 GOAL quiet  AFTER running  EVERY 15m \
