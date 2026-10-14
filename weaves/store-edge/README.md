@@ -13,7 +13,9 @@ This weave has no coder, no `fix`, no quoted fact and no `DO` step. Every goal h
 | ARG | Level | Default | Says |
 |---|---|---|---|
 | `shop` | MUST | — | the shop number, the `shop` tag on every metric |
-| `central` | MUST | — | `<url> org <org> bucket <bucket>` of the central InfluxDB v2 |
+| `url` | MUST | — | the central InfluxDB v2 server |
+| `org` | MUST | — | its organization |
+| `bucket` | MUST | — | the bucket for every shop's metrics |
 | `tills` | SHOULD | empty: `tills-up` off | till addresses, commas and no spaces |
 | `interval` | MAY | `10s` | how often Telegraf collects and sends; `NEVER IF interval < 1s` |
 

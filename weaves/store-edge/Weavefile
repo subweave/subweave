@@ -10,8 +10,9 @@ NEEDS  2 CPU, 4 GB RAM, 64 GB DISK
 # ── What a request chooses ─────────────────────────────
 
 ARG shop          MUST   "the shop number, like 114"
-ARG central       MUST
-    <url> org <org> bucket <bucket>  "the central InfluxDB v2 server, its organization and its bucket"
+ARG url           MUST   "the URL of the central InfluxDB v2 server, like https://influx.acme.example"
+ARG org           MUST   "the InfluxDB organization, like acme"
+ARG bucket        MUST   "the InfluxDB bucket for every shop's metrics, like shops"
 ARG tills         SHOULD "the IP addresses of the shop's tills, separated by commas with no spaces, \
                           like 10.0.4.11,10.0.4.12"
 ARG interval=10s  MAY    "how often Telegraf collects and sends metrics, a duration like 10s"
@@ -50,7 +51,9 @@ FACT written <<EOF
   grep -qxF "SHOP=$shop" /etc/default/telegraf &&
   grep -qxF "TILLS=$tills" /etc/default/telegraf &&
   grep -qxF "INTERVAL=$interval" /etc/default/telegraf &&
-  grep -qxF "INFLUX_URL=$url" /etc/default/telegraf
+  grep -qxF "INFLUX_URL=$url" /etc/default/telegraf &&
+  grep -qxF "INFLUX_ORG=$org" /etc/default/telegraf &&
+  grep -qxF "INFLUX_BUCKET=$bucket" /etc/default/telegraf
 EOF
 FACT valid <<EOF
   set -a && . /etc/default/telegraf

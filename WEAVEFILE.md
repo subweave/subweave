@@ -631,7 +631,7 @@ On the person's computer, `~/.config/subweave/boxes.json` maps each service to i
 
 ```
 $ subweave review weaves/postgres
-postgres  100/100   48 rules, 221 checks
+postgres  100/100   48 rules, 221 checks, $0.0020
 ```
 
 | Area | Rules | For example |

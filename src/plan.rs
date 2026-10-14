@@ -140,8 +140,10 @@ pub async fn plan(
     decider: &Decider,
     current: Option<&BTreeMap<String, String>>,
 ) -> Result<Plan> {
+    // A comma inside a word joins a list ("10.0.4.11,10.0.4.12"); one at its end ends a clause.
     let words: Vec<&str> = request
-        .split(|c: char| c.is_whitespace() || c == ',')
+        .split_whitespace()
+        .map(|x| x.trim_end_matches([',', ';', '.']))
         .filter(|x| !x.is_empty())
         .collect();
     let word_opts: IndexMap<String, String> = words
