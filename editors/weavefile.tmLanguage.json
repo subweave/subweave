@@ -1,0 +1,191 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Weavefile",
+  "scopeName": "source.weavefile",
+  "fileTypes": ["weave", "Weavefile"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#heredoc-shell" },
+    { "include": "#heredoc-model" },
+    { "include": "#heredoc-skill" },
+    { "include": "#heredoc-add" },
+    { "include": "#run-line" },
+    { "include": "#fact-command-line" },
+    { "include": "#instruction" },
+    { "include": "#option" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "^\\s*(#).*$",
+      "name": "comment.line.number-sign.weavefile",
+      "captures": { "1": { "name": "punctuation.definition.comment.weavefile" } }
+    },
+    "heredoc-shell": {
+      "begin": "^\\s*(?:(RUN)|(FACT)\\s+([a-z_][a-z0-9_-]*)(?:\\s+(FOLLOW))?)\\s+(<<)([A-Z]+)\\s*$",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.instruction.weavefile" },
+        "2": { "name": "keyword.control.instruction.weavefile" },
+        "3": { "name": "entity.name.fact.weavefile" },
+        "4": { "name": "keyword.other.weavefile" },
+        "5": { "name": "keyword.operator.heredoc.weavefile" },
+        "6": { "name": "keyword.control.heredoc-token.weavefile" }
+      },
+      "end": "^\\s*(\\6)\\s*$",
+      "endCaptures": { "1": { "name": "keyword.control.heredoc-token.weavefile" } },
+      "contentName": "meta.embedded.block.shell",
+      "patterns": [{ "include": "source.shell" }]
+    },
+    "heredoc-model": {
+      "begin": "^\\s*(DO)\\s+(<<)([A-Z]+)\\s*$",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.instruction.weavefile" },
+        "2": { "name": "keyword.operator.heredoc.weavefile" },
+        "3": { "name": "keyword.control.heredoc-token.weavefile" }
+      },
+      "end": "^\\s*(\\3)\\s*$",
+      "endCaptures": { "1": { "name": "keyword.control.heredoc-token.weavefile" } },
+      "contentName": "string.unquoted.model.weavefile",
+      "patterns": [{ "include": "#variable" }, { "include": "#backtick" }]
+    },
+    "heredoc-skill": {
+      "begin": "^\\s*(SKILL)\\s+([a-z][a-z0-9-]*)\\s+(WHEN)\\s+(\"(?:[^\"\\\\]|\\\\.)*\")\\s+(<<)([A-Z]+)\\s*$",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.instruction.weavefile" },
+        "2": { "name": "entity.name.skill.weavefile" },
+        "3": { "name": "keyword.other.weavefile" },
+        "4": { "name": "string.quoted.double.model.weavefile" },
+        "5": { "name": "keyword.operator.heredoc.weavefile" },
+        "6": { "name": "keyword.control.heredoc-token.weavefile" }
+      },
+      "end": "^\\s*(\\6)\\s*$",
+      "endCaptures": { "1": { "name": "keyword.control.heredoc-token.weavefile" } },
+      "contentName": "string.unquoted.model.weavefile",
+      "patterns": [
+        {
+          "begin": "^\\s*(```)(recipe)\\s*$",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.markdown" },
+            "2": { "name": "fenced_code.block.language.weavefile" }
+          },
+          "end": "^\\s*(```)\\s*$",
+          "endCaptures": { "1": { "name": "punctuation.definition.markdown" } },
+          "contentName": "meta.embedded.block.shell",
+          "patterns": [{ "include": "source.shell" }]
+        },
+        { "include": "#variable" },
+        { "include": "#backtick" }
+      ]
+    },
+    "heredoc-add": {
+      "begin": "^\\s*(ADD)\\s+(<<)([A-Z]+)\\s+(\\S+)\\s*$",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.instruction.weavefile" },
+        "2": { "name": "keyword.operator.heredoc.weavefile" },
+        "3": { "name": "keyword.control.heredoc-token.weavefile" },
+        "4": { "name": "string.unquoted.path.weavefile" }
+      },
+      "end": "^\\s*(\\3)\\s*$",
+      "endCaptures": { "1": { "name": "keyword.control.heredoc-token.weavefile" } },
+      "contentName": "string.unquoted.file.weavefile"
+    },
+    "run-line": {
+      "begin": "^\\s*(RUN)\\s+",
+      "beginCaptures": { "1": { "name": "keyword.control.instruction.weavefile" } },
+      "end": "(?<!\\\\)\\n",
+      "contentName": "meta.embedded.line.shell",
+      "patterns": [{ "include": "source.shell" }]
+    },
+    "fact-command-line": {
+      "begin": "^\\s*(FACT)\\s+([a-z_][a-z0-9_-]*)\\s+(?:(FOLLOW)\\s+)?(?=[^\"\\s])",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.instruction.weavefile" },
+        "2": { "name": "entity.name.fact.weavefile" },
+        "3": { "name": "keyword.other.weavefile" }
+      },
+      "end": "(?<!\\\\)\\n",
+      "contentName": "meta.embedded.line.shell",
+      "patterns": [{ "include": "source.shell" }]
+    },
+    "instruction": {
+      "patterns": [
+        {
+          "begin": "^\\s*(ARG|SECRET|FACT|GOAL|ACTION|SKILL)\\s+([A-Za-z_][A-Za-z0-9_-]*)",
+          "beginCaptures": {
+            "1": { "name": "keyword.control.instruction.weavefile" },
+            "2": { "name": "entity.name.weavefile" }
+          },
+          "end": "(?<!\\\\)\\n",
+          "patterns": [{ "include": "#arguments" }]
+        },
+        {
+          "begin": "^\\s*(ABOUT|FROM|NEEDS|MODEL|WHEN|DO|NEVER|ASK)\\b",
+          "beginCaptures": { "1": { "name": "keyword.control.instruction.weavefile" } },
+          "end": "(?<!\\\\)\\n",
+          "patterns": [{ "include": "#arguments" }]
+        }
+      ]
+    },
+    "arguments": {
+      "patterns": [
+        { "include": "#quoted" },
+        { "include": "#single-quoted" },
+        { "include": "#keyword" },
+        { "include": "#function" },
+        { "include": "#duration" },
+        { "include": "#number" },
+        { "include": "#operator" },
+        { "include": "#variable" },
+        { "include": "#continuation" }
+      ]
+    },
+    "option": {
+      "match": "^\\s+((?:[A-Za-z0-9_.-]+|<[a-z_][a-z0-9_]*>)(?:\\s+(?:[A-Za-z0-9_.-]+|<[a-z_][a-z0-9_]*>))*)\\s+(\"(?:[^\"\\\\]|\\\\.)*\")\\s*$",
+      "captures": {
+        "1": {
+          "name": "entity.name.option.weavefile",
+          "patterns": [{ "match": "<[a-z_][a-z0-9_]*>", "name": "variable.parameter.slot.weavefile" }]
+        },
+        "2": { "name": "string.quoted.double.model.weavefile" }
+      }
+    },
+    "quoted": {
+      "begin": "\"",
+      "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.weavefile" } },
+      "end": "\"",
+      "endCaptures": { "0": { "name": "punctuation.definition.string.end.weavefile" } },
+      "name": "string.quoted.double.model.weavefile",
+      "patterns": [
+        { "match": "\\\\.", "name": "constant.character.escape.weavefile" },
+        { "include": "#variable" },
+        { "include": "#backtick" }
+      ]
+    },
+    "single-quoted": {
+      "match": "'[^']*'",
+      "name": "string.quoted.single.weavefile"
+    },
+    "keyword": {
+      "patterns": [
+        { "match": "\\b(MUST|SHOULD|MAY)\\b", "name": "storage.modifier.level.weavefile" },
+        { "match": "\\b(AFTER|EVERY|TRIES|PER|FOR|WITHIN|IF|BEFORE|FOLLOW|THEN|DECIDE|CODE)\\b", "name": "keyword.other.weavefile" },
+        { "match": "\\b(AND|OR|NOT)\\b", "name": "keyword.operator.logical.weavefile" },
+        { "match": "\\b(CPU|GPU|GB|TB|RAM|DISK)\\b", "name": "support.type.unit.weavefile" }
+      ]
+    },
+    "function": {
+      "match": "\\b(SINCE|PREV)(\\()([a-z_][a-z0-9_-]*)(\\))",
+      "captures": {
+        "1": { "name": "support.function.weavefile" },
+        "2": { "name": "punctuation.section.parens.weavefile" },
+        "3": { "name": "variable.other.weavefile" },
+        "4": { "name": "punctuation.section.parens.weavefile" }
+      }
+    },
+    "duration": { "match": "\\b\\d+[smhd]\\b", "name": "constant.numeric.duration.weavefile" },
+    "number": { "match": "\\b\\d+(?:\\.\\d+)?\\b", "name": "constant.numeric.weavefile" },
+    "operator": { "match": "<=|>=|==|!=|<|>|=|\\+|-(?=\\s)|\\*|/", "name": "keyword.operator.weavefile" },
+    "variable": { "match": "\\$\\{?[A-Za-z_][A-Za-z0-9_]*\\}?", "name": "variable.other.weavefile" },
+    "backtick": { "match": "`[^`]*`", "name": "markup.inline.raw.weavefile" },
+    "continuation": { "match": "\\\\$", "name": "constant.character.escape.line-continuation.weavefile" }
+  }
+}

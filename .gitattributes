@@ -1,0 +1,3 @@
+# GitHub has no Weavefile grammar yet; Dockerfile's colours the shared instructions.
+Weavefile linguist-language=Dockerfile
+*.weave   linguist-language=Dockerfile

@@ -1,0 +1,42 @@
+{
+  "name": "weavefile",
+  "displayName": "Weavefile",
+  "description": "Syntax highlighting for Subweave Weavefiles",
+  "version": "0.1.0",
+  "publisher": "subweave",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/subweave/subweave" },
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "weavefile",
+        "aliases": ["Weavefile", "weavefile"],
+        "filenames": ["Weavefile"],
+        "extensions": [".weave"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "weavefile",
+        "scopeName": "source.weavefile",
+        "path": "./weavefile.tmLanguage.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.shell": "shellscript",
+          "meta.embedded.line.shell": "shellscript"
+        }
+      },
+      {
+        "scopeName": "markdown.weavefile.codeblock",
+        "path": "./markdown-codeblock.json",
+        "injectTo": ["text.html.markdown"],
+        "embeddedLanguages": { "meta.embedded.block.weavefile": "weavefile" }
+      }
+    ]
+  },
+  "scripts": {
+    "package": "cp ../weavefile.tmLanguage.json . && npx --yes @vscode/vsce package"
+  }
+}
