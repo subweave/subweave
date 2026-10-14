@@ -1,6 +1,7 @@
 pub mod boxinfo;
 pub mod channel;
 pub mod cli;
+pub mod daemon;
 pub mod model;
 pub mod paths;
 pub mod plan;

@@ -1,6 +1,7 @@
 //! The `subweave` command line. Each command is one `Command` variant and one file
 //! with `Args` and `run`.
 
+mod daemon;
 mod key;
 mod plan;
 mod provider;
@@ -29,6 +30,8 @@ enum Command {
     Key(key::Args),
     /// Add, remove or list model providers
     Provider(provider::Args),
+    /// Run every service in the foreground; --install makes it a systemd service
+    Daemon(daemon::Args),
     /// Print the version
     Version,
 }
@@ -37,6 +40,7 @@ pub async fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Plan(args) => plan::run(args).await,
+        Command::Daemon(args) => daemon::run(args).await,
         Command::Key(args) => key::run(args),
         Command::Provider(args) => provider::run(args),
         Command::Version => version::run(),

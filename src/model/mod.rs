@@ -1,5 +1,6 @@
 //! The two model roles: decide and code. The run picks the models; a Weavefile hints.
 
+pub mod coder;
 pub mod decider;
 pub mod provider;
 
