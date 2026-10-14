@@ -256,6 +256,7 @@ ACTION fix WITHIN 30m
 - `DO` hands the task to the coder, unless this box already learned its steps.
 - `ADD <<EOF <path>` writes the heredoc to the path, byte for byte, with no `$name` replaced.
 - `subweave do <service> <action>` runs an action by hand, through the same rules.
+- `task` is no action name: it belongs to a person's task, `subweave task`.
 
 ## Rules
 
@@ -417,6 +418,8 @@ A `DO` task, when no learned steps or recipe made the goal hold:
 5. The coder says `done`, with the commands that made the fix and one line on the cause. The daemon checks the task's goal again with fresh facts; when it holds, the task passed.
 6. After two failed checks, the `THEN` model takes over. After 40 commands without a pass, the task failed.
 
+A person's task, from `subweave task <service> "<what to do>"` or the dashboard, is a `DO` task with no goal. It waits for the repair slot: one repair or task at a time. The coder gets the person's words as the task, with the ARGs, the rules, the facts and the skills. The same gates hold: every `NEVER` and `ASK`, and the box's own rule never to cut off SSH. `done` ends it, with the coder's summary. An `ask`, from a rule or from the coder, waits for the person; `yes` runs the task again with that rule passed, `no` ends it.
+
 ## Models
 
 Two roles use a model. The run picks both; a Weavefile only hints.
@@ -576,6 +579,10 @@ subweave channel test steery
 
 - `kind`: `check`, `decide`, `gate`, `action`, `command`, `learn`, `ask`, `answer`, `message`, `note`.
 - A `check` line holds the facts the goal read.
+- A `command` line holds `output`: stdout and stderr, secrets redacted, the last 4 KB.
+- An `ask` line holds `text`, its title, and `body`, what the channels got with it.
+- `by` says who acted, on lines a person causes: `answer`, a task, `do`, `tell`, `stop`, `start`, `forget`. `cli:<user>` at a terminal, `dash@<ip>` from the dashboard, the channel's answerer for an answer from a channel.
+- Every line of a person's task has `action: "task"`. It starts with `{"kind":"action","action":"task","text":"<the task>","by":"…"}`, with no `ok`, and ends with an `action` line whose `ok` says whether it was done and whose `text` is the coder's summary, or why it failed.
 - The decider reads the newest journal lines for the failing goal. `SINCE()`, `PREV()` and `TRIES` read the journal in code.
 
 ## The daemon and the CLI
@@ -599,6 +606,7 @@ brew install subweave                            # macOS: CLI only
 | `inbox`, `answer <n> <word>` | open asks from every service |
 | `watch` | messages from every box, as system notifications on this computer |
 | `do <service> <action>` | run one action now |
+| `task <service> "<what to do>"` | give the coder a task in words, through the same rules |
 | `learned <service>`, `forget <service> <name>` | the commands this box learned; drop one |
 | `learn <service>` | draft skill recipes from learned steps |
 | `channel add <kind> [<target>]`, `channel ls`, `channel rm <name>`, `channel test <name>` | where messages go |
@@ -606,6 +614,7 @@ brew install subweave                            # macOS: CLI only
 | `key <provider>` | store a provider's key, read from stdin |
 | `provider add <name> <endpoint> [--protocol openai\|anthropic]`, `provider rm <name>` | add or remove a provider |
 | `daemon [--install]` | run every service; `--install` makes it a systemd unit |
+| `dash [--install]`, `dash --bind <addr> --port <n> --password\|--no-password` | the web dashboard; flags set where it listens |
 | `version` | this binary's version |
 
 - `run` takes `--on <host>`, `--name <service>`, `--decide <model>`, `--code <model>` and `--yes`. The name defaults to the weave's name.
@@ -630,8 +639,36 @@ Files, as root on Linux. Elsewhere, `~/.config/subweave` and `~/.local/state/sub
 | `/etc/subweave/channels.json` | channels, mode 600 |
 | `/var/lib/subweave/inbox/` | commands from the CLI; the daemon applies and deletes them |
 | `/var/lib/subweave/services/<service>/` | `Weavefile`, `README.md`, `service.json`, `secrets.json` (mode 600), `journal.jsonl`, `learned.json`, `status.json` |
+| `/etc/subweave/dash.json` | the dashboard's address, port and password hash, mode 600 |
+| `/var/lib/subweave/dash/vitals.jsonl` | the box's vitals, one line a minute, 30 days |
+| `/var/lib/subweave/daemon.json` | the running daemon's pid and start time |
 
 On the person's computer, `~/.config/subweave/boxes.json` maps each service to its box.
+
+## Dashboard
+
+`subweave dash` serves a web dashboard for one box: every service's goals, activity as it happens, history, metrics, logs, learned commands and the weave. From it a person answers asks, runs an action, gives a task in words, changes settings in words (the `tell` check), stops and starts a service and forgets a learned command. It cannot `run` or `rm` a service: those stay on the CLI.
+
+It is a client of the daemon's files, like the CLI: it reads `services/` and writes `inbox/`. It runs as its own systemd unit, `subweave-dash.service`.
+
+```
+subweave dash --install                                  # on 127.0.0.1:7400, no password
+ssh -L 7400:127.0.0.1:7400 root@host                     # then open http://127.0.0.1:7400
+subweave dash --bind 0.0.0.0 --password --on root@host   # reads the password from stdin
+```
+
+| Setting | Default | |
+|---|---|---|
+| `--bind <addr>` | `127.0.0.1` | an address that is not loopback needs a password |
+| `--port <n>` | `7400` | |
+| `--password`, `--no-password` | no password | one line from stdin, kept as an argon2id hash |
+
+- With flags, `dash` saves them, restarts the unit when it is installed, and exits.
+- With no password there is no login, and the dashboard listens on loopback only.
+- With a password, the browser logs in once a week. Ten wrong passwords from one address lock it out for 10 minutes. A restart logs everyone out.
+- The dashboard can run commands as root through the coder. Put it behind HTTPS (a proxy that sends `X-Forwarded-Proto: https`) before it faces the internet.
+- Lines it causes carry `by: "dash@<ip>"`.
+- On Linux it samples the box's CPU, memory, load, disks and network every 10 s.
 
 ## Review
 
