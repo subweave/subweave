@@ -139,8 +139,9 @@ export interface ServiceSummary {
 export interface ServiceDetail {
   spec: Spec;
   status: Status | null;
-  weave: Weave;
-  weavefile: string;
+  /** null when the Weavefile on the box does not parse. */
+  weave: Weave | null;
+  weavefile: string | null;
   readme: string | null;
   learned: Learned;
   asks: Ask[];

@@ -166,7 +166,9 @@ export function FactsTable({ facts }: { facts: Record<string, string> }) {
         {entries.map(([k, v]) => (
           <tr key={k}>
             <th>{k}</th>
-            <td>{v}</td>
+            <td>
+              <div className={v.includes("\n") ? "fact-v fact-lines" : "fact-v"}>{v}</div>
+            </td>
           </tr>
         ))}
       </tbody>

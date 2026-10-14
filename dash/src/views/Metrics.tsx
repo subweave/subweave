@@ -20,6 +20,7 @@ function ChartCard({
   limits,
   format = num,
   sub,
+  join = false,
 }: {
   title: string;
   t: number[];
@@ -27,6 +28,7 @@ function ChartCard({
   limits?: Limit[];
   format?: (v: number | null) => string;
   sub?: string;
+  join?: boolean;
 }) {
   const vals = series[0].values.filter((v): v is number => v !== null);
   const last = lastOf(series[0].values);
@@ -35,6 +37,11 @@ function ChartCard({
       <header className="chart-head">
         <h3 className="mono">{title}</h3>
         {sub && <span className="t-muted small">{sub}</span>}
+        {limits?.map((l) => (
+          <span key={l.label} className="chart-limit small num" title="A goal's limit">
+            {l.label}
+          </span>
+        ))}
       </header>
       <div className="chart-nums">
         <span className="big-num num">{format(last)}</span>
@@ -44,7 +51,7 @@ function ChartCard({
           </span>
         )}
       </div>
-      {vals.length ? <TimeChart t={t} series={series} limits={limits} format={format} /> : <p className="chart-empty t-muted small">No values in this range.</p>}
+      {vals.length ? <TimeChart t={t} series={series} limits={limits} format={format} join={join} /> : <p className="chart-empty t-muted small">No values in this range.</p>}
     </section>
   );
 }
@@ -108,9 +115,9 @@ export function MetricsTab({ service, detail }: ServiceProps) {
   return (
     <div className="metrics">
       <div className="metrics-bar">
+        <h2 className="section-title">Box</h2>
         <Segmented label="Range" value={range} options={RANGES} onChange={setRange} />
       </div>
-      <h2 className="section-title">Box</h2>
       <VitalsCharts range={range} />
       <h2 className="section-title">Facts</h2>
       <ErrorLine error={m.error} />
@@ -124,6 +131,7 @@ export function MetricsTab({ service, detail }: ServiceProps) {
             t={t}
             series={[{ label: name, values }]}
             limits={limits[name]}
+            join
             format={isBytes(name) ? (v) => bytes(v) : num}
           />
         ))}

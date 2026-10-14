@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, type CSSProperties } from "react";
 import { api, type GoalState, type GoalStatus, type Line } from "../api";
 import { AskCard, TaskComposer } from "../components/act";
 import { Sparkline } from "../components/charts";
@@ -76,18 +76,20 @@ function GoalRow({
   const facts = check?.facts && Object.keys(check.facts).length ? check.facts : null;
   return (
     <>
-      <li className={`goal goal-${state}`} style={{ paddingLeft: 12 + depth * 20 }}>
+      <li className={`goal goal-${state}`} style={{ "--depth": depth } as CSSProperties}>
         <button type="button" className="goal-line" aria-expanded={facts ? open : undefined} disabled={!facts} onClick={() => setOpen(!open)}>
-          {depth > 0 && <span className="goal-elbow" aria-hidden="true" />}
-          <Glyph state={state} />
-          <span className="goal-name">{g.name}</span>
-          <span className={`goal-cond ${cond.quoted ? "t-model" : ""}`} title={cond.text}>
-            {cond.quoted ? `"${cond.text}"` : cond.text}
+          <span className="goal-who">
+            {depth > 0 && <span className="goal-elbow" aria-hidden="true" />}
+            <Glyph state={state} />
+            <span className="goal-name">{g.name}</span>
           </span>
-          <span className="goal-tags">
+          <span className="goal-what">
+            <span className={`goal-cond ${cond.quoted ? "t-model" : ""}`} title={cond.text}>
+              {cond.quoted ? `"${cond.text}"` : cond.text}
+            </span>
             {g.every && <span className="tag tag-muted">EVERY {g.every}</span>}
             {g.when && <span className="tag tag-muted" title={`IF ${g.when}`}>IF {g.when}</span>}
-            {node.alsoAfter.length > 0 && <span className="t-muted goal-also">also after {node.alsoAfter.join(", ")}</span>}
+            {node.alsoAfter.length > 0 && <span className="t-muted goal-also small">also after {node.alsoAfter.join(", ")}</span>}
           </span>
           <span className={`goal-since num t-${state === "fails" ? "red" : "muted"}`}>
             {st?.since ? `${state === "off" ? "off" : state} for ${dur(now - ms(st.since))}` : state}

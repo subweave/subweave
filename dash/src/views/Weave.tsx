@@ -96,14 +96,18 @@ const md = new Marked({
 });
 
 export function WeaveTab({ detail }: ServiceProps) {
-  const code = useMemo(() => highlight(detail.weavefile ?? ""), [detail.weavefile]);
+  const code = useMemo(() => (detail.weavefile === null ? null : highlight(detail.weavefile)), [detail.weavefile]);
   const readme = useMemo(() => (detail.readme ? (md.parse(detail.readme) as string) : null), [detail.readme]);
   return (
     <div className={`weave ${readme ? "has-readme" : ""}`}>
       <Panel title="Weavefile" className="weave-file">
-        <pre className="weavefile" aria-label="Weavefile">
-          <code>{code}</code>
-        </pre>
+        {code ? (
+          <pre className="weavefile" aria-label="Weavefile">
+            <code>{code}</code>
+          </pre>
+        ) : (
+          <p className="empty">No Weavefile for this service on the box.</p>
+        )}
       </Panel>
       {readme && (
         <Panel title="README" className="weave-readme">

@@ -4,25 +4,23 @@ import "uplot/dist/uPlot.min.css";
 import type { Series } from "../api";
 import { full, num } from "../format";
 
-/** A small line with no axes; gaps break it. */
+/** A small line with no axes, from the first value on. Facts are checked now and then, so
+ *  it joins the values across the empty buckets between them. */
 export function Sparkline({ values, height = 28, label }: { values: Series; height?: number; label: string }) {
   const w = 120;
-  const nums = values.filter((v): v is number => v !== null);
+  const first = values.findIndex((v) => v !== null);
+  const shown = first < 0 ? [] : values.slice(first);
+  const nums = shown.filter((v): v is number => v !== null);
   if (nums.length < 2) return <svg className="spark" viewBox={`0 0 ${w} ${height}`} role="img" aria-label={`${label}: no data`} />;
   const lo = Math.min(...nums);
   const hi = Math.max(...nums);
   const span = hi - lo || 1;
-  const step = w / Math.max(1, values.length - 1);
+  const step = w / Math.max(1, shown.length - 1);
   let d = "";
-  let pen = false;
-  values.forEach((v, k) => {
-    if (v === null) {
-      pen = false;
-      return;
-    }
-    const y = height - 2 - ((v - lo) / span) * (height - 4);
-    d += `${pen ? "L" : "M"}${(k * step).toFixed(1)} ${y.toFixed(1)}`;
-    pen = true;
+  shown.forEach((v, k) => {
+    if (v === null) return;
+    const y = hi === lo ? height / 2 : height - 2 - ((v - lo) / span) * (height - 4);
+    d += `${d ? "L" : "M"}${(k * step).toFixed(1)} ${y.toFixed(1)}`;
   });
   return (
     <svg className="spark" viewBox={`0 0 ${w} ${height}`} preserveAspectRatio="none" role="img" aria-label={label}>
@@ -52,19 +50,22 @@ export interface Limit {
   label: string;
 }
 
-/** A time chart: one or two lines, a crosshair with value and time, dashed limit lines. */
+/** A time chart: one or two lines, a crosshair with value and time, dashed limit lines.
+ *  `join`: draw across empty buckets (facts are read now and then; box samples are not). */
 export function TimeChart({
   t,
   series,
   limits = [],
   format = num,
   height = 160,
+  join = false,
 }: {
   t: number[];
   series: { label: string; values: Series; color?: string }[];
   limits?: Limit[];
   format?: (v: number | null) => string;
   height?: number;
+  join?: boolean;
 }) {
   const box = useRef<HTMLDivElement>(null);
   const tip = useRef<HTMLDivElement>(null);
@@ -118,13 +119,14 @@ export function TimeChart({
         x: { time: true },
         y: {
           range: (_u, lo, hi) => {
-            // Keep a limit in view when it is near the data, and never a flat line.
-            const all = [lo, hi, ...lims.filter((v) => v <= Math.max(hi, 0) * 1.6 + 1)];
+            // Keep a limit in view when it is within reach of the data; flat data gets room.
+            const all = [lo, hi, ...lims.filter((v) => Math.abs(v) <= Math.max(Math.abs(hi), Math.abs(lo), 1) * 4)];
             let a = Math.min(...all);
             let b = Math.max(...all);
             if (a === b) {
-              a -= Math.abs(a) * 0.1 || 1;
-              b += Math.abs(b) * 0.1 || 1;
+              const r = Math.abs(a) * 0.2 || 1;
+              b += r;
+              a = a >= 0 && a - r < 0 ? 0 : a - r;
             }
             const pad = (b - a) * 0.08;
             return [a >= 0 && a - pad < 0 ? 0 : a - pad, b + pad];
@@ -149,8 +151,9 @@ export function TimeChart({
           label: s.label,
           stroke: colors[k],
           width: 1.5,
-          spanGaps: false,
-          points: { show: false },
+          spanGaps: join,
+          // Few values: show each as a point.
+          points: { show: s.values.filter((v) => v !== null).length < 40, size: 4, fill: colors[k] },
         })),
       ],
       hooks: {
@@ -193,7 +196,7 @@ export function TimeChart({
       ro.disconnect();
       plot.destroy();
     };
-  }, [t, height, dark, limitsKey, ...series.map((s) => s.values)]);
+  }, [t, height, dark, join, limitsKey, ...series.map((s) => s.values)]);
 
   return (
     <div className="chart">

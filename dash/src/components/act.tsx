@@ -4,6 +4,24 @@ import { ago, useNow } from "../format";
 import { linkClick, servicePath } from "../router";
 import { ErrorLine, errorText, FactsTable } from "./ui";
 
+/** Short fact sets show at once; long ones (a whole log, a config) open on a click. */
+function AskFacts({ facts }: { facts: Record<string, string> }) {
+  const n = Object.keys(facts).length;
+  const long = n > 4 || Object.values(facts).some((v) => v.split("\n").length > 3);
+  const [open, setOpen] = useState(!long);
+  if (!n) return null;
+  return (
+    <div className="ask-facts">
+      {long && (
+        <button type="button" className="disclose" aria-expanded={open} onClick={() => setOpen(!open)}>
+          {n} facts the decider read
+        </button>
+      )}
+      {open && <FactsTable facts={facts} />}
+    </div>
+  );
+}
+
 export function AskCard({ ask, showService = false, onAnswered }: { ask: Ask; showService?: boolean; onAnswered?: () => void }) {
   const now = useNow(30_000);
   const [sent, setSent] = useState<string | null>(null);
@@ -45,7 +63,7 @@ export function AskCard({ ask, showService = false, onAnswered }: { ask: Ask; sh
           {[ask.action && `action ${ask.action}`, ask.goal && `goal ${ask.goal}`, ask.rule && `rule ${ask.rule}`].filter(Boolean).join(" · ")}
         </p>
       )}
-      <FactsTable facts={ask.facts} />
+      <AskFacts facts={ask.facts} />
       {sent ? (
         <p className="ask-sent">
           Answered <b>{sent}</b>. The daemon picks it up within seconds.

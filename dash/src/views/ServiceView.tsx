@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type Line, type ServiceDetail, type Status } from "../api";
+import { api, type Line, type ServiceDetail, type Status, type Weave } from "../api";
 import { useAppData } from "../App";
 import { TaskComposer } from "../components/act";
 import { ErrorLine, Glyph, Skeleton } from "../components/ui";
@@ -28,7 +28,7 @@ const TAB_LABEL: Record<Tab, string> = {
 
 export interface ServiceProps {
   service: string;
-  detail: ServiceDetail;
+  detail: ServiceDetail & { weave: Weave };
   status: Status | null;
   reload: () => void;
 }
@@ -70,7 +70,19 @@ export function ServiceView({ service, tab }: { service: string; tab: Tab }) {
   const stopped = status?.stopped ?? detail.data?.spec.stopped ?? false;
   const staleFor = status && !stopped ? now - ms(status.t) : 0;
   const d = detail.data;
-  const props = d ? { service, detail: d, status, reload } : null;
+  // A Weavefile that does not parse still has the goals its status names.
+  const weave: Weave | null = d
+    ? (d.weave ?? {
+        name: service,
+        about: null,
+        args: [],
+        facts: [],
+        goals: (status?.goals ?? []).map((g) => ({ name: g.name, after: [], every: null, tries: null, cond: { code: "" }, when: null, line: 0 })),
+        actions: [],
+        model: { decide: null, code: [] },
+      })
+    : null;
+  const props = d && weave ? { service, detail: { ...d, weave }, status, reload } : null;
 
   return (
     <div className="page page-service">
@@ -111,6 +123,7 @@ export function ServiceView({ service, tab }: { service: string; tab: Tab }) {
           The daemon has not written status for {dur(staleFor)}. Is <code>subweave daemon</code> running?
         </p>
       )}
+      {d && !d.weave && <p className="stale">The Weavefile on this box does not parse. Goals show from the daemon's status only.</p>}
       {!status && d && !stopped && <p className="stale">No status yet. The daemon writes it after its first check.</p>}
       <nav className="tabs" aria-label={`${service} sections`}>
         {TABS.map((t) => (
