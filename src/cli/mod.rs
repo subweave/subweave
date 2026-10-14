@@ -4,6 +4,7 @@
 mod key;
 mod plan;
 mod provider;
+mod review;
 mod version;
 
 use std::process::ExitCode;
@@ -29,6 +30,8 @@ enum Command {
     Key(key::Args),
     /// Add, remove or list model providers
     Provider(provider::Args),
+    /// Score a weave against the review rules; changes nothing
+    Review(review::Args),
     /// Print the version
     Version,
 }
@@ -39,6 +42,7 @@ pub async fn main() -> ExitCode {
         Command::Plan(args) => plan::run(args).await,
         Command::Key(args) => key::run(args),
         Command::Provider(args) => provider::run(args),
+        Command::Review(args) => review::run(args).await,
         Command::Version => version::run(),
     };
     match result {

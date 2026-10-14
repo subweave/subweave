@@ -29,6 +29,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
+toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse", "preserve_order"] }
 uuid = { version = "1", features = ["v7"] }
 
 [profile.release]
