@@ -68,7 +68,7 @@ pub(crate) async fn do_task(
     rules_ok: &[String],
 ) -> DoResult {
     let task = weave::subst(task, &ctx.spec.args);
-    let values = facts::read(ctx, &facts::all(&ctx.w), false).await;
+    let values = facts::known(ctx, &facts::all(&ctx.w)).await;
     let skills = pick_skills(ctx, goal, &task, &values).await;
     let mut ran = Vec::new();
     'recipes: for s in &skills {
@@ -305,7 +305,7 @@ async fn session(
     let mut ok_cmds: Vec<String> = Vec::new();
     let mut history: Vec<String> = Vec::new();
     for i in 0..coder.len() {
-        let values = facts::read(ctx, &facts::all(&ctx.w), false).await;
+        let values = facts::known(ctx, &facts::all(&ctx.w)).await;
         let system = system_prompt(ctx, goal, task, &values, skills, prior);
         let mut first = "Make the goal hold.".to_string();
         if !history.is_empty() {
@@ -500,15 +500,18 @@ async fn shell(
             return Ok((command, "Refused: no decider to check the rules.".into()));
         };
         let mut questions = IndexMap::new();
-        for (i, (_, never, text)) in quoted.iter().enumerate() {
-            let instructions = if *never {
-                format!("Does this command, given its purpose, do this forbidden thing: {text}?")
-            } else {
-                format!(
-                    "Does this command, given its purpose, need the person's yes first: {text}?"
-                )
-            };
-            questions.insert(format!("rule{i}"), Question::Noul { instructions });
+        // "Is running this command a case of" judges the act. "Does it do this forbidden
+        // thing" let shared words win: a read-only curl hit "accept connections from the
+        // internet" at 0.75. On 25 commands, 5 rules each: 0 wrong (true >= 0.58, false
+        // <= 0.34), against 5 wrong for the old question.
+        for (i, (_, _, text)) in quoted.iter().enumerate() {
+            let act = text.strip_prefix("before ").unwrap_or(text);
+            questions.insert(
+                format!("rule{i}"),
+                Question::Noul {
+                    instructions: format!("Is running this command a case of: {act}?"),
+                },
+            );
         }
         let state = json!({"command": ctx.redact(&command), "purpose": ctx.redact(&purpose)});
         let answers = match decider.ask(state, questions).await {
@@ -544,7 +547,7 @@ async fn shell(
             if kept == Some("always") || rules_ok.iter().any(|ok| *ok == rule) {
                 continue;
             }
-            let values = facts::read(ctx, &facts::all(&ctx.w), false).await;
+            let values = facts::known(ctx, &facts::all(&ctx.w)).await;
             ctx.ask(AskReq {
                 goal: Some(goal.name.clone()),
                 action: Some(a.name.clone()),

@@ -130,10 +130,16 @@ impl Decider {
             if let Some(key) = &self.key {
                 req = req.bearer_auth(key);
             }
-            let retry = match req.send().await {
+            // A body read that fails or times out is an error, never an empty answer.
+            let sent = match req.send().await {
                 Ok(resp) => {
                     let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
+                    resp.text().await.map(|text| (status, text))
+                }
+                Err(e) => Err(e),
+            };
+            let retry = match sent {
+                Ok((status, text)) => {
                     if status.is_success() {
                         break text;
                     }
@@ -148,7 +154,7 @@ impl Decider {
                     }
                     err
                 }
-                Err(e) if e.is_timeout() || e.is_connect() || e.is_request() => {
+                Err(e) if e.is_timeout() || e.is_connect() || e.is_request() || e.is_body() => {
                     anyhow!("decider {}: {e}", self.model)
                 }
                 Err(e) => return Err(anyhow!("decider {}: {e}", self.model)),

@@ -78,7 +78,7 @@ async fn repair(ctx: &Ctx, job: &Job) -> Outcome {
     let Some(goal) = ctx.w.goal(&job.goal) else {
         return Outcome::Nothing;
     };
-    let values = facts::read(ctx, &facts::all(&ctx.w), false).await;
+    let values = facts::known(ctx, &facts::all(&ctx.w)).await;
     let shown = facts::shown(&values);
     let (action, rules_ok) = match &job.forced {
         Some(f) => {

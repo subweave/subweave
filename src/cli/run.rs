@@ -78,8 +78,9 @@ pub async fn run(args: Args) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `run --on`: the weave directory and the model keys go to the box, then the same
-/// command runs there; the box is remembered for the service.
+/// `run --on`: the weave directory, the model keys and each SECRET set in this shell go
+/// to the box, then the same command runs there; the box asks for the other SECRETs.
+/// The box is remembered for the service.
 pub async fn forward(args: Args, host: &str, mut argv: Vec<String>) -> Result<i32> {
     let Some(w) = super::load(&args.weave).await? else {
         return Ok(1);
@@ -104,6 +105,18 @@ pub async fn forward(args: Args, host: &str, mut argv: Vec<String>) -> Result<i3
         cleanup = Some(tmp);
     }
     let mut line = remote::command_line(&argv);
+    let secrets: Vec<(String, String)> = w
+        .secrets
+        .iter()
+        .filter_map(|s| {
+            let v = std::env::var(&s.name).ok().filter(|v| !v.is_empty())?;
+            Some((s.name.clone(), v))
+        })
+        .collect();
+    if !secrets.is_empty() {
+        let env = remote::quote(&remote::send_env(host, &secrets)?);
+        line = format!(". {env} && rm -f {env} && {line}");
+    }
     if let Some(tmp) = cleanup {
         line = format!("{line}; s=$?; rm -rf {}; exit $s", remote::quote(&tmp));
     }

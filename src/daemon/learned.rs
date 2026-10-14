@@ -134,28 +134,34 @@ fn scan(e: &Expr, fact: &str, value: bool, found: &mut Form) {
     }
 }
 
+/// The learned command of a quoted fact while its key holds.
+pub(crate) fn learned_command(ctx: &Ctx, fact: &Fact) -> Option<String> {
+    let FactSource::Quoted(text) = &fact.source else {
+        return None;
+    };
+    let k = key(&weave::subst(text, &ctx.spec.args));
+    ctx.learned()
+        .facts
+        .get(&fact.name)
+        .filter(|l| l.key == k)
+        .map(|l| l.command.clone())
+}
+
 /// The command for a quoted fact: the learned one while its key holds, else a new one
 /// from the coder. `None` when none is learned and none can be now.
 pub(crate) async fn fact_command(ctx: &Ctx, fact: &Fact) -> Option<String> {
     let FactSource::Quoted(text) = &fact.source else {
         return None;
     };
-    let text = weave::subst(text, &ctx.spec.args);
-    let k = key(&text);
-    let known = |ctx: &Ctx| {
-        ctx.learned()
-            .facts
-            .get(&fact.name)
-            .filter(|l| l.key == k)
-            .map(|l| l.command.clone())
-    };
-    if let Some(c) = known(ctx) {
+    if let Some(c) = learned_command(ctx, fact) {
         return Some(c);
     }
     let _one = ctx.learning.lock().await;
-    if let Some(c) = known(ctx) {
+    if let Some(c) = learned_command(ctx, fact) {
         return Some(c);
     }
+    let text = weave::subst(text, &ctx.spec.args);
+    let k = key(&text);
     if ctx
         .learn_wait
         .lock()

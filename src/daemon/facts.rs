@@ -185,6 +185,17 @@ pub(crate) fn all(w: &Weave) -> BTreeSet<String> {
 /// a coder is reachable; one that cannot be learned has no value. `consume` takes the
 /// FOLLOW lines (a check); a repair only looks.
 pub(crate) async fn read(ctx: &Ctx, names: &BTreeSet<String>, consume: bool) -> Values {
+    read_with(ctx, names, consume, true).await
+}
+
+/// Reads the facts named that have a command now, for the state a model sees: a quoted
+/// fact not learned yet has no value. Only checks learn, so a repair never waits on a
+/// coder call for each fact its goal does not read.
+pub(crate) async fn known(ctx: &Ctx, names: &BTreeSet<String>) -> Values {
+    read_with(ctx, names, false, false).await
+}
+
+async fn read_with(ctx: &Ctx, names: &BTreeSet<String>, consume: bool, learn: bool) -> Values {
     let mut out = Values::new();
     for name in names {
         let Some(fact) = ctx.w.fact(name) else {
@@ -192,10 +203,17 @@ pub(crate) async fn read(ctx: &Ctx, names: &BTreeSet<String>, consume: bool) -> 
         };
         let command = match &fact.source {
             FactSource::Command(c) => c.clone(),
-            FactSource::Quoted(_) => match learned::fact_command(ctx, fact).await {
-                Some(c) => c,
-                None => continue,
-            },
+            FactSource::Quoted(_) => {
+                let c = if learn {
+                    learned::fact_command(ctx, fact).await
+                } else {
+                    learned::learned_command(ctx, fact)
+                };
+                match c {
+                    Some(c) => c,
+                    None => continue,
+                }
+            }
         };
         if fact.follow {
             let text = {

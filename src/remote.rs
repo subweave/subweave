@@ -1,8 +1,8 @@
 //! Commands on another box: the CLI there does the work, this one forwards over ssh.
 //!
 //! Before a command, the box gets this exact `subweave` version; `run` also sends the
-//! weave directory and the models' keys. `boxes.json` remembers which box runs each
-//! service, so later commands take the name alone.
+//! weave directory, the models' keys and the SECRETs set here. `boxes.json` remembers
+//! which box runs each service, so later commands take the name alone.
 
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
@@ -180,7 +180,8 @@ pub fn upload_dir(host: &str, dir: &Path) -> Result<(String, String)> {
         .env("COPYFILE_DISABLE", "1")
         .arg("-C")
         .arg(&dir)
-        .args(["-cf", "-", "."])
+        // macOS tar adds its extended attributes, which GNU tar on the box warns about.
+        .args(["--no-xattrs", "-cf", "-", "."])
         .stdout(Stdio::piped())
         .spawn()
         .context("running tar")?;
@@ -198,6 +199,30 @@ pub fn upload_dir(host: &str, dir: &Path) -> Result<(String, String)> {
         bail!("copying {} to {host} failed", dir.display());
     }
     Ok((remote, tmp))
+}
+
+/// Gives the box `vars` in a file only this user reads, for the next line to source and
+/// delete: no value appears in a command line. Gives the file's path.
+pub fn send_env(host: &str, vars: &[(String, String)]) -> Result<String> {
+    let path = format!("/tmp/subweave-{}.env", uuid::Uuid::now_v7());
+    let body: String = vars
+        .iter()
+        .map(|(k, v)| format!("export {k}={}\n", quote(v)))
+        .collect();
+    let mut child = ssh(host, false)
+        .arg(format!("umask 077 && cat > {}", quote(&path)))
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("running ssh")?;
+    child
+        .stdin
+        .take()
+        .context("ssh's stdin")?
+        .write_all(body.as_bytes())?;
+    if !child.wait()?.success() {
+        bail!("sending the secrets to {host} failed");
+    }
+    Ok(path)
 }
 
 /// Gives the box each model's provider (when added here) and its key (when this machine

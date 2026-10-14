@@ -45,6 +45,8 @@ pub struct Reply {
     pub calls: Vec<Call>,
     pub cost_usd: f64,
     pub input_tokens: u64,
+    /// Input tokens the provider read from its prompt cache, part of `input_tokens`.
+    pub cached_tokens: u64,
     pub output_tokens: u64,
 }
 
@@ -55,6 +57,7 @@ pub struct Tally {
     /// Input tokens of the first request: the system prompt and the first message.
     pub first_input: u64,
     pub input: u64,
+    pub cached: u64,
     pub output: u64,
     pub cost_usd: f64,
 }
@@ -66,15 +69,16 @@ impl Tally {
         }
         self.calls += 1;
         self.input += r.input_tokens;
+        self.cached += r.cached_tokens;
         self.output += r.output_tokens;
         self.cost_usd += r.cost_usd;
     }
 
-    /// `3 calls, system prompt 2140 chars, first request 812 tokens in, 2950 in, 210 out`.
+    /// `3 calls, system prompt 2140 chars, first request 812 tokens in, 2950 in (1600 cached), 210 out`.
     pub fn describe(&self, system_chars: usize) -> String {
         format!(
-            "{} calls, system prompt {system_chars} chars, first request {} tokens in, {} in, {} out",
-            self.calls, self.first_input, self.input, self.output
+            "{} calls, system prompt {system_chars} chars, first request {} tokens in, {} in ({} cached), {} out",
+            self.calls, self.first_input, self.input, self.cached, self.output
         )
     }
 }
@@ -152,10 +156,17 @@ impl Coder {
             if ep.provider.protocol == Protocol::Anthropic {
                 req = req.header("anthropic-version", "2023-06-01");
             }
-            let retry = match req.send().await {
+            // OpenRouter sends 200 at once and holds the body until the model answers, so
+            // the 120 s limit can end while the body is read: that is a timeout too.
+            let sent = match req.send().await {
                 Ok(resp) => {
                     let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
+                    resp.text().await.map(|text| (status, text))
+                }
+                Err(e) => Err(e),
+            };
+            let retry = match sent {
+                Ok((status, text)) => {
                     if status.is_success() {
                         break text;
                     }
@@ -174,7 +185,7 @@ impl Coder {
                 Err(e) if e.is_timeout() => {
                     return Err(anyhow!("coder {}: no answer in 120 s", ep.model));
                 }
-                Err(e) if e.is_connect() || e.is_request() => {
+                Err(e) if e.is_connect() || e.is_request() || e.is_body() => {
                     anyhow!("coder {}: {}", ep.model, e.without_url())
                 }
                 Err(e) => return Err(anyhow!("coder {}: {}", ep.model, e.without_url())),
@@ -274,6 +285,10 @@ fn openai_reply(model: &ModelRef, v: &Value) -> Result<Reply> {
         calls,
         cost_usd: v["usage"]["cost"].as_f64().unwrap_or(0.0),
         input_tokens: v["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
+        cached_tokens: v
+            .pointer("/usage/prompt_tokens_details/cached_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
         output_tokens: v["usage"]["completion_tokens"].as_u64().unwrap_or(0),
     })
 }
@@ -349,12 +364,17 @@ fn anthropic_reply(model: &ModelRef, v: &Value) -> Result<Reply> {
             _ => {}
         }
     }
+    // Anthropic counts cache reads and writes apart from `input_tokens`.
+    let u = &v["usage"];
+    let count = |k: &str| u[k].as_u64().unwrap_or(0);
+    let cached = count("cache_read_input_tokens");
     Ok(Reply {
         text,
         calls,
-        cost_usd: v["usage"]["cost"].as_f64().unwrap_or(0.0),
-        input_tokens: v["usage"]["input_tokens"].as_u64().unwrap_or(0),
-        output_tokens: v["usage"]["output_tokens"].as_u64().unwrap_or(0),
+        cost_usd: u["cost"].as_f64().unwrap_or(0.0),
+        input_tokens: count("input_tokens") + cached + count("cache_creation_input_tokens"),
+        cached_tokens: cached,
+        output_tokens: count("output_tokens"),
     })
 }
 
