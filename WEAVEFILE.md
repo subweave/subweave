@@ -536,9 +536,9 @@ The daemon sends two kinds of message:
 |---|---|---|
 | ask | the loop waits for the person: a rule, a decision under 0.5, `steered`, `TRIES` used up, a goal no action fits | `yes`, `no`, `always`, `never`, or an action's name |
 | warning | a goal starts failing, and the loop acts | — |
-| info | a goal holds again; `run` or `tell` finished; a command was learned | — |
+| info | a goal holds again; an ask is withdrawn; `run` or `tell` finished; a command was learned | — |
 
-A goal that fails again within 10 minutes of holding sends nothing new.
+A goal that fails again within 10 minutes of holding sends nothing new. An ask the loop raised for a goal is withdrawn when the goal holds again: the journal gets an `answer` line with `text: "withdrawn"`, and the goal is no longer parked.
 
 A channel is where messages go. Channels belong to the daemon, not to the weave: every service on the box uses them.
 
@@ -564,6 +564,7 @@ subweave channel test steery
 - `--level ask|warning|info` sets the lowest message a channel gets. The default is `warning`; for `steery`, `ask`.
 - An ask goes to every channel that answers, and as a message to the rest, with the command that answers it: `subweave answer 3 yes`.
 - The first answer settles the ask. The other channels show who answered.
+- A withdrawn ask loses its buttons in `telegram`. Steery has no withdraw call: a request the daemon stops polling is withdrawn by Steery after 15 minutes.
 - `steery`: the daemon raises each ask as a request with its own key, and reads the answer with a long poll, so the box needs no open port. Steery shows the person the facts and the rule; the answer is a signature from the person's device, which the daemon checks before it acts.
 - `heartbeat`: a service such as healthchecks.io alerts when the pings stop. That is the only alert when the whole box is down: see [LIMITS.md](LIMITS.md#9-one-box-no-failover).
 - On the person's computer, `subweave watch` shows every box's messages as system notifications.
@@ -583,7 +584,8 @@ subweave channel test steery
 - A `command` line holds `output`: stdout and stderr, secrets redacted, the last 4 KB.
 - An `ask` line holds `text`, its title, and `body`, what the channels got with it.
 - `by` says who acted, on lines a person causes: `answer`, a task, `do`, `tell`, `stop`, `start`, `forget`. `cli:<user>` at a terminal, `dash@<ip>` from the dashboard, the channel's answerer for an answer from a channel.
-- Every line of a person's task has `action: "task"`. It starts with `{"kind":"action","action":"task","text":"<the task>","by":"…"}`, with no `ok`, and ends with an `action` line whose `ok` says whether it was done and whose `text` is the coder's summary, or why it failed.
+- Every line of a person's task has `action: "task"`. It starts with `{"kind":"action","action":"task","text":"<the task>","by":"…"}`, with no `ok`, when the task starts, and ends with an `action` line whose `ok` says whether it was done and whose `text` is the coder's summary, or why it failed: `ended: the service stopped` when a stop or new settings cut it off.
+- A task that asks waits for the answer; other tasks wait behind it. `yes` runs it again with every rule passed so far and what its earlier runs did.
 - The decider reads the newest journal lines for the failing goal. `SINCE()`, `PREV()` and `TRIES` read the journal in code.
 
 ## The daemon and the CLI

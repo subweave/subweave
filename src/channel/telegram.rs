@@ -125,6 +125,23 @@ pub(super) async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
     Ok(Some(Sent(serde_json::to_value(asked)?)))
 }
 
+/// Takes the buttons off an ask's message.
+pub(super) async fn close(ch: &Channel, sent: &Sent) -> Result<()> {
+    let asked: Asked = serde_json::from_value(sent.0.clone())
+        .map_err(|e| anyhow!("not a Telegram message: {e}"))?;
+    call::<Value>(
+        token(ch)?,
+        "editMessageReplyMarkup",
+        &json!({
+            "chat_id": asked.chat,
+            "message_id": asked.message,
+            "reply_markup": {"inline_keyboard": []},
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
 /// One `getUpdates` long poll. A button press on an open ask's own message becomes an
 /// answer; every press is acknowledged so the button stops spinning.
 pub(super) async fn poll(ch: &Channel, open: &[(u64, Sent)]) -> Result<Vec<Answer>> {

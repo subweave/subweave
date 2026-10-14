@@ -1162,6 +1162,40 @@ async fn daemon_and_cli_keep_a_toy_service() {
     );
     assert_eq!(mock.count("/chat/completions"), chats_after_install);
 
+    // 6f. An ask whose goal holds again is withdrawn: the person brought the server back.
+    phase("6f withdrawn ask");
+    std::fs::write(dir.join("scene"), "unsure").unwrap();
+    kill_pidfile(&dir.join("toy.pid"));
+    let (n, _) = b
+        .until("a second which-action ask", 30, || b.open_ask("running"))
+        .await;
+    std::fs::write(dir.join("scene"), "calm").unwrap();
+    let started_by_hand = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "cd '{}' && nohup python3 -m http.server {port} --bind 127.0.0.1 >/dev/null 2>&1 & echo $! > '{}'",
+            www.display(),
+            dir.join("toy.pid").display()
+        ))
+        .status()
+        .unwrap();
+    assert!(started_by_hand.success());
+    let withdrawn = b
+        .until("the withdrawn answer", 30, || {
+            b.lines("answer", |l| l["n"] == n).into_iter().next()
+        })
+        .await;
+    assert_eq!(withdrawn["text"], "withdrawn", "{withdrawn}");
+    assert_eq!(withdrawn["by"], "daemon: running holds again", "{withdrawn}");
+    let out = b.ok(&["inbox"]).await;
+    assert!(out.contains("no open asks"), "{out}");
+    b.until("the webhook to hear the withdrawal", 10, || {
+        mock.hooks()
+            .into_iter()
+            .find(|h| h["title"] == format!("#{n} withdrawn"))
+    })
+    .await;
+
     // 7. ps, log, learned.
     phase("7 ps, log, learned");
     let out = b.ok(&["ps"]).await;

@@ -40,11 +40,31 @@ fn save_sent(sent: &BTreeMap<u64, SentAsk>) {
     }
 }
 
-pub(crate) fn forget_sent(shared: &Shared, n: u64) {
+pub(crate) fn forget_sent(shared: &Shared, n: u64) -> Option<SentAsk> {
     let mut sent = shared.sent.lock().unwrap_or_else(|e| e.into_inner());
-    if sent.remove(&n).is_some() {
+    let gone = sent.remove(&n);
+    if gone.is_some() {
         save_sent(&sent);
     }
+    gone
+}
+
+/// An ask nobody needs to answer now: no channel polls for it, and each channel that
+/// showed buttons takes them away.
+pub(crate) fn withdraw(shared: &Shared, n: u64) {
+    let Some(gone) = forget_sent(shared, n) else {
+        return;
+    };
+    tokio::spawn(async move {
+        let channels = channel::ls().unwrap_or_default();
+        for (name, sent) in gone.sent {
+            if let Some(ch) = channels.iter().find(|c| c.name == name) {
+                if let Err(e) = channel::close(ch, &sent).await {
+                    eprintln!("ask #{n}: {e:#}");
+                }
+            }
+        }
+    });
 }
 
 impl Shared {
@@ -136,6 +156,13 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
         for ch in channels {
             match channel::send(&ch, &msg).await {
                 Ok(Some(s)) => {
+                    // Settled while it was being sent: nothing to poll, no buttons.
+                    if shared.answered.lock().unwrap_or_else(|e| e.into_inner()).contains(&n) {
+                        if let Err(e) = channel::close(&ch, &s).await {
+                            eprintln!("ask #{n}: {e:#}");
+                        }
+                        continue;
+                    }
                     let mut sent = shared.sent.lock().unwrap_or_else(|e| e.into_inner());
                     let entry = sent.entry(n).or_default();
                     entry.service = service.clone();

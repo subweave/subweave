@@ -45,6 +45,10 @@ pub(crate) enum Ctl {
     Forget { name: String, by: String },
 }
 
+/// The person's tasks a loop runs or has queued, kept current for the daemon: when it
+/// halts the loop, each gets its end line. A started one (`again`) has its start line.
+pub(crate) type Tasks = Arc<Mutex<Vec<TaskJob>>>;
+
 /// What a service's loop and its repair share.
 pub(crate) struct Ctx {
     pub shared: Arc<Shared>,
@@ -280,7 +284,10 @@ struct Loop {
     announce: bool,
     repairs: JoinSet<(Option<String>, Outcome)>,
     running: Option<String>,
+    /// The person's task in the slot.
+    task: Option<TaskJob>,
     pending: VecDeque<Job>,
+    tasks: Tasks,
     status_at: Option<Instant>,
     dirty: bool,
 }
@@ -290,6 +297,7 @@ pub(crate) async fn run(
     name: String,
     mut ctl: mpsc::UnboundedReceiver<Ctl>,
     announce: bool,
+    tasks: Tasks,
 ) {
     let ctx = match Ctx::load(shared, &name) {
         Ok(c) => Arc::new(c),
@@ -331,7 +339,9 @@ pub(crate) async fn run(
         announce,
         repairs: JoinSet::new(),
         running: None,
+        task: None,
         pending: VecDeque::new(),
+        tasks,
         status_at: None,
         dirty: true,
     };
@@ -343,10 +353,28 @@ pub(crate) async fn run(
             Some(c) = ctl.recv() => l.control(c),
             Some(r) = l.repairs.join_next(), if !l.repairs.is_empty() => l.repaired(r),
         }
+        l.keep_tasks();
     }
 }
 
 impl Loop {
+    fn keep_tasks(&self) {
+        let mut kept = lock(&self.tasks);
+        let queued = self.pending.iter().any(|j| matches!(j, Job::Task(_)));
+        if kept.is_empty() && self.task.is_none() && !queued {
+            return;
+        }
+        *kept = self
+            .task
+            .iter()
+            .cloned()
+            .chain(self.pending.iter().filter_map(|j| match j {
+                Job::Task(t) => Some(t.clone()),
+                Job::Repair(_) => None,
+            }))
+            .collect();
+    }
+
     async fn tick(&mut self) {
         let ctx = self.ctx.clone();
         let w = &ctx.w;
@@ -533,6 +561,39 @@ impl Loop {
                 );
             }
         }
+        if state == GoalState::Holds {
+            self.withdraw(&g.name);
+        }
+    }
+
+    /// Asks for `goal` the loop raised are moot once it holds: each gets a `withdrawn`
+    /// answer, its channel message loses its buttons, and the channels hear it.
+    /// Checked on every pass, not only on the change, so an ask left open by an older
+    /// daemon closes too.
+    fn withdraw(&self, goal: &str) {
+        let ctx = &self.ctx;
+        let open = ctx.journal().open_for(goal);
+        for n in open {
+            if !lock(&ctx.shared.answered).insert(n) {
+                continue;
+            }
+            ctx.journal().add(Line {
+                kind: Kind::Answer,
+                goal: Some(goal.to_string()),
+                text: Some(svc::WITHDRAWN.to_string()),
+                n: Some(n),
+                by: Some(format!("daemon: {goal} holds again")),
+                ..Default::default()
+            });
+            asks::withdraw(&ctx.shared, n);
+            ctx.message(
+                channel::Kind::Info,
+                Some(goal.to_string()),
+                format!("#{n} withdrawn"),
+                format!("{goal} holds again; ask #{n} is closed."),
+                BTreeMap::new(),
+            );
+        }
     }
 
     /// Goals the loop leaves alone now: an open ask, a `no` within the hour, a `wait`.
@@ -569,7 +630,14 @@ impl Loop {
         }
         let ctx = self.ctx.clone();
         let (parked, box_parked) = self.parked();
-        let job = match self.pending.pop_front() {
+        // One person's task at a time: a queued one waits while another waits for its
+        // answer, so a task's lines run from its start line to its end.
+        let task_waits = ctx.journal().task_waits();
+        let next = self
+            .pending
+            .iter()
+            .position(|j| !(task_waits && matches!(j, Job::Task(_))));
+        let mut job = match next.and_then(|i| self.pending.remove(i)) {
             Some(j) => j,
             None => {
                 let Some(g) = graph::order(&ctx.w).into_iter().find(|g| {
@@ -606,17 +674,26 @@ impl Loop {
             }
             return;
         }
-        self.running = Some(match &job {
+        self.running = Some(match &mut job {
             Job::Repair(r) => {
-                if !job.by_person() {
+                if r.forced.is_none() && !r.ignore_tries {
                     self.warn(&r.goal);
                 }
                 r.goal.clone()
             }
-            Job::Task(_) => TASK.to_string(),
+            Job::Task(t) => {
+                if !t.again {
+                    ctx.journal().add(t.line(None, t.text.clone()));
+                    t.again = true;
+                }
+                self.task = Some(t.clone());
+                TASK.to_string()
+            }
         });
         self.dirty = true;
         self.repairs.spawn(repair::run(ctx, job));
+        // Before any await: a halt must see the start line just written.
+        self.keep_tasks();
     }
 
     /// The warning when a goal starts failing and the loop acts.
@@ -644,6 +721,7 @@ impl Loop {
 
     fn repaired(&mut self, r: Result<(Option<String>, Outcome), tokio::task::JoinError>) {
         self.running = None;
+        self.task = None;
         self.dirty = true;
         match r {
             Ok((goal, outcome)) => {
@@ -672,11 +750,15 @@ impl Loop {
             Ctl::Answer { n, word, by } => {
                 let (ask, rule) = {
                     let j = ctx.journal();
+                    if j.answered(n) {
+                        // Withdrawn while the answer was on its way.
+                        return;
+                    }
                     (j.ask(n).cloned(), j.gate(n).and_then(|g| g.text.clone()))
                 };
                 let Some(ask) = ask else { return };
                 if ask.action.as_deref() == Some(TASK) {
-                    self.answer_task(n, &word, &by, rule);
+                    self.answer_task(n, &word, &by);
                     return;
                 }
                 let action = ctx.w.action(&word).map(|a| a.name.clone());
@@ -725,12 +807,7 @@ impl Loop {
                 }
             }
             Ctl::Task { text, by } => {
-                self.pending.push_back(Job::Task(TaskJob {
-                    text,
-                    by,
-                    rules_ok: Vec::new(),
-                    again: false,
-                }));
+                self.pending.push_back(Job::Task(TaskJob::new(text, by)));
             }
             Ctl::Do { action, by } => {
                 let Some(a) = ctx.w.action(&action) else {
@@ -791,38 +868,59 @@ impl Loop {
         }
     }
 
-    /// An answer to an ask a person's task raised: yes runs the task again with the
-    /// rule passed; any other word ends it.
-    fn answer_task(&mut self, n: u64, word: &str, by: &str, rule: Option<String>) {
+    /// An answer to an ask a person's task raised: yes runs the task again with every
+    /// rule the person passed for it and what its earlier runs did; any other word ends
+    /// it.
+    fn answer_task(&mut self, n: u64, word: &str, by: &str) {
         let ctx = self.ctx.clone();
-        let start = ctx.journal().task_start(n).cloned();
-        let answer = |text: String| Line {
+        let mut j = ctx.journal();
+        j.add(Line {
             kind: Kind::Answer,
             action: Some(TASK.to_string()),
-            text: Some(text),
+            text: Some(word.to_string()),
             n: Some(n),
             by: Some(by.to_string()),
             ..Default::default()
-        };
-        ctx.journal().add(answer(word.to_string()));
-        let Some(start) = start else { return };
-        if matches!(word, "yes" | "always") {
-            self.pending.push_front(Job::Task(TaskJob {
-                text: start.text.unwrap_or_default(),
-                by: start.by.unwrap_or_default(),
-                rules_ok: rule.into_iter().collect(),
-                again: true,
-            }));
-        } else {
-            ctx.journal().add(Line {
-                kind: Kind::Action,
-                action: Some(TASK.to_string()),
-                ok: Some(false),
-                text: Some(format!("ended: #{n} answered {word}")),
-                by: start.by,
-                ..Default::default()
-            });
+        });
+        let Some(lines) = j.task_lines(n) else { return };
+        let mut job = TaskJob::new(
+            lines[0].text.clone().unwrap_or_default(),
+            lines[0].by.clone().unwrap_or_default(),
+        );
+        job.again = true;
+        if !matches!(word, "yes" | "always") {
+            let end = job.line(Some(false), format!("ended: #{n} answered {word}"));
+            j.add(end);
+            return;
         }
+        for l in lines {
+            match l.kind {
+                Kind::Answer if l.action.as_deref() == Some(TASK) => {
+                    if matches!(l.text.as_deref(), Some("yes" | "always")) {
+                        if let Some(rule) = l.n.and_then(|m| j.gate(m)).and_then(|g| g.text.clone()) {
+                            job.rules_ok.push(rule);
+                        }
+                    }
+                }
+                Kind::Command if l.action.as_deref() == Some(TASK) => {
+                    let cmd = l.text.as_deref().unwrap_or_default();
+                    let state = if l.ok == Some(true) { "passed" } else { "failed" };
+                    job.prior.push_str(&format!(
+                        "$ {cmd}\n{}\n[{state}]\n",
+                        l.output.as_deref().unwrap_or_default()
+                    ));
+                    if l.ok == Some(true) {
+                        job.done.push(cmd.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !job.prior.is_empty() {
+            job.prior.insert_str(0, "Earlier runs of this task, before the person's answer:\n");
+        }
+        drop(j);
+        self.pending.push_front(Job::Task(job));
     }
 
     fn write_status(&mut self) {

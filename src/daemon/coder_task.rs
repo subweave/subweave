@@ -105,6 +105,7 @@ pub(crate) async fn do_task(
     task: &str,
     prior: &mut String,
     rules_ok: &[String],
+    done: &[String],
 ) -> DoResult {
     let task = weave::subst(task, &ctx.spec.args);
     let values = facts::known(ctx, &facts::all(&ctx.w)).await;
@@ -113,6 +114,9 @@ pub(crate) async fn do_task(
     'recipes: for s in &skills {
         for r in &s.recipes {
             let cmd = weave::subst(r, &ctx.spec.args);
+            if done.contains(&cmd) {
+                continue;
+            }
             if !command(ctx, work, &cmd, prior).await {
                 break 'recipes;
             }

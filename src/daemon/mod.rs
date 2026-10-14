@@ -23,9 +23,9 @@ use tokio::task::JoinHandle;
 
 use crate::channel::{self, Message};
 use crate::paths;
-use crate::service::{self as svc, Command, Kind, Line};
+use crate::service::{self as svc, Command, Kind, Line, TASK};
 
-use service::Ctl;
+use service::{Ctl, Tasks};
 
 pub(crate) use service::command_env;
 
@@ -41,6 +41,8 @@ pub(crate) struct Shared {
 struct Task {
     handle: JoinHandle<()>,
     ctl: mpsc::UnboundedSender<Ctl>,
+    /// The person's tasks it runs or has queued.
+    tasks: Tasks,
 }
 
 struct Daemon {
@@ -167,20 +169,42 @@ impl Daemon {
 
     fn start(&mut self, name: &str, announce: bool) {
         let (tx, rx) = mpsc::unbounded_channel();
+        let tasks = Tasks::default();
         let handle = tokio::spawn(service::run(
             self.shared.clone(),
             name.to_string(),
             rx,
             announce,
+            tasks.clone(),
         ));
-        self.tasks
-            .insert(name.to_string(), Task { handle, ctl: tx });
+        self.tasks.insert(
+            name.to_string(),
+            Task {
+                handle,
+                ctl: tx,
+                tasks,
+            },
+        );
     }
 
-    async fn halt(&mut self, name: &str) {
-        if let Some(t) = self.tasks.remove(name) {
-            t.handle.abort();
-            let _ = t.handle.await;
+    /// Ends a service's loop. Each person's task it ran or had queued gets an end line
+    /// saying `why`; with no `why` (rm) the journal goes anyway.
+    async fn halt(&mut self, name: &str, why: Option<&str>) {
+        let Some(t) = self.tasks.remove(name) else { return };
+        t.handle.abort();
+        let _ = t.handle.await;
+        let Some(why) = why else { return };
+        let open = std::mem::take(&mut *t.tasks.lock().unwrap_or_else(|e| e.into_inner()));
+        let path = paths::journal(name);
+        for job in open {
+            if !job.again {
+                let mut start = job.line(None, job.text.clone());
+                start.t = now();
+                journal::append(&path, &start);
+            }
+            let mut end = job.line(Some(false), format!("ended: {why}"));
+            end.t = now();
+            journal::append(&path, &end);
         }
     }
 
@@ -192,7 +216,8 @@ impl Daemon {
                     eprintln!("run: {name:?} is no service name");
                     return;
                 }
-                self.halt(&name).await;
+                self.halt(&name, Some("the service restarted for new settings"))
+                    .await;
                 if let Err(e) = write_bundle(&bundle) {
                     eprintln!("run {name}: {e:#}");
                     return;
@@ -218,7 +243,8 @@ impl Daemon {
                     eprintln!("tell: no service {service}");
                     return;
                 };
-                self.halt(&service).await;
+                self.halt(&service, Some("the service restarted for new settings"))
+                    .await;
                 spec.request = request.clone();
                 spec.args = args;
                 if let Some(d) = decide {
@@ -270,7 +296,7 @@ impl Daemon {
             },
             Command::Answer { n, word, by } => self.answer(n, &word, &by, None).await,
             Command::Stop { service, by } => {
-                self.halt(&service).await;
+                self.halt(&service, Some("the service stopped")).await;
                 if let Err(e) = set_stopped(&service, true) {
                     eprintln!("stop {service}: {e:#}");
                     return;
@@ -286,7 +312,7 @@ impl Daemon {
                 journal::note(&service, "started", &by);
             }
             Command::Rm { service, by: _ } => {
-                self.halt(&service).await;
+                self.halt(&service, None).await;
                 self.broken.remove(&service);
                 if valid_name(&service) {
                     if let Err(e) = std::fs::remove_dir_all(paths::service(&service)) {
@@ -345,19 +371,46 @@ impl Daemon {
                     by: by.to_string(),
                 });
             }
-            None => journal::append(
-                &paths::journal(&service),
-                &Line {
-                    t: now(),
-                    kind: Kind::Answer,
-                    goal: ask.goal.clone(),
-                    action: answers_action(&service, word),
-                    text: Some(word.to_string()),
-                    n: Some(n),
-                    by: Some(by.to_string()),
-                    ..Default::default()
-                },
-            ),
+            None => {
+                let task = ask.action.as_deref() == Some(TASK);
+                let path = paths::journal(&service);
+                journal::append(
+                    &path,
+                    &Line {
+                        t: now(),
+                        kind: Kind::Answer,
+                        goal: ask.goal.clone(),
+                        action: if task {
+                            Some(TASK.to_string())
+                        } else {
+                            answers_action(&service, word)
+                        },
+                        text: Some(word.to_string()),
+                        n: Some(n),
+                        by: Some(by.to_string()),
+                        ..Default::default()
+                    },
+                );
+                // No loop runs the task again: it ends here.
+                if task {
+                    let lines = svc::journal(&service).unwrap_or_default();
+                    let start_by = journal::task_lines(&lines, n).and_then(|l| l[0].by.clone());
+                    journal::append(
+                        &path,
+                        &Line {
+                            t: now(),
+                            kind: Kind::Action,
+                            action: Some(TASK.to_string()),
+                            ok: Some(false),
+                            text: Some(format!(
+                                "ended: #{n} answered {word} while the service was stopped"
+                            )),
+                            by: start_by,
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
         }
         let msg = Message {
             kind: channel::Kind::Info,

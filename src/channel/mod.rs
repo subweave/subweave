@@ -232,6 +232,18 @@ pub async fn poll(ch: &Channel, open: &[(u64, Sent)]) -> Result<Vec<Answer>> {
     answers.with_context(|| format!("channel {}", ch.name))
 }
 
+/// An ask is closed before anyone answered it: a channel that showed buttons takes
+/// them away. Steery withdraws a request its raiser stops polling; the rest never had
+/// buttons.
+pub async fn close(ch: &Channel, sent: &Sent) -> Result<()> {
+    match ch.kind {
+        ChannelKind::Telegram => telegram::close(ch, sent)
+            .await
+            .with_context(|| format!("channel {}", ch.name)),
+        _ => Ok(()),
+    }
+}
+
 /// Add a channel and save it. Steery reads the workspace and its signers with the key,
 /// prints them, and pins the phone and mac signers.
 pub async fn add(

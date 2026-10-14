@@ -12,6 +12,8 @@ use crate::paths;
 
 /// The `action` of every journal line of a person's task; no ACTION may take the name.
 pub const TASK: &str = "task";
+/// The `text` of the `answer` line that closes an ask whose goal holds again.
+pub const WITHDRAWN: &str = "withdrawn";
 
 /// `services/<name>/service.json`: how a service was asked for, as the daemon keeps it.
 #[derive(Debug, Clone, Serialize, Deserialize)]

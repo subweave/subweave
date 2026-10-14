@@ -75,6 +75,35 @@ pub(crate) struct TaskJob {
     pub rules_ok: Vec<String>,
     /// Run again after a yes: its start line is in the journal already.
     pub again: bool,
+    /// On a re-run: the commands the earlier runs made and their output.
+    pub prior: String,
+    /// On a re-run: the commands that passed, which skill recipes do not run again.
+    pub done: Vec<String>,
+}
+
+impl TaskJob {
+    pub fn new(text: String, by: String) -> TaskJob {
+        TaskJob {
+            text,
+            by,
+            rules_ok: Vec::new(),
+            again: false,
+            prior: String::new(),
+            done: Vec::new(),
+        }
+    }
+
+    /// An `action: "task"` line of this task.
+    pub fn line(&self, ok: Option<bool>, text: String) -> Line {
+        Line {
+            kind: Kind::Action,
+            action: Some(TASK.to_string()),
+            ok,
+            text: Some(text),
+            by: Some(self.by.clone()).filter(|b| !b.is_empty()),
+            ..Default::default()
+        }
+    }
 }
 
 pub(crate) enum Outcome {
@@ -111,8 +140,9 @@ pub(crate) async fn run(ctx: Arc<Ctx>, job: Job) -> (Option<String>, Outcome) {
 }
 
 /// A person's task: a DO task with no goal, through the same gates. Its lines all say
-/// `action: "task"`; it starts with the person's words and ends with the coder's summary
-/// or why it failed. An ask leaves it open until the answer.
+/// `action: "task"`; it starts with the person's words (written when the slot takes it)
+/// and ends with the coder's summary or why it failed. An ask leaves it open until the
+/// answer.
 async fn task(ctx: &Ctx, t: &TaskJob) -> Outcome {
     let short: String = t.text.split_whitespace().collect::<Vec<_>>().join(" ");
     let short = match short.char_indices().nth(80) {
@@ -120,32 +150,20 @@ async fn task(ctx: &Ctx, t: &TaskJob) -> Outcome {
         None => short,
     };
     *ctx.repair.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("task: {short}"));
-    let by = Some(t.by.clone()).filter(|b| !b.is_empty());
-    let line = |ok: Option<bool>, text: String| Line {
-        kind: Kind::Action,
-        action: Some(TASK.to_string()),
-        ok,
-        text: Some(text),
-        by: by.clone(),
-        ..Default::default()
-    };
-    if !t.again {
-        ctx.journal().add(line(None, t.text.clone()));
-    }
     let work = Work {
         goal: None,
         action: TASK,
     };
-    let mut prior = String::new();
-    match coder_task::do_task(ctx, work, &t.text, &mut prior, &t.rules_ok).await {
+    let mut prior = t.prior.clone();
+    match coder_task::do_task(ctx, work, &t.text, &mut prior, &t.rules_ok, &t.done).await {
         DoResult::Pass { summary, .. } => {
             ctx.journal()
-                .add(line(Some(true), summary.unwrap_or_else(|| "done".into())));
+                .add(t.line(Some(true), summary.unwrap_or_else(|| "done".into())));
             Outcome::Done
         }
         DoResult::Asked => Outcome::Asked,
         DoResult::Failed(why) => {
-            ctx.journal().add(line(Some(false), why));
+            ctx.journal().add(t.line(Some(false), why));
             Outcome::Done
         }
     }
@@ -518,7 +536,7 @@ async fn run_action(ctx: &Ctx, goal: &Goal, a: &Action, rules_ok: &[String]) {
                     goal: Some(goal),
                     action: &a.name,
                 };
-                match coder_task::do_task(ctx, work, task, &mut prior, rules_ok).await {
+                match coder_task::do_task(ctx, work, task, &mut prior, rules_ok, &[]).await {
                     DoResult::Pass { commands, .. } => made.extend(commands),
                     DoResult::Asked => return,
                     DoResult::Failed(why) => {

@@ -122,15 +122,31 @@ impl Journal {
             .find(|l| l.kind == Kind::Gate && l.n == Some(n))
     }
 
-    /// The start line of the person's task that raised ask `n`: the newest before it.
-    pub fn task_start(&self, n: u64) -> Option<&Line> {
-        let at = self
-            .lines
+    /// The lines of the person's task that raised ask `n`, from its start line on.
+    pub fn task_lines(&self, n: u64) -> Option<&[Line]> {
+        task_lines(&self.lines, n)
+    }
+
+    pub fn answered(&self, n: u64) -> bool {
+        self.lines
             .iter()
-            .position(|l| l.kind == Kind::Ask && l.n == Some(n))?;
-        self.lines[..at].iter().rev().find(|l| {
-            l.kind == Kind::Action && l.action.as_deref() == Some(TASK) && l.ok.is_none()
-        })
+            .any(|l| l.kind == Kind::Answer && l.n == Some(n))
+    }
+
+    /// Whether a person's task waits for the answer to its ask.
+    pub fn task_waits(&self) -> bool {
+        svc::open_asks(&self.lines)
+            .iter()
+            .any(|l| l.action.as_deref() == Some(TASK))
+    }
+
+    /// The open asks the loop raised for `goal`: not a person's task's.
+    pub fn open_for(&self, goal: &str) -> Vec<u64> {
+        svc::open_asks(&self.lines)
+            .iter()
+            .filter(|l| l.goal.as_deref() == Some(goal) && l.action.as_deref() != Some(TASK))
+            .filter_map(|l| l.n)
+            .collect()
     }
 
     /// The newest `always` or `never` the person gave for this rule and action.
@@ -222,6 +238,19 @@ impl Journal {
         out.reverse();
         out
     }
+}
+
+/// The lines from the start of the person's task that raised ask `n` (the newest start
+/// line before it) to the end. Tasks do not interleave: a queued task waits while one
+/// waits for its answer.
+pub(crate) fn task_lines(lines: &[Line], n: u64) -> Option<&[Line]> {
+    let at = lines
+        .iter()
+        .position(|l| l.kind == Kind::Ask && l.n == Some(n))?;
+    let start = lines[..at].iter().rposition(|l| {
+        l.kind == Kind::Action && l.action.as_deref() == Some(TASK) && l.ok.is_none()
+    })?;
+    Some(&lines[start..])
 }
 
 /// Appends one line to a journal file.
