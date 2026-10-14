@@ -32,10 +32,14 @@ impl Journal {
         }
     }
 
-    /// Writes a line: the time set, secrets redacted, pending spend added.
+    /// Writes a line: the time and the running episode set, secrets redacted, pending
+    /// spend added.
     pub fn add(&mut self, mut l: Line) -> Line {
         if l.t.is_empty() {
             l.t = now();
+        }
+        if l.ep.is_none() {
+            l.ep = super::episode::current();
         }
         for s in [&mut l.text, &mut l.body, &mut l.output].into_iter().flatten() {
             *s = redact(s, &self.secrets);

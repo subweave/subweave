@@ -529,6 +529,7 @@ async fn session(
                 tally.describe(system.chars().count())
             )),
             cost_usd: Some(tally.cost_usd),
+            usage: Some(tally.usage(coder.model(i).to_string())),
             ..Default::default()
         });
         match end {

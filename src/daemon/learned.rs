@@ -163,7 +163,7 @@ pub(crate) async fn fact_command(ctx: &Ctx, fact: &Fact) -> Option<String> {
     if let Some(c) = learned_command(ctx, fact) {
         return Some(c);
     }
-    learn_and_keep(ctx, fact, None).await
+    super::episode::scope(learn_and_keep(ctx, fact, None)).await
 }
 
 /// Whether a nonzero exit of this fact's command is a failed read, not a value: true for
@@ -212,7 +212,7 @@ pub(crate) async fn relearn(
     let hint = format!(
         "The last command for this fact failed on this box ({code}):\n{command}\nIt printed:\n{output}\nWrite one that works here."
     );
-    learn_and_keep(ctx, fact, Some(&hint)).await
+    super::episode::scope(learn_and_keep(ctx, fact, Some(&hint))).await
 }
 
 /// Learns a quoted fact's command and keeps it. The caller holds `ctx.learning`.
@@ -248,6 +248,7 @@ async fn learn_and_keep(ctx: &Ctx, fact: &Fact, hint: Option<&str>) -> Option<St
                 tally.describe(FACT_SYSTEM.chars().count())
             )),
             cost_usd: Some(tally.cost_usd),
+            usage: Some(tally.usage(model)),
             ..Default::default()
         });
         cost -= tally.cost_usd;

@@ -148,6 +148,24 @@ pub struct Line {
     /// Who acted, on lines the person causes: `cli:<user>`, `dash@<ip>`, a channel's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
+    /// The episode the line belongs to: one job run (a repair or a person's task) or one
+    /// learn outside a job. Lines outside every episode have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ep: Option<String>,
+    /// What a model conversation used, on the line that ends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Usage {
+    /// `id[@provider]`.
+    pub model: String,
+    pub calls: u32,
+    /// Input tokens over every call; `cached` of them read from the provider's cache.
+    pub input: u64,
+    pub cached: u64,
+    pub output: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

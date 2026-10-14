@@ -136,10 +136,13 @@ enum Pick {
 /// The goal the job was for, and how it ended.
 pub(crate) async fn run(ctx: Arc<Ctx>, job: Job) -> (Option<String>, Outcome) {
     *ctx.by.lock().unwrap_or_else(|e| e.into_inner()) = job.by().map(str::to_string);
-    let out = match &job {
-        Job::Repair(r) => repair(&ctx, r).await,
-        Job::Task(t) => task(&ctx, t).await,
-    };
+    let out = super::episode::scope(async {
+        match &job {
+            Job::Repair(r) => repair(&ctx, r).await,
+            Job::Task(t) => task(&ctx, t).await,
+        }
+    })
+    .await;
     *ctx.repair.lock().unwrap_or_else(|e| e.into_inner()) = None;
     *ctx.by.lock().unwrap_or_else(|e| e.into_inner()) = None;
     match job {

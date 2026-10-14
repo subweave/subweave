@@ -81,6 +81,17 @@ impl Tally {
             self.calls, self.first_input, self.input, self.cached, self.output
         )
     }
+
+    /// The journal's record of this conversation with `model`.
+    pub fn usage(&self, model: String) -> crate::service::Usage {
+        crate::service::Usage {
+            model,
+            calls: self.calls,
+            input: self.input,
+            cached: self.cached,
+            output: self.output,
+        }
+    }
 }
 
 struct Endpoint {
