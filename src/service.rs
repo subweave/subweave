@@ -45,7 +45,9 @@ pub struct Bundle {
 pub enum Command {
     /// A new service, or a service run again under the same name (its journal and learned
     /// commands stay).
-    Run { bundle: Bundle },
+    Run {
+        bundle: Bundle,
+    },
     /// New ARGs, after the request check; `decide`/`code` replace the models when given.
     Tell {
         service: String,
@@ -55,14 +57,30 @@ pub enum Command {
         code: Option<Vec<String>>,
     },
     /// Run one action now, through the same rules.
-    Do { service: String, action: String },
+    Do {
+        service: String,
+        action: String,
+    },
     /// `word`: `yes`, `no`, `always`, `never` or an action name. `by`: who answered.
-    Answer { n: u64, word: String, by: String },
-    Stop { service: String },
-    Start { service: String },
-    Rm { service: String },
+    Answer {
+        n: u64,
+        word: String,
+        by: String,
+    },
+    Stop {
+        service: String,
+    },
+    Start {
+        service: String,
+    },
+    Rm {
+        service: String,
+    },
     /// Drop a learned fact command or learned steps (`<action>` drops every goal's steps).
-    Forget { service: String, name: String },
+    Forget {
+        service: String,
+        name: String,
+    },
 }
 
 /// One line of `journal.jsonl`.
@@ -206,13 +224,19 @@ fn read_lines(path: &Path) -> Result<Vec<Line>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
     };
-    Ok(text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect())
+    Ok(text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect())
 }
 
 /// Asks in a journal that no `answer` line settled yet, oldest first.
 pub fn open_asks(lines: &[Line]) -> Vec<&Line> {
-    let answered: std::collections::BTreeSet<u64> =
-        lines.iter().filter(|l| l.kind == Kind::Answer).filter_map(|l| l.n).collect();
+    let answered: std::collections::BTreeSet<u64> = lines
+        .iter()
+        .filter(|l| l.kind == Kind::Answer)
+        .filter_map(|l| l.n)
+        .collect();
     lines
         .iter()
         .filter(|l| l.kind == Kind::Ask && l.n.is_some_and(|n| !answered.contains(&n)))
