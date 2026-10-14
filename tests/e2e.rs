@@ -970,9 +970,14 @@ async fn daemon_and_cli_keep_a_toy_service() {
         "the coder read the refusal"
     );
 
-    // 4 (first time). The server was down: the decider picked restart, its RUN ran.
-    let restarts = b.passes("restart");
-    assert!(restarts >= 1);
+    // 4 (first time). The server was down: the decider picked restart, its RUN ran. The
+    // loop's own check can see `running` hold before the restart's WITHIN check writes
+    // its action line.
+    let restarts = b
+        .until("the first restart to pass", 15, || {
+            Some(b.passes("restart")).filter(|n| *n >= 1)
+        })
+        .await;
     assert!(
         b.lines("decide", |l| l["goal"] == "running"
             && l["text"] == "restart")
