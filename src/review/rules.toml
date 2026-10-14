@@ -1,5 +1,5 @@
 # The rules of `subweave review`. The engine compiles this file in; each rule's wording was
-# measured on typesafe/jev-1.13 against the six weaves and broken copies of them.
+# measured on typesafe/jev-1.13 against the six examples and broken copies of them.
 #
 # A rule checks every element of one kind (`on`) in one of three ways:
 #   ask            a yes/no question to the decider; passes when the answer is `pass`

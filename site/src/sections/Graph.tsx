@@ -5,7 +5,7 @@ import { Section } from "../components/Section";
 import { useReducedMotion } from "../motion";
 import { goalRows, offGoals } from "../weave/parse";
 
-const pg = content.weaves.find((w) => w.name === "postgres")!;
+const pg = content.examples.find((w) => w.name === "postgres")!;
 const rows = goalRows(pg.goals);
 const BUCKET = "s3://acme-pg/db1";
 const FAILING = "archiving";

@@ -147,7 +147,7 @@ export function Hero() {
               </li>
             </ol>
             <p className="hero-links">
-              Linux, open source, MIT · <a href={REPO}>GitHub</a> · <a href="#weavefile">Six weaves</a>
+              Linux, open source, MIT · <a href={REPO}>GitHub</a> · <a href="#examples">Six examples</a>
             </p>
           </div>
         </div>

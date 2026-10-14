@@ -47,7 +47,7 @@ pub async fn resolve(spec: &str) -> Result<(String, String)> {
         Some(t) => format!("{name}-{t}"),
         None => "main".to_string(),
     };
-    let url = format!("{RAW}/{git_ref}/weaves/{name}/Weavefile");
+    let url = format!("{RAW}/{git_ref}/examples/{name}/Weavefile");
     let mut req = reqwest::Client::new().get(&url);
     if let Ok(token) = std::env::var("GITHUB_TOKEN") {
         req = req.bearer_auth(token);

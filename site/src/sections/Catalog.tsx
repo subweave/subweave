@@ -5,9 +5,9 @@ import { REPO } from "../links";
 
 export function Catalog({ n, onRead }: { n: number; onRead: (name: string) => void }) {
   return (
-    <Section id="weaves" n={n} kicker="Weaves" title="Six weaves to start from.">
+    <Section id="examples" n={n} kicker="Examples" title="Six examples to start from.">
       <div className="catalog">
-        {content.weaves.map((w) => (
+        {content.examples.map((w) => (
           <article key={w.name} className="weave-card">
             <header>
               <h3>{w.name}</h3>
@@ -19,7 +19,7 @@ export function Catalog({ n, onRead }: { n: number; onRead: (name: string) => vo
               <a href="#weavefile" onClick={() => onRead(w.name)}>
                 Read the Weavefile
               </a>
-              <a href={`${REPO}/tree/main/weaves/${w.name}`}>README</a>
+              <a href={`${REPO}/tree/main/examples/${w.name}`}>README</a>
             </footer>
           </article>
         ))}

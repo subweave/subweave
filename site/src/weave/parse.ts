@@ -191,7 +191,7 @@ export function offGoals(goals: Goal[], args: Record<string, string>): Set<strin
   return off;
 }
 
-// The IF forms the weaves use: names, 'strings', numbers, == != < <= > >=, AND OR NOT, parentheses.
+// The IF forms the examples use: names, 'strings', numbers, == != < <= > >=, AND OR NOT, parentheses.
 export function evalIf(expr: string, args: Record<string, string>): boolean {
   const tokens = expr.match(/'[^']*'|[A-Za-z_][\w-]*|\d+(?:\.\d+)?|==|!=|<=|>=|[<>()]/g) ?? [];
   let i = 0;

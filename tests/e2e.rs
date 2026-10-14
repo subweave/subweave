@@ -733,7 +733,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
         daemon: None,
         dash: None,
     };
-    let weave_dir = dir.join("weaves/toy");
+    let weave_dir = dir.join("examples/toy");
     std::fs::create_dir_all(&weave_dir).unwrap();
     std::fs::write(weave_dir.join("Weavefile"), weavefile(&dir, &www)).unwrap();
     std::fs::write(dir.join("scene"), "calm").unwrap();

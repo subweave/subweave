@@ -1,5 +1,5 @@
 // `virtual:content`: what the page shows from the repo's files, read at build time,
-// so the page says what the weaves and the spec say. All code is coloured here
+// so the page says what the examples and the spec say. All code is coloured here
 // (build/shiki.ts), so the browser gets HTML and no highlighter.
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -8,7 +8,7 @@ import { highlight, type Lang } from "./shiki.ts";
 import { DOCKERFILE, SHELL } from "./snippets.ts";
 import { parseWeave, type Weave } from "../src/weave/parse.ts";
 
-export const WEAVES = ["ethereum", "postgres", "valkey", "minecraft", "vllm", "store-edge"] as const;
+export const EXAMPLES = ["ethereum", "postgres", "valkey", "minecraft", "vllm", "store-edge"] as const;
 
 export interface WeaveCard extends Weave {
   forWho: string;
@@ -37,7 +37,7 @@ export interface Review {
 }
 
 export interface Content {
-  weaves: WeaveCard[];
+  examples: WeaveCard[];
   // The hero's short Weavefile (site/hero.Weavefile), parsed.
   hero: Weave;
   plans: string[];
@@ -93,9 +93,9 @@ export function readContent(root: string, files: string[] = []): Content {
   };
   const sources: Record<string, { lang: Lang; text: string }> = {};
   const weavefile = (key: string, text: string) => (sources[key] = { lang: "weavefile", text: text.replace(/\n$/, "") });
-  const weaves = WEAVES.map((name): WeaveCard => {
-    const readme = read(`weaves/${name}/README.md`);
-    const text = read(`weaves/${name}/Weavefile`);
+  const examples = EXAMPLES.map((name): WeaveCard => {
+    const readme = read(`examples/${name}/README.md`);
+    const text = read(`examples/${name}/Weavefile`);
     weavefile(name, text);
     const forLine = one(readme.split("\n").filter((l) => l.startsWith("**For:**")), `For line in ${name}`);
     return {
@@ -105,7 +105,7 @@ export function readContent(root: string, files: string[] = []): Content {
       lines: text.replace(/\n$/, "").split("\n").length,
     };
   });
-  for (const w of weaves) sources[`example:${w.name}`] = { lang: "shellscript", text: w.example };
+  for (const w of examples) sources[`example:${w.name}`] = { lang: "shellscript", text: w.example };
   for (const [key, text] of Object.entries(SHELL)) sources[`sh:${key}`] = { lang: "shellscript", text };
   sources.dockerfile = { lang: "dockerfile", text: DOCKERFILE };
 
@@ -117,7 +117,7 @@ export function readContent(root: string, files: string[] = []): Content {
       if (!hero.goals.some((h) => h.name === a)) throw new Error(`hero.Weavefile: ${g.name} AFTER ${a}, no such goal`);
 
   // The ethereum ARG with a slot, and the code rule that reads the slot.
-  const eth = weaves.find((w) => w.name === "ethereum")!;
+  const eth = examples.find((w) => w.name === "ethereum")!;
   const history = one(eth.args.filter((a) => a.name === "history"), "ethereum history ARG");
   const slot = one(history.options.filter((o) => o.label.includes("<blocks>")), "history slot");
   const askIf = one(eth.rules.filter((r) => r.startsWith("ASK IF") && r.includes("blocks")), "ASK IF blocks");
@@ -151,11 +151,11 @@ export function readContent(root: string, files: string[] = []): Content {
   }
   const review = {
     draft: parseReview("subweave review ./draft", read("site/review/review-draft.txt")),
-    shipped: parseReview("subweave review weaves/postgres", read("site/review/review-postgres.txt")),
+    shipped: parseReview("subweave review examples/postgres", read("site/review/review-postgres.txt")),
     excerpt,
   };
   if (review.draft.areas.length !== 9) throw new Error(`review: want 9 areas, found ${review.draft.areas.length}`);
-  return { weaves, hero, plans, deciderRequest, review, sources };
+  return { examples, hero, plans, deciderRequest, review, sources };
 }
 
 export function content(root: string): Plugin {
