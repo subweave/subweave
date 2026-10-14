@@ -39,6 +39,32 @@ const MAX_IDLE: u32 = 3;
 const MASK_AT: usize = 48 * 1024;
 /// Tool results that masking leaves whole, the newest.
 const MASK_KEEP: usize = 4;
+/// Shell commands between two progress judgements, counted over the model chain.
+const JUDGE_EVERY: usize = 10;
+/// The progress judge's criteria; `closer` under 0.5 ends the session. Replayed on the
+/// box journal (2026-10-14) at each 10th command: the two `quiet` fixes that ran 40
+/// commands each scored 0.10 to 0.19 at command 10; the sessions that passed scored 0.92
+/// to 1.0 at their last command. "Do or test what the task asks" keeps a read-only task
+/// closer; "change or test what the goal needs" put one at 0.26.
+const PROGRESS: [(&str, &str); 5] = [
+    (
+        "closer",
+        "they do or test what the task asks, and each builds on what the ones before found",
+    ),
+    (
+        "reading",
+        "they read logs, files or settings around the problem, but do and test nothing the task asks",
+    ),
+    (
+        "repeating",
+        "they repeat earlier reads or tries with small changes",
+    ),
+    ("waiting", "they sleep or wait for something to happen"),
+    (
+        "elsewhere",
+        "they work on something other than the task: another part of the box, or the daemon that runs the coder",
+    ),
+];
 /// Every box's rule, after the weave's: the person and `--on` reach the box over SSH. A
 /// firewall command alone cannot show whether SSH stays allowed, so the rule names the
 /// exception. On 20 commands "cut off SSH access to this box" passed `ufw enable` (0.47);
@@ -398,19 +424,23 @@ async fn session(
     let tools = tools(work);
     let mut commands = 0usize;
     let mut ok_cmds: Vec<String> = Vec::new();
-    let mut history: Vec<String> = Vec::new();
+    let mut tried: Vec<Ran> = Vec::new();
+    let mut start: Option<BTreeMap<String, String>> = None;
+    let mut judged = 0usize;
     for i in 0..coder.len() {
         let values = facts::known(ctx, &facts::all(&ctx.w)).await;
+        let start = &*start.get_or_insert_with(|| facts::shown(&values));
         let system = system_prompt(ctx, work, task, &values, skills, prior);
         let mut first = match work.goal {
             Some(_) => "Make the goal hold.",
             None => "Do the task.",
         }
         .to_string();
-        if !history.is_empty() {
+        if !tried.is_empty() {
+            let commands: Vec<&str> = tried.iter().map(|r| r.command.as_str()).collect();
             first.push_str(&format!(
                 " Another model worked on this and it is not done. Its commands:\n{}",
-                cap(&history.join("\n"), 8 * 1024)
+                cap(&commands.join("\n"), 8 * 1024)
             ));
         }
         let mut msgs = vec![Msg::User(first)];
@@ -460,8 +490,9 @@ async fn session(
                                 if let Some(f) = &ran.file {
                                     files.insert(c.id.clone(), f.clone());
                                 }
-                                history.push(ran.command);
-                                ran.result
+                                let out = ran.result.clone();
+                                tried.push(ran);
+                                out
                             }
                             Err(()) => {
                                 end = Some(End::Asked);
@@ -541,6 +572,12 @@ async fn session(
             if let Some(e) = end {
                 break e;
             }
+            if commands >= judged + JUDGE_EVERY {
+                judged = commands - commands % JUDGE_EVERY;
+                if judge(ctx, work, task, start, &tried, commands).await {
+                    break End::Asked;
+                }
+            }
             msgs.push(Msg::Results(results));
             mask(&mut msgs, &files);
         };
@@ -608,6 +645,152 @@ fn mask(msgs: &mut [Msg], files: &HashMap<String, PathBuf>) {
             *content = stub;
         }
     }
+}
+
+/// At most `max` bytes of the start of `text`.
+fn head(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut at = max;
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    format!("{}…", &text[..at])
+}
+
+/// One decider request on the last `JUDGE_EVERY` commands: does the coder get closer to
+/// the end of its task? When not, the session ends with an ask to the person, and this is
+/// true. A failed request lets the session go on.
+async fn judge(
+    ctx: &Ctx,
+    work: Work<'_>,
+    task: &str,
+    start: &BTreeMap<String, String>,
+    tried: &[Ran],
+    commands: usize,
+) -> bool {
+    let Some(decider) = &ctx.decider else {
+        return false;
+    };
+    let short = |facts: &BTreeMap<String, String>| -> BTreeMap<String, String> {
+        facts.iter().map(|(k, v)| (k.clone(), head(v, 300))).collect()
+    };
+    let now = facts::shown(&facts::known(ctx, &facts::all(&ctx.w)).await);
+    let from = tried.len().saturating_sub(JUDGE_EVERY);
+    let last: Vec<Value> = tried[from..]
+        .iter()
+        .enumerate()
+        .map(|(k, r)| {
+            let first = r.result.lines().next().unwrap_or_default();
+            let exit = first
+                .strip_prefix("exit ")
+                .and_then(|e| e.split(';').next())
+                .and_then(|e| e.parse::<i64>().ok())
+                .map_or_else(|| json!(first), |c| json!(c));
+            json!({
+                "n": from + k + 1,
+                "command": head(&ctx.redact(&r.command), 300),
+                "purpose": head(&ctx.redact(&r.purpose), 300),
+                "exit": exit,
+            })
+        })
+        .collect();
+    let mut state = json!({
+        "task": task,
+        "facts_at_start": short(start),
+        "facts_now": short(&now),
+        "commands_run": commands,
+        "last_commands": last,
+    });
+    if let Some(goal) = work.goal {
+        state["goal"] = json!(goals::describe(ctx, goal));
+    }
+    let criteria: IndexMap<String, String> = PROGRESS
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let questions = IndexMap::from([(
+        "progress".to_string(),
+        Question::Choice {
+            criteria,
+            instructions:
+                "The coder ran `last_commands` for its `task`. Which describes these commands best?"
+                    .into(),
+        },
+    )]);
+    let a = match decider.ask(state, questions).await {
+        Ok(a) => a,
+        Err(e) => {
+            work.note(ctx, format!("decider: {e:#}"));
+            return false;
+        }
+    };
+    let Some((choice, probs, _)) = a.choice("progress") else {
+        return false;
+    };
+    let closer = probs.get("closer").copied().unwrap_or(0.0);
+    ctx.journal().add(Line {
+        kind: Kind::Decide,
+        goal: work.goal_name(),
+        action: Some(work.action.to_string()),
+        text: Some(format!("progress after {commands} commands: {choice}")),
+        p: Some(probs.iter().map(|(k, v)| (k.clone(), *v)).collect()),
+        cost_usd: Some(a.cost_usd),
+        ..Default::default()
+    });
+    if closer >= 0.5 {
+        return false;
+    }
+    let why = PROGRESS
+        .iter()
+        .find(|(k, _)| *k == choice)
+        .map_or(choice, |(_, v)| *v);
+    let lines: Vec<String> = tried[from..]
+        .iter()
+        .map(|r| {
+            let what = if r.purpose.is_empty() {
+                head(&r.command, 120)
+            } else {
+                r.purpose.clone()
+            };
+            let first = r.result.lines().next().unwrap_or_default();
+            ctx.redact(&format!("- {what} ({first})"))
+        })
+        .collect();
+    let tried_text = format!(
+        "After {commands} commands the coder does not get closer ({closer:.2}): {why}. Its last commands:\n{}",
+        lines.join("\n")
+    );
+    let (title, text) = match work.goal {
+        Some(goal) => (
+            format!(
+                "{} for {}: the coder does not get closer",
+                work.action, goal.name
+            ),
+            format!(
+                "{}\n{tried_text}\nAnswer yes once it is fixed to run {} again.",
+                goals::describe(ctx, goal),
+                work.action
+            ),
+        ),
+        None => (
+            "task: the coder does not get closer".to_string(),
+            format!(
+                "Task: {task}\n{tried_text}\nAnswer yes once it is fixed to run the task again, no to end it."
+            ),
+        ),
+    };
+    ctx.ask(AskReq {
+        goal: work.goal_name(),
+        action: Some(work.action.to_string()),
+        rule: None,
+        title,
+        text,
+        facts: now,
+        answers: vec!["yes".into(), "no".into()],
+    });
+    true
 }
 
 /// The commands `done` names, each as it ran: the coder often names a part of a chained

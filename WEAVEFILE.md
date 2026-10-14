@@ -418,6 +418,7 @@ A `DO` task, when no learned steps or recipe made the goal hold:
 4. After a failed command, the decider sorts the error into `missing package`, `permission`, `network`, `config` or `other`. The coder gets that answer with the output.
 5. The coder says `done`, with the commands that made the fix and one line on the cause. The daemon checks the task's goal again with fresh facts; when it holds, the task passed.
 6. After two failed checks, the `THEN` model takes over. After 40 commands without a pass, the task failed.
+7. Every 10 commands, counted over the `THEN` models, the decider reads the task, the facts at the start and now, and the last 10 commands with their purposes and exit codes, and says whether the coder gets closer to the end of the task. When it does not, the task ends with an ask that says what the coder tried; `yes` runs it again.
 
 The coder reads at most 8 KB of a command's output: the head and the tail. The whole output, with SECRETs redacted, is kept in `/var/lib/subweave/services/<service>/output/<episode>-<n>.txt`, mode 600, the newest 200 files per service. A cut output names its file, so the coder can read the rest with `sed -n` or `tail`. When a conversation's messages pass 48 KB, every command result but the newest 4 becomes its first line (`exit 0`) and its file name.
 
