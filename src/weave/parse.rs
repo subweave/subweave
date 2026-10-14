@@ -633,6 +633,11 @@ impl Parser {
         let (head, when_src) = split_if(rest);
         let mut c = Cur::new(head);
         let n = name(c.word().unwrap_or_default(), is_item_name, ITEM_FORM)?;
+        if n == crate::service::TASK {
+            return Err(format!(
+                "ACTION {n}: the name belongs to a person's task (subweave task); pick another"
+            ));
+        }
         let mut action = Action {
             name: n.clone(),
             for_goals: Vec::new(),

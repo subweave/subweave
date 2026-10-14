@@ -14,20 +14,22 @@ pub struct Args {
     pub on: Option<String>,
 }
 
-pub fn run(args: Args) -> Result<ExitCode> {
-    let w = super::service_weave(&args.service)?;
-    if w.action(&args.action).is_none() {
+/// Fails unless the service's weave has the action.
+pub(crate) fn check_action(service: &str, action: &str) -> Result<()> {
+    let w = super::service_weave(service)?;
+    if w.action(action).is_none() {
         let names: Vec<&str> = w.actions.iter().map(|a| a.name.as_str()).collect();
-        bail!(
-            "{} has no action {}: {}",
-            args.service,
-            args.action,
-            names.join(", ")
-        );
+        bail!("{service} has no action {action}: {}", names.join(", "));
     }
+    Ok(())
+}
+
+pub fn run(args: Args) -> Result<ExitCode> {
+    check_action(&args.service, &args.action)?;
     service::put(&Command::Do {
         service: args.service.clone(),
         action: args.action.clone(),
+        by: super::by(),
     })?;
     println!(
         "asked the daemon to run {} on {}: subweave log -f {}",

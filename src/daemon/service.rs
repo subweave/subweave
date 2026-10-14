@@ -16,14 +16,16 @@ use crate::model::ModelRef;
 use crate::model::coder::Coder;
 use crate::model::decider::Decider;
 use crate::paths;
-use crate::service::{self as svc, GoalState, GoalStatus, Kind, Learned, Line, Spec, Status};
+use crate::service::{
+    self as svc, GoalState, GoalStatus, Kind, Learned, Line, Spec, Status, TASK,
+};
 use crate::weave::{self, Condition, Weave, expr, graph};
 
 use super::asks::{self, AskReq};
 use super::facts::{self, Follower, Values};
 use super::goals::{self, Scope};
 use super::journal::Journal;
-use super::repair::{self, Forced, Job, Outcome};
+use super::repair::{self, Forced, Job, Outcome, Repair, TaskJob};
 use super::{Shared, learned, now, save_json};
 
 /// A check line is written when the result or the facts change, or after this long.
@@ -35,10 +37,12 @@ const NO_PARK: i64 = 3600;
 const CODE_EVERY: Duration = Duration::from_secs(60);
 const QUOTED_EVERY: Duration = Duration::from_secs(300);
 
+/// What the daemon hands a service's loop; `by` says who asked.
 pub(crate) enum Ctl {
-    Answer { n: u64, word: String },
-    Do(String),
-    Forget(String),
+    Answer { n: u64, word: String, by: String },
+    Do { action: String, by: String },
+    Task { text: String, by: String },
+    Forget { name: String, by: String },
 }
 
 /// What a service's loop and its repair share.
@@ -264,7 +268,7 @@ struct Loop {
     ctx: Arc<Ctx>,
     tracks: BTreeMap<String, Track>,
     announce: bool,
-    repairs: JoinSet<(String, Outcome)>,
+    repairs: JoinSet<(Option<String>, Outcome)>,
     running: Option<String>,
     pending: VecDeque<Job>,
     status_at: Option<Instant>,
@@ -280,7 +284,7 @@ pub(crate) async fn run(
     let ctx = match Ctx::load(shared, &name) {
         Ok(c) => Arc::new(c),
         Err(e) => {
-            super::journal::note(&name, &format!("cannot start: {e:#}"));
+            super::journal::note(&name, &format!("cannot start: {e:#}"), "");
             eprintln!("{name}: cannot start: {e:#}");
             return;
         }
@@ -563,11 +567,11 @@ impl Loop {
                 }) else {
                     return;
                 };
-                Job {
+                Job::Repair(Repair {
                     goal: g.name.clone(),
                     forced: None,
                     ignore_tries: false,
-                }
+                })
             }
         };
         if !ctx.misfit.is_empty() && !ctx.journal().box_approved() {
@@ -586,16 +590,21 @@ impl Loop {
                     answers: vec!["yes".into(), "no".into()],
                 });
             }
-            if job.forced.is_some() || job.ignore_tries {
+            if job.by_person() {
                 // Asked for by the person: kept. An automatic job is made again.
                 self.pending.push_front(job);
             }
             return;
         }
-        if job.forced.is_none() && !job.ignore_tries {
-            self.warn(&job.goal);
-        }
-        self.running = Some(job.goal.clone());
+        self.running = Some(match &job {
+            Job::Repair(r) => {
+                if !job.by_person() {
+                    self.warn(&r.goal);
+                }
+                r.goal.clone()
+            }
+            Job::Task(_) => TASK.to_string(),
+        });
         self.dirty = true;
         self.repairs.spawn(repair::run(ctx, job));
     }
@@ -623,19 +632,19 @@ impl Loop {
         );
     }
 
-    fn repaired(&mut self, r: Result<(String, Outcome), tokio::task::JoinError>) {
+    fn repaired(&mut self, r: Result<(Option<String>, Outcome), tokio::task::JoinError>) {
         self.running = None;
         self.dirty = true;
         match r {
             Ok((goal, outcome)) => {
-                if let Some(t) = self.tracks.get_mut(&goal) {
+                if let Some(t) = goal.as_ref().and_then(|g| self.tracks.get_mut(g)) {
                     // Check again at once rather than at the next EVERY.
                     t.last_check = None;
                     if let Outcome::Wait = outcome {
                         let every = self
                             .ctx
                             .w
-                            .goal(&goal)
+                            .goal(goal.as_deref().unwrap_or_default())
                             .and_then(|g| g.every)
                             .unwrap_or(CODE_EVERY)
                             .max(CODE_EVERY);
@@ -650,12 +659,16 @@ impl Loop {
     fn control(&mut self, c: Ctl) {
         let ctx = self.ctx.clone();
         match c {
-            Ctl::Answer { n, word } => {
+            Ctl::Answer { n, word, by } => {
                 let (ask, rule) = {
                     let j = ctx.journal();
                     (j.ask(n).cloned(), j.gate(n).and_then(|g| g.text.clone()))
                 };
                 let Some(ask) = ask else { return };
+                if ask.action.as_deref() == Some(TASK) {
+                    self.answer_task(n, &word, &by, rule);
+                    return;
+                }
                 let action = ctx.w.action(&word).map(|a| a.name.clone());
                 ctx.journal().add(Line {
                     kind: Kind::Answer,
@@ -663,13 +676,14 @@ impl Loop {
                     action: action.clone(),
                     text: Some(word.clone()),
                     n: Some(n),
+                    by: Some(by),
                     ..Default::default()
                 });
                 let Some(goal) = ask.goal.clone() else {
                     return;
                 };
                 let job = match (word.as_str(), action) {
-                    (_, Some(a)) => Some(Job {
+                    (_, Some(a)) => Some(Repair {
                         goal,
                         forced: Some(Forced {
                             action: a,
@@ -679,7 +693,7 @@ impl Loop {
                         ignore_tries: true,
                     }),
                     ("yes" | "always", None) => Some(match ask.action.clone() {
-                        Some(a) => Job {
+                        Some(a) => Repair {
                             goal,
                             forced: Some(Forced {
                                 action: a,
@@ -688,7 +702,7 @@ impl Loop {
                             }),
                             ignore_tries: true,
                         },
-                        None => Job {
+                        None => Repair {
                             goal,
                             forced: None,
                             ignore_tries: true,
@@ -697,10 +711,18 @@ impl Loop {
                     _ => None,
                 };
                 if let Some(job) = job {
-                    self.pending.push_front(job);
+                    self.pending.push_front(Job::Repair(job));
                 }
             }
-            Ctl::Do(action) => {
+            Ctl::Task { text, by } => {
+                self.pending.push_back(Job::Task(TaskJob {
+                    text,
+                    by,
+                    rules_ok: Vec::new(),
+                    again: false,
+                }));
+            }
+            Ctl::Do { action, by } => {
                 let Some(a) = ctx.w.action(&action) else {
                     ctx.journal().note(None, format!("do: no action {action}"));
                     return;
@@ -726,8 +748,8 @@ impl Loop {
                     return;
                 };
                 ctx.journal()
-                    .note(Some(&goal), format!("do {action}: asked by hand"));
-                self.pending.push_back(Job {
+                    .note_by(Some(&goal), format!("do {action}: asked by hand"), &by);
+                self.pending.push_back(Job::Repair(Repair {
                     goal,
                     forced: Some(Forced {
                         action,
@@ -735,9 +757,9 @@ impl Loop {
                         rules_ok: Vec::new(),
                     }),
                     ignore_tries: true,
-                });
+                }));
             }
-            Ctl::Forget(name) => {
+            Ctl::Forget { name, by } => {
                 let dropped = {
                     let mut l = ctx.learned();
                     let d = learned::forget(&mut l, &name);
@@ -746,15 +768,50 @@ impl Loop {
                     }
                     d
                 };
-                ctx.journal().note(
+                ctx.journal().note_by(
                     None,
                     if dropped {
                         format!("forgot {name}")
                     } else {
                         format!("forget: nothing learned for {name}")
                     },
+                    &by,
                 );
             }
+        }
+    }
+
+    /// An answer to an ask a person's task raised: yes runs the task again with the
+    /// rule passed; any other word ends it.
+    fn answer_task(&mut self, n: u64, word: &str, by: &str, rule: Option<String>) {
+        let ctx = self.ctx.clone();
+        let start = ctx.journal().task_start(n).cloned();
+        let answer = |text: String| Line {
+            kind: Kind::Answer,
+            action: Some(TASK.to_string()),
+            text: Some(text),
+            n: Some(n),
+            by: Some(by.to_string()),
+            ..Default::default()
+        };
+        ctx.journal().add(answer(word.to_string()));
+        let Some(start) = start else { return };
+        if matches!(word, "yes" | "always") {
+            self.pending.push_front(Job::Task(TaskJob {
+                text: start.text.unwrap_or_default(),
+                by: start.by.unwrap_or_default(),
+                rules_ok: rule.into_iter().collect(),
+                again: true,
+            }));
+        } else {
+            ctx.journal().add(Line {
+                kind: Kind::Action,
+                action: Some(TASK.to_string()),
+                ok: Some(false),
+                text: Some(format!("ended: #{n} answered {word}")),
+                by: start.by,
+                ..Default::default()
+            });
         }
     }
 

@@ -67,7 +67,10 @@ pub async fn run(args: Args) -> Result<ExitCode> {
     };
     let journal = flow::journal_end(&name);
     let since = Timestamp::now();
-    service::put(&Command::Run { bundle })?;
+    service::put(&Command::Run {
+        bundle,
+        by: super::by(),
+    })?;
     println!("handed {name} to the daemon");
     flow::ensure_daemon()?;
     if args.detach {

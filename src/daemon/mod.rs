@@ -53,6 +53,13 @@ pub async fn run() -> Result<()> {
     for dir in [paths::inbox(), paths::services()] {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     }
+    save_json(
+        &paths::daemon(),
+        &Running {
+            pid: std::process::id(),
+            since: now(),
+        },
+    )?;
     let shared = Arc::new(Shared {
         host: hostname(),
         ask_lock: Mutex::new(()),
@@ -102,7 +109,25 @@ pub async fn run() -> Result<()> {
         t.handle.abort();
         let _ = t.handle.await;
     }
+    let _ = std::fs::remove_file(paths::daemon());
     Ok(())
+}
+
+/// `daemon.json`: the running daemon's pid and when it started.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Running {
+    pub pid: u32,
+    pub since: String,
+}
+
+/// The daemon on this box, while its process lives.
+pub(crate) fn running() -> Option<Running> {
+    let r: Running = serde_json::from_slice(&std::fs::read(paths::daemon()).ok()?).ok()?;
+    let pid = libc::pid_t::try_from(r.pid).ok()?;
+    // SAFETY: signal 0 only checks that the process exists; it sends nothing.
+    let alive = unsafe { libc::kill(pid, 0) } == 0
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    alive.then_some(r)
 }
 
 impl Daemon {
@@ -159,7 +184,7 @@ impl Daemon {
 
     async fn apply(&mut self, cmd: Command) {
         match cmd {
-            Command::Run { bundle } => {
+            Command::Run { bundle, by } => {
                 let name = bundle.spec.name.clone();
                 if !valid_name(&name) {
                     eprintln!("run: {name:?} is no service name");
@@ -173,6 +198,7 @@ impl Daemon {
                 journal::note(
                     &name,
                     &format!("run {}: {}", bundle.spec.weave, bundle.spec.request),
+                    &by,
                 );
                 self.broken.remove(&name);
                 self.start(&name, true);
@@ -184,6 +210,7 @@ impl Daemon {
                 secrets,
                 decide,
                 code,
+                by,
             } => {
                 let Ok(mut spec) = svc::spec(&service) else {
                     eprintln!("tell: no service {service}");
@@ -207,39 +234,56 @@ impl Daemon {
                     eprintln!("tell {service}: {e:#}");
                     return;
                 }
-                journal::note(&service, &format!("tell: {request}"));
+                journal::note(&service, &format!("tell: {request}"), &by);
                 self.broken.remove(&service);
                 if !spec.stopped {
                     self.start(&service, true);
                 }
             }
-            Command::Do { service, action } => match self.tasks.get(&service) {
+            Command::Do {
+                service,
+                action,
+                by,
+            } => match self.tasks.get(&service) {
                 Some(t) => {
-                    let _ = t.ctl.send(Ctl::Do(action));
+                    let _ = t.ctl.send(Ctl::Do { action, by });
                 }
-                None if svc::spec(&service).is_ok() => {
-                    journal::note(&service, &format!("do {action}: the service is stopped"))
-                }
+                None if svc::spec(&service).is_ok() => journal::note(
+                    &service,
+                    &format!("do {action}: the service is stopped"),
+                    &by,
+                ),
                 None => eprintln!("do: no service {service}"),
             },
+            Command::Task { service, text, by } => match self.tasks.get(&service) {
+                Some(t) => {
+                    let _ = t.ctl.send(Ctl::Task { text, by });
+                }
+                None if svc::spec(&service).is_ok() => journal::note(
+                    &service,
+                    &format!("task {text:?}: the service is stopped"),
+                    &by,
+                ),
+                None => eprintln!("task: no service {service}"),
+            },
             Command::Answer { n, word, by } => self.answer(n, &word, &by, None).await,
-            Command::Stop { service } => {
+            Command::Stop { service, by } => {
                 self.halt(&service).await;
                 if let Err(e) = set_stopped(&service, true) {
                     eprintln!("stop {service}: {e:#}");
                     return;
                 }
-                journal::note(&service, "stopped");
+                journal::note(&service, "stopped", &by);
             }
-            Command::Start { service } => {
+            Command::Start { service, by } => {
                 if let Err(e) = set_stopped(&service, false) {
                     eprintln!("start {service}: {e:#}");
                     return;
                 }
                 self.broken.remove(&service);
-                journal::note(&service, "started");
+                journal::note(&service, "started", &by);
             }
-            Command::Rm { service } => {
+            Command::Rm { service, by: _ } => {
                 self.halt(&service).await;
                 self.broken.remove(&service);
                 if valid_name(&service) {
@@ -248,15 +292,17 @@ impl Daemon {
                     }
                 }
             }
-            Command::Forget { service, name } => match self.tasks.get(&service) {
+            Command::Forget { service, name, by } => match self.tasks.get(&service) {
                 Some(t) => {
-                    let _ = t.ctl.send(Ctl::Forget(name));
+                    let _ = t.ctl.send(Ctl::Forget { name, by });
                 }
                 None => match learned::forget_file(&service, &name) {
-                    Ok(true) => journal::note(&service, &format!("forgot {name}")),
-                    Ok(false) => {
-                        journal::note(&service, &format!("forget: nothing learned for {name}"))
-                    }
+                    Ok(true) => journal::note(&service, &format!("forgot {name}"), &by),
+                    Ok(false) => journal::note(
+                        &service,
+                        &format!("forget: nothing learned for {name}"),
+                        &by,
+                    ),
                     Err(e) => eprintln!("forget {service}: {e:#}"),
                 },
             },
@@ -294,6 +340,7 @@ impl Daemon {
                 let _ = t.ctl.send(Ctl::Answer {
                     n,
                     word: word.to_string(),
+                    by: by.to_string(),
                 });
             }
             None => journal::append(
@@ -305,6 +352,7 @@ impl Daemon {
                     action: answers_action(&service, word),
                     text: Some(word.to_string()),
                     n: Some(n),
+                    by: Some(by.to_string()),
                     ..Default::default()
                 },
             ),
@@ -464,7 +512,7 @@ pub(crate) fn epoch() -> i64 {
     jiff::Timestamp::now().as_second()
 }
 
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     let mut buf = [0u8; 256];
     // SAFETY: the buffer is valid for its length; gethostname writes at most that much.
     let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
@@ -485,6 +533,18 @@ pub(crate) fn redact(text: &str, secrets: &[(String, String)]) -> String {
         }
     }
     out
+}
+
+/// The last `max` bytes of `text`, from a character boundary.
+pub(crate) fn last(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut from = text.len() - max;
+    while !text.is_char_boundary(from) {
+        from += 1;
+    }
+    &text[from..]
 }
 
 /// At most `max` bytes: the head and the tail, with what was cut said between.

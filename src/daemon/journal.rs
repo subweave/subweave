@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::paths;
-use crate::service::{self as svc, Kind, Line};
+use crate::service::{self as svc, Kind, Line, TASK};
 
 use super::{epoch, epoch_of, now, redact};
 
@@ -37,8 +37,8 @@ impl Journal {
         if l.t.is_empty() {
             l.t = now();
         }
-        if let Some(t) = &l.text {
-            l.text = Some(redact(t, &self.secrets));
+        for s in [&mut l.text, &mut l.body, &mut l.output].into_iter().flatten() {
+            *s = redact(s, &self.secrets);
         }
         if let Some(f) = &mut l.facts {
             for v in f.values_mut() {
@@ -59,6 +59,17 @@ impl Journal {
             kind: Kind::Note,
             goal: goal.map(str::to_string),
             text: Some(text.into()),
+            ..Default::default()
+        });
+    }
+
+    /// A note the person caused; `by` says who.
+    pub fn note_by(&mut self, goal: Option<&str>, text: impl Into<String>, by: &str) {
+        self.add(Line {
+            kind: Kind::Note,
+            goal: goal.map(str::to_string),
+            text: Some(text.into()),
+            by: Some(by.to_string()).filter(|b| !b.is_empty()),
             ..Default::default()
         });
     }
@@ -111,6 +122,17 @@ impl Journal {
             .find(|l| l.kind == Kind::Gate && l.n == Some(n))
     }
 
+    /// The start line of the person's task that raised ask `n`: the newest before it.
+    pub fn task_start(&self, n: u64) -> Option<&Line> {
+        let at = self
+            .lines
+            .iter()
+            .position(|l| l.kind == Kind::Ask && l.n == Some(n))?;
+        self.lines[..at].iter().rev().find(|l| {
+            l.kind == Kind::Action && l.action.as_deref() == Some(TASK) && l.ok.is_none()
+        })
+    }
+
     /// The newest `always` or `never` the person gave for this rule and action.
     pub fn kept(&self, rule: &str, action: &str) -> Option<&'static str> {
         self.lines.iter().rev().find_map(|l| {
@@ -140,7 +162,8 @@ impl Journal {
         let mut answers: BTreeMap<u64, (String, i64)> = BTreeMap::new();
         for l in &self.lines {
             match l.kind {
-                Kind::Ask => {
+                // A person's task parks no goal and not the box.
+                Kind::Ask if l.action.as_deref() != Some(TASK) => {
                     if let Some(n) = l.n {
                         out.insert(l.goal.clone(), (n, None));
                     }
@@ -168,7 +191,9 @@ impl Journal {
                 && l.goal.is_none()
                 && matches!(l.text.as_deref(), Some("yes" | "always"))
                 && l.n.is_some_and(|n| {
-                    self.ask(n).is_some_and(|a| a.goal.is_none()) && self.gate(n).is_none()
+                    self.ask(n)
+                        .is_some_and(|a| a.goal.is_none() && a.action.is_none())
+                        && self.gate(n).is_none()
                 })
         })
     }
@@ -218,14 +243,16 @@ pub(crate) fn append(path: &Path, l: &Line) {
     }
 }
 
-/// A note in the journal of a service whose loop is not running.
-pub(crate) fn note(service: &str, text: &str) {
+/// A note in the journal of a service whose loop is not running; `by`, when not empty,
+/// says who caused it.
+pub(crate) fn note(service: &str, text: &str, by: &str) {
     append(
         &paths::journal(service),
         &Line {
             t: now(),
             kind: Kind::Note,
             text: Some(text.to_string()),
+            by: Some(by.to_string()).filter(|b| !b.is_empty()),
             ..Default::default()
         },
     );

@@ -51,24 +51,26 @@ pub fn run(args: Args) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn forget(args: ForgetArgs) -> Result<ExitCode> {
-    super::known(&args.service)?;
-    let learned = service::learned(&args.service)?;
-    let prefix = format!("{}/", args.name);
-    let found = learned.facts.contains_key(&args.name)
-        || learned.steps.contains_key(&args.name)
+/// Fails unless the service learned something under `name`.
+pub(crate) fn check_forget(service: &str, name: &str) -> Result<()> {
+    super::known(service)?;
+    let learned = service::learned(service)?;
+    let prefix = format!("{name}/");
+    let found = learned.facts.contains_key(name)
+        || learned.steps.contains_key(name)
         || learned.steps.keys().any(|k| k.starts_with(&prefix));
     if !found {
-        bail!(
-            "{} learned nothing named {}: subweave learned {} lists it",
-            args.service,
-            args.name,
-            args.service
-        );
+        bail!("{service} learned nothing named {name}: subweave learned {service} lists it");
     }
+    Ok(())
+}
+
+pub fn forget(args: ForgetArgs) -> Result<ExitCode> {
+    check_forget(&args.service, &args.name)?;
     service::put(&Command::Forget {
         service: args.service.clone(),
         name: args.name.clone(),
+        by: super::by(),
     })?;
     println!(
         "asked the daemon to forget {} in {}",

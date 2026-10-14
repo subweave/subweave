@@ -10,7 +10,7 @@ use tokio::task::JoinSet;
 
 use crate::channel::{self, AskInfo, Message, Sent};
 use crate::paths;
-use crate::service::{Kind, Line};
+use crate::service::{Kind, Line, TASK};
 
 use super::Shared;
 use super::service::Ctx;
@@ -97,16 +97,18 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
             facts: Some(req.facts.clone()),
             n: Some(n),
             answers: Some(req.answers.clone()),
+            body: Some(req.text.clone()),
             ..Default::default()
         });
         let title = l.text.unwrap_or_default();
         j.add(Line {
             kind: Kind::Message,
             goal: req.goal.clone(),
+            action: req.action.clone().filter(|a| a == TASK),
             text: Some(format!("ask: #{n} {title}")),
             ..Default::default()
         });
-        (title, ctx.redact(&req.text), l.facts.unwrap_or_default())
+        (title, l.body.unwrap_or_default(), l.facts.unwrap_or_default())
     };
     let msg = Message {
         kind: channel::Kind::Ask,

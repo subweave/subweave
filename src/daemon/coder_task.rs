@@ -1,5 +1,6 @@
 //! A DO task: the decider picks skills, their recipes run in code, and when the goal
-//! still fails the coder works on it with `shell`, `done` and `ask`.
+//! still fails the coder works on it with `shell`, `done` and `ask`. A person's task is
+//! a DO task with no goal: `done` ends it.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -10,12 +11,12 @@ use serde_json::{Value, json};
 use crate::model::coder::{Msg, Tally, Tool};
 use crate::model::decider::Question;
 use crate::service::{Kind, Line};
-use crate::weave::{self, Action, Condition, Goal, Rule, Skill};
+use crate::weave::{self, Condition, Goal, Rule, Skill};
 
 use super::asks::AskReq;
 use super::facts::{self, Values};
 use super::goals;
-use super::repair::{command, rule_text};
+use super::repair::{command, command_output, rule_text};
 use super::service::Ctx;
 use super::{cap, sh};
 
@@ -51,15 +52,48 @@ const ERROR_KINDS: [(&str, &str); 5] = [
     ("other", "none of these"),
 ];
 
+/// What a DO task works for: an action's goal, or a person's task (`action` is `task`,
+/// no goal). Every line it writes names both.
+#[derive(Clone, Copy)]
+pub(crate) struct Work<'a> {
+    pub goal: Option<&'a Goal>,
+    pub action: &'a str,
+}
+
+impl Work<'_> {
+    pub fn goal_name(&self) -> Option<String> {
+        self.goal.map(|g| g.name.clone())
+    }
+
+    /// For lines that name no action in an action's run: a task's lines all say `task`.
+    fn task_action(&self) -> Option<String> {
+        self.goal.is_none().then(|| self.action.to_string())
+    }
+
+    fn note(&self, ctx: &Ctx, text: String) {
+        ctx.journal().add(Line {
+            kind: Kind::Note,
+            goal: self.goal_name(),
+            action: self.task_action(),
+            text: Some(text),
+            ..Default::default()
+        });
+    }
+}
+
 pub(crate) enum DoResult {
-    /// The goal held: the commands that made it, in order.
-    Pass(Vec<String>),
+    /// The goal held, or the person's task is done: the commands that made it, in order,
+    /// and the coder's summary of a task.
+    Pass {
+        commands: Vec<String>,
+        summary: Option<String>,
+    },
     Asked,
     Failed(String),
 }
 
 enum End {
-    Pass(Vec<String>),
+    Pass(Vec<String>, Option<String>),
     Asked,
     Next,
     Failed(String),
@@ -67,36 +101,45 @@ enum End {
 
 pub(crate) async fn do_task(
     ctx: &Ctx,
-    goal: &Goal,
-    a: &Action,
+    work: Work<'_>,
     task: &str,
     prior: &mut String,
     rules_ok: &[String],
 ) -> DoResult {
     let task = weave::subst(task, &ctx.spec.args);
     let values = facts::known(ctx, &facts::all(&ctx.w)).await;
-    let skills = pick_skills(ctx, goal, &task, &values).await;
+    let skills = pick_skills(ctx, work, &task, &values).await;
     let mut ran = Vec::new();
     'recipes: for s in &skills {
         for r in &s.recipes {
             let cmd = weave::subst(r, &ctx.spec.args);
-            if !command(ctx, goal, a, &cmd, prior).await {
+            if !command(ctx, work, &cmd, prior).await {
                 break 'recipes;
             }
             ran.push(cmd);
         }
     }
-    if !ran.is_empty() && goals::check_fresh(ctx, goal).await == Some(true) {
-        return DoResult::Pass(ran);
+    if let Some(goal) = work.goal {
+        if !ran.is_empty() && goals::check_fresh(ctx, goal).await == Some(true) {
+            return DoResult::Pass {
+                commands: ran,
+                summary: None,
+            };
+        }
     }
     if ctx.coder.is_none() {
-        return DoResult::Failed(format!("{}: no coder for the task", a.name));
+        return DoResult::Failed(format!("{}: no coder for the task", work.action));
     }
-    session(ctx, goal, a, &task, &skills, prior, rules_ok).await
+    session(ctx, work, &task, &skills, prior, rules_ok).await
 }
 
 /// One decider request, one choice per skill: `reached` at 0.5 or more picks it.
-async fn pick_skills<'a>(ctx: &'a Ctx, goal: &Goal, task: &str, values: &Values) -> Vec<&'a Skill> {
+async fn pick_skills<'a>(
+    ctx: &'a Ctx,
+    work: Work<'_>,
+    task: &str,
+    values: &Values,
+) -> Vec<&'a Skill> {
     let Some(decider) = &ctx.decider else {
         return Vec::new();
     };
@@ -127,18 +170,19 @@ async fn pick_skills<'a>(ctx: &'a Ctx, goal: &Goal, task: &str, values: &Values)
             },
         );
     }
-    let state = json!({
+    let mut state = json!({
         "box": ctx.box_line(),
         "service": ctx.name,
         "job": task,
-        "failing_goal": goals::describe(ctx, goal),
         "facts": facts::shown(values),
     });
+    if let Some(goal) = work.goal {
+        state["failing_goal"] = json!(goals::describe(ctx, goal));
+    }
     let answers = match decider.ask(state, questions).await {
         Ok(a) => a,
         Err(e) => {
-            ctx.journal()
-                .note(Some(&goal.name), format!("decider: {e:#}"));
+            work.note(ctx, format!("decider: {e:#}"));
             return Vec::new();
         }
     };
@@ -157,7 +201,8 @@ async fn pick_skills<'a>(ctx: &'a Ctx, goal: &Goal, task: &str, values: &Values)
     let names: Vec<&str> = picked.iter().map(|s| s.name.as_str()).collect();
     ctx.journal().add(Line {
         kind: Kind::Decide,
-        goal: Some(goal.name.clone()),
+        goal: work.goal_name(),
+        action: work.task_action(),
         text: Some(format!(
             "skills: {}",
             if names.is_empty() {
@@ -173,7 +218,33 @@ async fn pick_skills<'a>(ctx: &'a Ctx, goal: &Goal, task: &str, values: &Values)
     picked
 }
 
-fn tools() -> [Tool; 3] {
+fn tools(work: Work<'_>) -> [Tool; 3] {
+    let done = match work.goal {
+        Some(_) => Tool {
+            name: "done",
+            description: "The goal should hold now. commands: the commands that made the fix, in order, exactly as you ran them; cause: one line on what was wrong.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "commands": {"type": "array", "items": {"type": "string"}},
+                    "cause": {"type": "string"},
+                },
+                "required": ["commands", "cause"],
+            }),
+        },
+        None => Tool {
+            name: "done",
+            description: "The task is done. commands: the commands that did it, in order, exactly as you ran them; summary: one line on what you did and what came of it.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "commands": {"type": "array", "items": {"type": "string"}},
+                    "summary": {"type": "string"},
+                },
+                "required": ["commands", "summary"],
+            }),
+        },
+    };
     [
         Tool {
             name: "shell",
@@ -187,18 +258,7 @@ fn tools() -> [Tool; 3] {
                 "required": ["command", "purpose"],
             }),
         },
-        Tool {
-            name: "done",
-            description: "The goal should hold now. commands: the commands that made the fix, in order, exactly as you ran them; cause: one line on what was wrong.",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "commands": {"type": "array", "items": {"type": "string"}},
-                    "cause": {"type": "string"},
-                },
-                "required": ["commands", "cause"],
-            }),
-        },
+        done,
         Tool {
             name: "ask",
             description: "Only the person can fix this (a key, a payment, a decision). Ends the task.",
@@ -213,7 +273,7 @@ fn tools() -> [Tool; 3] {
 
 fn system_prompt(
     ctx: &Ctx,
-    goal: &Goal,
+    work: Work<'_>,
     task: &str,
     values: &Values,
     skills: &[&Skill],
@@ -230,13 +290,21 @@ fn system_prompt(
     if let Some(about) = &ctx.w.about {
         s.push_str(&format!("About the service: {about}\n"));
     }
-    s.push_str(&format!("\nTask: {task}\n"));
-    s.push_str(&format!(
-        "The goal that must hold: {}\n",
-        goals::describe(ctx, goal)
-    ));
-    if let Condition::Code(_) = goal.cond {
-        s.push_str("It is checked in code with the facts below.\n");
+    match work.goal {
+        Some(goal) => {
+            s.push_str(&format!("\nTask: {task}\n"));
+            s.push_str(&format!(
+                "The goal that must hold: {}\n",
+                goals::describe(ctx, goal)
+            ));
+            if let Condition::Code(_) = goal.cond {
+                s.push_str("It is checked in code with the facts below.\n");
+            }
+        }
+        None => s.push_str(&format!(
+            "\nTask from the person: {task}\nDo this task and change nothing it does not \
+             need, then call `done` with a one-line summary.\n"
+        )),
     }
     if !ctx.spec.args.is_empty() {
         s.push_str("\nARGs (also environment variables of every command):\n");
@@ -297,25 +365,28 @@ fn system_prompt(
 
 async fn session(
     ctx: &Ctx,
-    goal: &Goal,
-    a: &Action,
+    work: Work<'_>,
     task: &str,
     skills: &[&Skill],
     prior: &str,
     rules_ok: &[String],
 ) -> DoResult {
     let coder = ctx.coder.as_ref().expect("checked by the caller");
-    let tools = tools();
+    let tools = tools(work);
     let mut commands = 0usize;
     let mut ok_cmds: Vec<String> = Vec::new();
     let mut history: Vec<String> = Vec::new();
     for i in 0..coder.len() {
         let values = facts::known(ctx, &facts::all(&ctx.w)).await;
-        let system = system_prompt(ctx, goal, task, &values, skills, prior);
-        let mut first = "Make the goal hold.".to_string();
+        let system = system_prompt(ctx, work, task, &values, skills, prior);
+        let mut first = match work.goal {
+            Some(_) => "Make the goal hold.",
+            None => "Do the task.",
+        }
+        .to_string();
         if !history.is_empty() {
             first.push_str(&format!(
-                " Another model worked on this and the goal did not hold. Its commands:\n{}",
+                " Another model worked on this and it is not done. Its commands:\n{}",
                 cap(&history.join("\n"), 8 * 1024)
             ));
         }
@@ -330,7 +401,7 @@ async fn session(
             let reply = match coder.send(i, &system, &msgs, &tools).await {
                 Ok(r) => r,
                 Err(e) => {
-                    ctx.journal().note(Some(&goal.name), format!("{e:#}"));
+                    work.note(ctx, format!("{e:#}"));
                     break End::Next;
                 }
             };
@@ -359,7 +430,7 @@ async fn session(
                 let out = match c.name.as_str() {
                     "shell" => {
                         commands += 1;
-                        match shell(ctx, goal, a, &c.input, rules_ok, &mut ok_cmds).await {
+                        match shell(ctx, work, &c.input, rules_ok, &mut ok_cmds).await {
                             Ok((cmd, out)) => {
                                 history.push(cmd);
                                 out
@@ -370,44 +441,33 @@ async fn session(
                             }
                         }
                     }
-                    "done" => match goals::check_fresh(ctx, goal).await {
-                        Some(true) => {
-                            let named: Vec<String> = c.input["commands"]
-                                .as_array()
-                                .map(|a| {
-                                    a.iter()
-                                        .filter_map(|v| v.as_str())
-                                        .map(|s| s.trim().to_string())
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            // A named command is kept as it ran: the coder often names
-                            // a part of a chained command, or a command with a check added.
-                            let mut kept: Vec<String> = Vec::new();
-                            for n in &named {
-                                let ran = ok_cmds.iter().find(|o| o.trim() == n).or_else(|| {
-                                    ok_cmds
-                                        .iter()
-                                        .find(|o| o.contains(n.as_str()) || n.contains(o.trim()))
-                                });
-                                if let Some(o) = ran {
-                                    if !kept.contains(o) {
-                                        kept.push(o.clone());
+                    "done" => {
+                        let held = match work.goal {
+                            Some(goal) => goals::check_fresh(ctx, goal).await == Some(true),
+                            None => true,
+                        };
+                        if held {
+                            let kept = kept_commands(&c.input, &ok_cmds);
+                            let summary = match work.goal {
+                                Some(_) => {
+                                    if let Some(cause) = c.input["cause"].as_str() {
+                                        work.note(ctx, format!("coder: {cause}"));
                                     }
+                                    None
                                 }
-                            }
-                            if let Some(cause) = c.input["cause"].as_str() {
-                                ctx.journal()
-                                    .note(Some(&goal.name), format!("coder: {cause}"));
-                            }
-                            end = Some(End::Pass(kept));
+                                None => c.input["summary"]
+                                    .as_str()
+                                    .map(|s| s.trim().to_string())
+                                    .filter(|s| !s.is_empty()),
+                            };
+                            end = Some(End::Pass(kept, summary));
                             String::new()
-                        }
-                        _ => {
+                        } else {
                             checks += 1;
                             if checks >= MAX_CHECKS {
                                 end = Some(End::Next);
                             }
+                            let goal = work.goal.expect("a task with no goal is held");
                             let now = facts::read(ctx, &goals::needs(&ctx.w, goal), false).await;
                             let shown: Vec<String> = now
                                 .iter()
@@ -418,22 +478,28 @@ async fn session(
                                 shown.join("\n")
                             )
                         }
-                    },
+                    }
                     "ask" => {
                         let q = c.input["question"]
                             .as_str()
                             .unwrap_or("the coder needs the person")
                             .to_string();
-                        ctx.ask(AskReq {
-                            goal: Some(goal.name.clone()),
-                            action: Some(a.name.clone()),
-                            rule: None,
-                            title: q,
-                            text: format!(
+                        let text = match work.goal {
+                            Some(goal) => format!(
                                 "{}\nThe coder says only you can fix this. Answer yes once it is fixed to run {} again.",
                                 goals::describe(ctx, goal),
-                                a.name
+                                work.action
                             ),
+                            None => format!(
+                                "Task: {task}\nThe coder says only you can fix this. Answer yes once it is fixed to run the task again, no to end it."
+                            ),
+                        };
+                        ctx.ask(AskReq {
+                            goal: work.goal_name(),
+                            action: Some(work.action.to_string()),
+                            rule: None,
+                            title: q,
+                            text,
                             facts: facts::shown(&values),
                             answers: vec!["yes".into(), "no".into()],
                         });
@@ -451,8 +517,8 @@ async fn session(
         };
         ctx.journal().add(Line {
             kind: Kind::Note,
-            goal: Some(goal.name.clone()),
-            action: Some(a.name.clone()),
+            goal: work.goal_name(),
+            action: Some(work.action.to_string()),
             text: Some(format!(
                 "coder {}: {}, {commands} commands so far",
                 coder.model(i),
@@ -462,21 +528,51 @@ async fn session(
             ..Default::default()
         });
         match end {
-            End::Pass(cmds) => return DoResult::Pass(cmds),
+            End::Pass(commands, summary) => return DoResult::Pass { commands, summary },
             End::Asked => return DoResult::Asked,
-            End::Failed(why) => return DoResult::Failed(format!("{}: {why}", a.name)),
+            End::Failed(why) => return DoResult::Failed(format!("{}: {why}", work.action)),
             End::Next => {}
         }
     }
-    DoResult::Failed(format!("{}: every coder model failed the task", a.name))
+    DoResult::Failed(format!(
+        "{}: every coder model failed the task",
+        work.action
+    ))
+}
+
+/// The commands `done` names, each as it ran: the coder often names a part of a chained
+/// command, or a command with a check added.
+fn kept_commands(input: &Value, ok_cmds: &[String]) -> Vec<String> {
+    let named: Vec<String> = input["commands"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut kept: Vec<String> = Vec::new();
+    for n in &named {
+        let ran = ok_cmds.iter().find(|o| o.trim() == n).or_else(|| {
+            ok_cmds
+                .iter()
+                .find(|o| o.contains(n.as_str()) || n.contains(o.trim()))
+        });
+        if let Some(o) = ran {
+            if !kept.contains(o) {
+                kept.push(o.clone());
+            }
+        }
+    }
+    kept
 }
 
 /// One coder command: gated by the quoted rules, run, journaled. `Ok((command, what the
 /// coder reads))`, or `Err(())` when an ask was raised and the session ends.
 async fn shell(
     ctx: &Ctx,
-    goal: &Goal,
-    a: &Action,
+    work: Work<'_>,
     input: &Value,
     rules_ok: &[String],
     ok_cmds: &mut Vec<String>,
@@ -526,8 +622,7 @@ async fn shell(
     let answers = match decider.ask(state, questions).await {
         Ok(x) => x,
         Err(e) => {
-            ctx.journal()
-                .note(Some(&goal.name), format!("decider: {e:#}"));
+            work.note(ctx, format!("decider: {e:#}"));
             return Ok((command, "Refused: the rule check failed; try again.".into()));
         }
     };
@@ -538,12 +633,12 @@ async fn shell(
             continue;
         }
         let rule = rule_text(r);
-        let kept = ctx.journal().kept(&rule, &a.name);
+        let kept = ctx.journal().kept(&rule, work.action);
         if *never || kept == Some("never") {
             ctx.journal().add(Line {
                 kind: Kind::Gate,
-                goal: Some(goal.name.clone()),
-                action: Some(a.name.clone()),
+                goal: work.goal_name(),
+                action: Some(work.action.to_string()),
                 text: Some(format!("{rule}: {}", ctx.redact(&command))),
                 p: Some(BTreeMap::from([("yes".to_string(), p)])),
                 ..Default::default()
@@ -557,13 +652,23 @@ async fn shell(
             continue;
         }
         let values = facts::known(ctx, &facts::all(&ctx.w)).await;
+        let (title, go_on) = match work.goal {
+            Some(goal) => (
+                format!("{} for {}: run `{command}`?", work.action, goal.name),
+                "Answer yes to let the task go on.",
+            ),
+            None => (
+                format!("task: run `{command}`?"),
+                "Answer yes to let the task go on, no to end it.",
+            ),
+        };
         ctx.ask(AskReq {
-            goal: Some(goal.name.clone()),
-            action: Some(a.name.clone()),
+            goal: work.goal_name(),
+            action: Some(work.action.to_string()),
             rule: Some(rule.clone()),
-            title: format!("{} for {}: run `{command}`?", a.name, goal.name),
+            title,
             text: format!(
-                "The coder wants to run `{command}` to {purpose}.\n{rule} holds ({p:.2}). Answer yes to let the task go on."
+                "The coder wants to run `{command}` to {purpose}.\n{rule} holds ({p:.2}). {go_on}"
             ),
             facts: facts::shown(&values),
             answers: vec!["yes".into(), "no".into(), "always".into(), "never".into()],
@@ -574,10 +679,11 @@ async fn shell(
     let shown = ctx.redact(&cap(&o.both(), OUTPUT_CAP));
     ctx.journal().add(Line {
         kind: Kind::Command,
-        goal: Some(goal.name.clone()),
-        action: Some(a.name.clone()),
+        goal: work.goal_name(),
+        action: Some(work.action.to_string()),
         text: Some(command.clone()),
         ok: Some(o.ok()),
+        output: command_output(ctx, &o),
         ..Default::default()
     });
     if o.ok() {

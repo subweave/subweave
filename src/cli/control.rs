@@ -28,6 +28,7 @@ pub fn stop(args: Args) -> Result<ExitCode> {
     super::known(&args.service)?;
     service::put(&Command::Stop {
         service: args.service.clone(),
+        by: super::by(),
     })?;
     println!(
         "asked the daemon to stop {}; subweave start {} resumes it",
@@ -40,6 +41,7 @@ pub fn start(args: Args) -> Result<ExitCode> {
     super::known(&args.service)?;
     service::put(&Command::Start {
         service: args.service.clone(),
+        by: super::by(),
     })?;
     println!("asked the daemon to start {}", args.service);
     Ok(ExitCode::SUCCESS)
@@ -57,6 +59,7 @@ pub fn rm(args: RmArgs) -> Result<ExitCode> {
     }
     service::put(&Command::Rm {
         service: args.service.clone(),
+        by: super::by(),
     })?;
     println!("asked the daemon to remove {}", args.service);
     Ok(ExitCode::SUCCESS)

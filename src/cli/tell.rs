@@ -6,8 +6,10 @@ use jiff::Timestamp;
 
 use super::flow;
 use crate::model::{ModelRef, decider::Decider};
+use crate::plan::{self, Plan};
 use crate::service::{self, Command};
-use crate::{paths, plan, remote};
+use crate::weave::Weave;
+use crate::{paths, remote};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -31,11 +33,46 @@ pub struct Args {
     pub detach: bool,
 }
 
+/// The request check of `tell`, for the CLI and the dashboard alike.
+pub(crate) struct Check {
+    pub weave: Weave,
+    /// The ARGs now.
+    pub before: BTreeMap<String, String>,
+    pub plan: Plan,
+    /// SECRETs the new ARGs turn on that the daemon does not hold yet.
+    pub missing: Vec<String>,
+}
+
+/// Checks a request against a running service's weave and ARGs, with `decide` or the
+/// service's own decider.
+pub(crate) async fn check(service: &str, request: &str, decide: Option<&ModelRef>) -> Result<Check> {
+    let weave = super::service_weave(service)?;
+    let spec = service::spec(service)?;
+    let model = match decide {
+        Some(m) => m.clone(),
+        None => ModelRef::parse(&spec.decide)?,
+    };
+    let plan = plan::plan(&weave, request, &Decider::new(model)?, Some(&spec.args)).await?;
+    let have = stored_secrets(service);
+    let missing = plan
+        .secrets
+        .iter()
+        .filter(|s| !have.contains_key(*s))
+        .cloned()
+        .collect();
+    Ok(Check {
+        weave,
+        before: spec.args,
+        plan,
+        missing,
+    })
+}
+
 pub async fn run(args: Args) -> Result<ExitCode> {
     if args.request.is_none() && args.decide.is_none() && args.code.is_empty() {
         bail!("say what to change: a request, --decide or --code");
     }
-    let w = super::service_weave(&args.service)?;
+    super::known(&args.service)?;
     let spec = service::spec(&args.service)?;
     let decide = args.decide.as_deref().map(ModelRef::parse).transpose()?;
     let code = args
@@ -45,23 +82,12 @@ pub async fn run(args: Args) -> Result<ExitCode> {
         .collect::<Result<Vec<_>>>()?;
     let (request, values, secrets) = match &args.request {
         Some(request) => {
-            let model = match &decide {
-                Some(m) => m.clone(),
-                None => ModelRef::parse(&spec.decide)?,
-            };
-            let plan = plan::plan(&w, request, &Decider::new(model)?, Some(&spec.args)).await?;
-            if !flow::settle(&plan, args.yes)? {
+            let c = check(&args.service, request, decide.as_ref()).await?;
+            if !flow::settle(&c.plan, args.yes)? {
                 return Ok(ExitCode::FAILURE);
             }
-            let have = stored_secrets(&args.service);
-            let missing: Vec<String> = plan
-                .secrets
-                .iter()
-                .filter(|s| !have.contains_key(*s))
-                .cloned()
-                .collect();
-            let secrets = flow::secrets(&w, &missing, &plan.values)?;
-            (request.clone(), plan.values, secrets)
+            let secrets = flow::secrets(&c.weave, &c.missing, &c.plan.values)?;
+            (request.clone(), c.plan.values, secrets)
         }
         None => (spec.request.clone(), spec.args.clone(), BTreeMap::new()),
     };
@@ -74,6 +100,7 @@ pub async fn run(args: Args) -> Result<ExitCode> {
         secrets,
         decide: decide.map(|m| m.to_string()),
         code: (!code.is_empty()).then(|| code.iter().map(ModelRef::to_string).collect()),
+        by: super::by(),
     })?;
     println!("handed the change to {} to the daemon", args.service);
     if args.detach {
