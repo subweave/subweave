@@ -605,6 +605,11 @@ pub(crate) fn last(text: &str, max: usize) -> &str {
 
 /// At most `max` bytes: the head and the tail, with what was cut said between.
 pub(crate) fn cap(text: &str, max: usize) -> String {
+    cap_to(text, max, None)
+}
+
+/// `cap`, whose cut marker names `file`, where the whole text is kept.
+pub(crate) fn cap_to(text: &str, max: usize, file: Option<&std::path::Path>) -> String {
     if text.len() <= max {
         return text.to_string();
     }
@@ -617,8 +622,12 @@ pub(crate) fn cap(text: &str, max: usize) -> String {
     while !text.is_char_boundary(tail) {
         tail += 1;
     }
+    let whole = match file {
+        Some(f) => format!("; all of it is in {}", f.display()),
+        None => String::new(),
+    };
     format!(
-        "{}\n…[{} bytes cut]…\n{}",
+        "{}\n…[{} bytes cut{whole}]…\n{}",
         &text[..head],
         tail - head,
         &text[tail..]

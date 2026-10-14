@@ -862,6 +862,30 @@ async fn daemon_and_cli_keep_a_toy_service() {
         mkdir[0]["output"],
         format!("web root {}, token [TOY_TOKEN]", www.display())
     );
+    // The coder's commands keep their whole output, redacted, in files only the owner reads.
+    let kept: Vec<PathBuf> = std::fs::read_dir(b.service().join("output"))
+        .map(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+        .unwrap_or_default();
+    let mkdir_file = kept
+        .iter()
+        .find(|p| {
+            std::fs::read_to_string(p).is_ok_and(|t| {
+                t == format!("web root {}, token [TOY_TOKEN]", www.display())
+            })
+        })
+        .unwrap_or_else(|| b.fail(&format!("no output file for mkdir in {kept:?}")));
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(mkdir_file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    assert!(
+        kept.iter().all(|p| p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".txt") && n.contains('-'))),
+        "{kept:?}"
+    );
     let learned = b.learned();
     assert_eq!(
         learned["steps"]["install/installed"]["commands"],

@@ -3,13 +3,17 @@
 //! a DO task with no goal: `done` ends it.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 
 use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use crate::model::coder::{Msg, Tally, Tool};
 use crate::model::decider::Question;
+use crate::paths;
 use crate::service::{Kind, Line};
 use crate::weave::{self, Condition, Goal, Rule, Skill};
 
@@ -18,10 +22,12 @@ use super::facts::{self, Values};
 use super::goals;
 use super::repair::{command, command_output, rule_text};
 use super::service::Ctx;
-use super::{cap, sh};
+use super::{cap, cap_to, sh};
 
 const RUN_LIMIT: Duration = Duration::from_secs(30 * 60);
 const OUTPUT_CAP: usize = 8 * 1024;
+/// Output files kept per service, the newest.
+const OUTPUT_FILES: usize = 200;
 const MAX_COMMANDS: usize = 40;
 const MAX_CHECKS: u32 = 2;
 /// Replies with no tool call before the model counts as failed.
@@ -688,7 +694,9 @@ async fn shell(
         return Err(());
     }
     let o = sh(&command, &ctx.env, RUN_LIMIT).await;
-    let shown = ctx.redact(&cap(&o.both(), OUTPUT_CAP));
+    let all = ctx.redact(&o.both());
+    let file = save_output(ctx, &all);
+    let shown = cap_to(&all, OUTPUT_CAP, file.as_deref());
     ctx.journal().add(Line {
         kind: Kind::Command,
         goal: work.goal_name(),
@@ -709,6 +717,51 @@ async fn shell(
         None => format!("{code}\n{shown}"),
     };
     Ok((command, line))
+}
+
+/// Keeps a coder command's whole output, redacted, as `output/<episode>-<n>.txt` with mode
+/// 0600, and only the newest `OUTPUT_FILES` files of the service. `None` when it cannot.
+fn save_output(ctx: &Ctx, text: &str) -> Option<PathBuf> {
+    let dir = paths::output(&ctx.name);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .ok()?;
+    let ep = super::episode::current()
+        .unwrap_or_else(|| uuid::Uuid::now_v7().simple().to_string());
+    let prefix = format!("{ep}-");
+    let mut n = 0u32;
+    let mut files: Vec<(SystemTime, PathBuf)> = Vec::new();
+    for e in std::fs::read_dir(&dir).ok()?.flatten() {
+        let name = e.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if let Some(k) = name
+            .strip_prefix(&prefix)
+            .and_then(|r| r.strip_suffix(".txt"))
+            .and_then(|k| k.parse::<u32>().ok())
+        {
+            n = n.max(k);
+        }
+        if let Ok(t) = e.metadata().and_then(|m| m.modified()) {
+            files.push((t, e.path()));
+        }
+    }
+    let path = dir.join(format!("{prefix}{}.txt", n + 1));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .ok()?;
+    f.write_all(text.as_bytes()).ok()?;
+    if files.len() >= OUTPUT_FILES {
+        files.sort();
+        for (_, old) in &files[..=files.len() - OUTPUT_FILES] {
+            let _ = std::fs::remove_file(old);
+        }
+    }
+    Some(path)
 }
 
 /// The decider sorts a failed command's error.
