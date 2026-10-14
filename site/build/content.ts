@@ -16,12 +16,34 @@ export interface WeaveCard extends Weave {
   lines: number;
 }
 
+export interface Finding {
+  line: number;
+  level: "error" | "warning" | "note";
+  rule: string;
+  message: string;
+}
+
+// `subweave review` output, as printed: the header, the area table, the findings.
+export interface Review {
+  command: string;
+  header: string;
+  table: string[];
+  areas: { area: string; score: number }[];
+  findings: Finding[];
+  name: string;
+  score: number;
+  checks: number;
+  cost: string;
+}
+
 export interface Content {
   weaves: WeaveCard[];
   // The hero's short Weavefile (site/hero.Weavefile), parsed.
   hero: Weave;
   plans: string[];
   deciderRequest: string;
+  // site/review: a first-draft postgres weave, its review, and the shipped weave's review.
+  review: { draft: Review; shipped: Review; excerpt: { n: number; key: string }[] };
   // Code to colour, by key: each weave by name, `hero`, quoted excerpts, shell and JSON.
   sources: Record<string, { lang: Lang; text: string }>;
 }
@@ -40,6 +62,29 @@ function one<T>(list: T[], what: string): T {
   if (list.length === 0) throw new Error(`site content: no ${what}`);
   return list[0];
 }
+
+// Parses `subweave review` text: "name  54/100   44 rules, 114 checks, $0.0008", the area
+// table up to the first blank line, then one finding per "Weavefile:N" line.
+function parseReview(command: string, text: string): Review {
+  const lines = text.replace(/\n$/, "").split("\n");
+  const head = /^(\S+)\s+(\d+)\/100\s+\d+ rules, (\d+) checks, (\$[\d.]+)$/.exec(lines[0]);
+  if (!head) throw new Error(`review: bad header ${lines[0]}`);
+  const blank = lines.indexOf("", 2);
+  const table = lines.slice(2, blank === -1 ? undefined : blank);
+  const areas = table.slice(1).map((l) => {
+    const [area, score] = l.trim().split(/\s+/);
+    return { area, score: Number(score) };
+  });
+  const findings: Finding[] = [];
+  for (const l of lines) {
+    const m = /^Weavefile:(\d+)\s+(error|warning|note)\s+(\S+)\s{2,}.*?\s{2,}(.+?)(?:\s{2,}[\d.]+)?$/.exec(l);
+    if (m) findings.push({ line: Number(m[1]), level: m[2] as Finding["level"], rule: m[3], message: m[4] });
+  }
+  return { command, header: lines[0], table, areas, findings, name: head[1], score: Number(head[2]), checks: Number(head[3]), cost: head[4] };
+}
+
+// The draft lines the page shows, by number; the ACTIONs where the review finds the most.
+const EXCERPT = [37, 47] as const;
 
 export function readContent(root: string, files: string[] = []): Content {
   const read = (path: string) => {
@@ -90,7 +135,21 @@ export function readContent(root: string, files: string[] = []): Content {
   const deciderRequest = one(spec.filter((b) => b.info === "json" && b.body.includes('"questions"')), "decider request").body;
   sources.request = { lang: "json", text: deciderRequest };
   sources.journal = { lang: "json", text: one(journal.body.split("\n").filter((l) => l.includes('"kind":"decide"')), "decide line") };
-  return { weaves, hero, plans, deciderRequest, sources };
+
+  const draftText = read("site/review/draft/Weavefile").split("\n");
+  const excerpt: { n: number; key: string }[] = [];
+  for (let n = EXCERPT[0]; n <= EXCERPT[1]; n++) {
+    const key = `draft:${n}`;
+    sources[key] = { lang: "weavefile", text: draftText[n - 1] };
+    excerpt.push({ n, key });
+  }
+  const review = {
+    draft: parseReview("subweave review ./draft", read("site/review/review-draft.txt")),
+    shipped: parseReview("subweave review weaves/postgres", read("site/review/review-postgres.txt")),
+    excerpt,
+  };
+  if (review.draft.areas.length !== 9) throw new Error(`review: want 9 areas, found ${review.draft.areas.length}`);
+  return { weaves, hero, plans, deciderRequest, review, sources };
 }
 
 export function content(root: string): Plugin {

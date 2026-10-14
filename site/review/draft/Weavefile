@@ -1,0 +1,55 @@
+FROM   ubuntu:24.04
+NEEDS  2 CPU, 4 GB RAM
+
+ARG version=18     SHOULD "a PostgreSQL major release, like 18"
+ARG keep=forever   SHOULD "how many base backups to keep, a number"
+ARG region         MAY    "the AWS region"
+ARG access=public  SHOULD
+    public    "connections from anyone on the internet, with a password"
+    private   "connections from the private network"
+    internal  "connections from inside the company network"
+
+SECRET PGPASSWORD  "the password of the app role"
+SECRET PW          "a password nobody reads"
+
+NEVER "allow more than 100 connections"
+NEVER "be insecure"
+
+FACT up       "postgres"
+FACT disk     "the disk"
+FACT clean    "delete old logs, then print the free space"
+FACT pending  apt-get update -qq && apt list --upgradable 2>/dev/null | wc -l
+FACT latency  "the average query time"
+FACT weblog   FOLLOW tail -F /var/log/nginx/access.log
+
+GOAL installed               up
+GOAL room      AFTER installed  disk < 85
+GOAL fast      AFTER installed  "queries take under 200 ms on average per `latency`"
+GOAL tidy      AFTER installed  clean > 10
+GOAL current   AFTER installed  pending == 0
+GOAL served    AFTER installed  "the new lines in `weblog` show no attack"
+
+ACTION install FOR installed WITHIN 20m
+  WHEN "postgres is missing"
+  RUN  apt-get install postgresql-18
+  RUN  psql -c "alter role app password '$PGPASSWORD'"
+
+ACTION restart FOR room, fast
+  WHEN "restart postgres"
+  RUN  if [ -d /var/lib/postgresql ]; then systemctl restart postgresql
+
+ACTION bounce FOR room, fast
+  WHEN "postgres stopped answering or crashed"
+  RUN  mv /var/lib/postgresql/18/main/postmaster.pid /tmp/pid.old
+
+ACTION restore FOR fast WITHIN 5m
+  WHEN "the data is corrupt"
+  DO   "restore the newest base backup over the data directory"
+
+ACTION tune FOR fast, tidy, current
+  WHEN "queries are slow"
+  DO   "tune postgres"
+
+SKILL k8s WHEN "running postgres on kubernetes" <<EOF
+  Be careful and follow best practices.
+EOF

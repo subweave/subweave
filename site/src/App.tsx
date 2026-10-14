@@ -11,6 +11,7 @@ import { Learned } from "./sections/Learned";
 import { Loop } from "./sections/Loop";
 import { Models } from "./sections/Models";
 import { Requests } from "./sections/Requests";
+import { Review } from "./sections/Review";
 import { Weavefile } from "./sections/Weavefile";
 
 export function App() {
@@ -27,9 +28,7 @@ export function App() {
     (n: number) => <Learned key="learned" n={n} />,
     (n: number) => <Channels key="channels" n={n} />,
     (n: number) => <Catalog key="weaves" n={n} onRead={setWeave} />,
-
-    // ── Slot: "For weave authors: subweave review". The lead adds this section here. ──
-
+    (n: number) => <Review key="review" n={n} />,
     (n: number) => <Models key="models" n={n} />,
     (n: number) => <Install key="install" n={n} />,
   ];

@@ -1,0 +1,12 @@
+postgres  100/100   48 rules, 221 checks, $0.0020
+
+area       score  failed
+header       100
+args         100
+secrets      100
+facts        100
+goals        100
+actions      100
+rules        100
+skills       100
+coverage     100
