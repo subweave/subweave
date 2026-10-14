@@ -61,6 +61,20 @@ export interface Line {
   output?: string;
   /** `ask`: the ask's explanation. */
   body?: string;
+  /** The episode the line belongs to: one job run or one learn. Older lines have none. */
+  ep?: string;
+  /** What a model conversation used, on the coder note that ends it. */
+  usage?: Usage;
+}
+
+export interface Usage {
+  /** `id[@provider]`. */
+  model: string;
+  calls: number;
+  input: number;
+  cached: number;
+  output: number;
+  reasoning?: number;
 }
 
 export interface Learned {
@@ -269,7 +283,7 @@ export const api = {
   service: (s: string) => request<ServiceDetail>("GET", `/api/services/${enc(s)}`),
   journal: (
     s: string,
-    q: { before?: number; limit?: number; kind?: string[]; goal?: string; action?: string; q?: string },
+    q: { before?: number; limit?: number; kind?: string[]; goal?: string; action?: string; q?: string; whole?: boolean },
   ) => {
     const p = new URLSearchParams();
     if (q.before !== undefined) p.set("before", String(q.before));
@@ -278,6 +292,7 @@ export const api = {
     if (q.goal) p.set("goal", q.goal);
     if (q.action) p.set("action", q.action);
     if (q.q) p.set("q", q.q);
+    if (q.whole) p.set("whole", "true");
     return request<{ lines: Line[]; more: boolean }>("GET", `/api/services/${enc(s)}/journal?${p}`);
   },
   metrics: (s: string, range: string) =>

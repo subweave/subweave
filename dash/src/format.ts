@@ -66,6 +66,18 @@ export function num(v: number | null | undefined): string {
   return String(+v.toPrecision(3));
 }
 
+/** Token counts: 2822 → 2.8k. */
+export function tokens(v: number): string {
+  if (v < 1000) return String(v);
+  if (v < 1e6) return `${+(v / 1e3).toFixed(v < 1e4 ? 1 : 0)}k`;
+  return `${+(v / 1e6).toFixed(1)}M`;
+}
+
+/** `deepseek/deepseek-v4-flash-0731@novita` → `deepseek-v4-flash`: no vendor, provider or date. */
+export function modelName(id: string): string {
+  return (id.split("@")[0].split("/").pop() ?? id).replace(/-\d{4}$/, "");
+}
+
 export function bytes(v: number | null | undefined): string {
   if (v === null || v === undefined) return "–";
   const u = ["B", "KB", "MB", "GB", "TB"];

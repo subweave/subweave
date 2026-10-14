@@ -2,11 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type Line, type Series, type ServiceSummary, type Vitals } from "../api";
 import { useAppData } from "../App";
 import { Sparkline } from "../components/charts";
-import { Row } from "../components/rows";
+import { EpisodeRow, StepRow } from "../components/rows";
 import { ErrorLine, Glyph, Panel, Skeleton } from "../components/ui";
 import { bytes, clock, dur, ms, num, rate, usd, useNow } from "../format";
 import { useJournal, useLive } from "../live";
-import { counts, holdsOf, serviceShown } from "../model";
+import { counts, holdsOf, serviceShown, timeline } from "../model";
 import { useResource } from "../resource";
 import { linkClick, servicePath } from "../router";
 
@@ -162,14 +162,15 @@ function ServiceCard({ s, now }: { s: ServiceSummary; now: number }) {
   );
 }
 
-function Recent({ names, now }: { names: string[]; now: number }) {
+function Recent({ services, now }: { services: ServiceSummary[]; now: number }) {
   const live = useLive();
+  const names = services.map((s) => s.name);
   const key = names.join();
   const res = useResource(
     `recent:${key}`,
     async () => {
       const all = await Promise.all(names.map((n) => api.journal(n, { limit: 30 }).then((r) => r.lines.map((l) => ({ service: n, line: l })))));
-      return all.flat().sort((a, b) => b.line.t.localeCompare(a.line.t) || b.line.i - a.line.i).slice(0, 30);
+      return all.flat();
     },
     live.epoch,
   );
@@ -179,7 +180,26 @@ function Recent({ names, now }: { names: string[]; now: number }) {
     null,
     useCallback((service: string, line: Line) => setFresh((f) => [{ service, line }, ...f].slice(0, 30)), []),
   );
-  const rows = useMemo(() => [...fresh, ...(res.data ?? [])].slice(0, 30), [fresh, res.data]);
+  const repairs = services.map((s) => s.status?.repair ?? null).join("\n");
+  const rows = useMemo(() => {
+    const by = new Map<string, Map<number, Line>>();
+    for (const { service, line } of [...fresh, ...(res.data ?? [])]) {
+      const m = by.get(service) ?? new Map<number, Line>();
+      if (!m.has(line.i)) m.set(line.i, line);
+      by.set(service, m);
+    }
+    const repair = repairs.split("\n");
+    return [...by]
+      .flatMap(([service, m]) =>
+        timeline(
+          [...m.values()].sort((a, b) => b.i - a.i),
+          repair[names.indexOf(service)] || null,
+        ).map((item) => ({ service, item, t: ms(item.type === "step" ? item.step.line.t : item.start) })),
+      )
+      .sort((a, b) => b.t - a.t)
+      .slice(0, 20);
+  }, [fresh, res.data, repairs, key]);
+  const many = names.length > 1;
   return (
     <Panel title="Recent activity">
       <ErrorLine error={res.error} />
@@ -189,14 +209,20 @@ function Recent({ names, now }: { names: string[]; now: number }) {
         <p className="empty">Nothing happened yet.</p>
       ) : (
         <ol className="rows">
-          {rows.map(({ service, line }) => (
-            <Row key={`${service}-${line.i}`} line={line} now={now} service={names.length > 1 ? service : undefined} />
-          ))}
+          {rows.map(({ service, item }) =>
+            item.type === "step" ? (
+              <StepRow key={`${service}-${item.step.line.i}`} step={item.step} now={now} service={many ? service : undefined} />
+            ) : (
+              <EpisodeRow key={`${service}-${item.key}`} ep={item} now={now} hidden={NONE} service={many ? service : undefined} />
+            ),
+          )}
         </ol>
       )}
     </Panel>
   );
 }
+
+const NONE = new Set<number>();
 
 export function BoxView() {
   const { services, box, servicesError } = useAppData();
@@ -235,7 +261,7 @@ export function BoxView() {
           <ServiceCard key={s.name} s={s} now={now} />
         ))}
       </div>
-      {services && services.length > 0 && <Recent names={services.map((s) => s.name)} now={now} />}
+      {services && services.length > 0 && <Recent services={services} now={now} />}
     </div>
   );
 }

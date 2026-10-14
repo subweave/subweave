@@ -92,6 +92,10 @@ pub(crate) struct JournalQuery {
     goal: Option<String>,
     action: Option<String>,
     q: Option<String>,
+    /// With a filter, also every other line of each matching line's episode, so the
+    /// timeline can show the whole episode.
+    #[serde(default)]
+    whole: bool,
 }
 
 pub(crate) async fn journal(
@@ -107,12 +111,24 @@ pub(crate) async fn journal(
         .map(|k| k.split(',').map(str::trim).collect());
     let needle = q.q.as_deref().filter(|t| !t.is_empty()).map(str::to_lowercase);
     let lines = service::journal_numbered(&s).map_err(ApiError::internal)?;
-    let mut hits = lines.iter().rev().filter(|(i, l)| {
-        q.before.is_none_or(|b| *i < b)
-            && kinds.as_ref().is_none_or(|k| k.contains(kind_str(l.kind)))
+    let hit = |l: &Line| {
+        kinds.as_ref().is_none_or(|k| k.contains(kind_str(l.kind)))
             && q.goal.as_ref().is_none_or(|g| l.goal.as_ref() == Some(g))
             && q.action.as_ref().is_none_or(|a| l.action.as_ref() == Some(a))
             && needle.as_ref().is_none_or(|n| matches(l, n))
+    };
+    let eps: BTreeSet<&str> = if q.whole {
+        lines
+            .iter()
+            .filter(|(_, l)| hit(l))
+            .filter_map(|(_, l)| l.ep.as_deref())
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
+    let mut hits = lines.iter().rev().filter(|(i, l)| {
+        q.before.is_none_or(|b| *i < b)
+            && (hit(l) || l.ep.as_deref().is_some_and(|e| eps.contains(e)))
     });
     let page: Vec<Numbered> = hits
         .by_ref()
