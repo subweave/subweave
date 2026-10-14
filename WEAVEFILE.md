@@ -464,6 +464,8 @@ subweave run postgres "postgres 18" --decide jev-1.13.0@typesafe
 
 - The coder calls `<endpoint>/chat/completions` for `openai` and `<endpoint>/messages` for `anthropic`. The decider calls `<endpoint>/systemone`.
 - `openrouter` is built in: `https://openrouter.ai/api/v1`, protocol `openai`. It also serves `systemone` for Jev and `messages` for `--protocol anthropic`, with the same key.
+- On `openrouter`, the coder sends a `session_id`, one per job and model, so that one provider serves the whole conversation and its prompt cache holds.
+- For an `anthropic/*` model on `openrouter`, and for any model on the `anthropic` protocol, the coder marks the system prompt and the newest message with `cache_control`. Anthropic caches only up to a marked block.
 - The decider needs a System One model: the loop's thresholds read its probabilities, and a chat model gives none.
 - A provider with no key sends no `Authorization` header.
 - `key` stores the key on each box that uses the provider, with mode 600, like a `SECRET`. It never goes to a model.

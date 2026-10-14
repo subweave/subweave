@@ -261,6 +261,17 @@ fn openai_body(
             }})
         })
         .collect();
+    // Anthropic caches only up to a marked block: the system prompt, and the newest
+    // message so the next turn reads the whole conversation from the cache.
+    if ep.provider.name == provider::OPENROUTER && ep.model.id.starts_with("anthropic/") {
+        messages[0]["content"] = cached_text(system);
+        if let Some(last) = messages.last_mut().filter(|_| !msgs.is_empty()) {
+            let text = last["content"].as_str().filter(|t| !t.is_empty()).map(cached_text);
+            if let Some(blocks) = text {
+                last["content"] = blocks;
+            }
+        }
+    }
     let mut body = json!({
         "model": ep.model.id,
         "messages": messages,
@@ -351,6 +362,14 @@ fn anthropic_body(ep: &Endpoint, system: &str, msgs: &[Msg], tools: &[Tool]) -> 
             ),
         }
     }
+    // Marked like the openai protocol's Anthropic models: the system prompt and the newest block.
+    if let Some(block) = messages
+        .last_mut()
+        .and_then(|m| m["content"].as_array_mut())
+        .and_then(|b| b.last_mut())
+    {
+        block["cache_control"] = json!({"type": "ephemeral"});
+    }
     let tools: Vec<Value> = tools
         .iter()
         .map(
@@ -360,11 +379,16 @@ fn anthropic_body(ep: &Endpoint, system: &str, msgs: &[Msg], tools: &[Tool]) -> 
     json!({
         "model": ep.model.id,
         "max_tokens": MAX_TOKENS,
-        "system": system,
+        "system": cached_text(system),
         "messages": messages,
         "tools": tools,
         "tool_choice": {"type": "any"},
     })
+}
+
+/// One text block that Anthropic caches up to and including.
+fn cached_text(text: &str) -> Value {
+    json!([{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}])
 }
 
 fn anthropic_reply(model: &ModelRef, v: &Value) -> Result<Reply> {
