@@ -24,7 +24,9 @@ const RELEARN: Duration = Duration::from_secs(600);
 const FACT_SYSTEM: &str = "You write one bash command that reads a fact on this box. The \
     command must only read: never install, write, delete, restart or refresh a cache. It runs \
     as `bash -eo pipefail -c <command>` with a 60 second limit, and the ARGs are environment \
-    variables. Answer by calling the tool `fact`.";
+    variables. The service may be down or not installed yet: the command still prints the \
+    fact's value for that case and exits 0, so guard each failing step (`|| true`, `if`). \
+    Answer by calling the tool `fact`.";
 
 pub(crate) fn key(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
@@ -350,12 +352,15 @@ async fn learn(
                     .num()
                     .is_none()
             {
+                let code = o.code.map_or("killed".to_string(), |c| format!("exit {c}"));
                 let shown = ctx.redact(&super::cap(&o.both(), 2000));
                 answer(
                     &mut msgs,
-                    format!("It printed this, not one number:\n{shown}\nPrint one number."),
+                    format!(
+                        "It ended with {code} and printed this, not one number:\n{shown}\nPrint one number."
+                    ),
                 );
-                last = format!("`{command}` printed no number");
+                last = format!("`{command}` printed no number ({code})");
                 continue;
             }
             // A command can read the right thing in the wrong form: an HTTP status for a
