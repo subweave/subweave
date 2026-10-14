@@ -48,6 +48,8 @@ pub struct Reply {
     /// Input tokens the provider read from its prompt cache, part of `input_tokens`.
     pub cached_tokens: u64,
     pub output_tokens: u64,
+    /// Output tokens spent reasoning, part of `output_tokens`.
+    pub reasoning_tokens: u64,
 }
 
 /// What one conversation with a model used.
@@ -59,6 +61,7 @@ pub struct Tally {
     pub input: u64,
     pub cached: u64,
     pub output: u64,
+    pub reasoning: u64,
     pub cost_usd: f64,
 }
 
@@ -71,14 +74,15 @@ impl Tally {
         self.input += r.input_tokens;
         self.cached += r.cached_tokens;
         self.output += r.output_tokens;
+        self.reasoning += r.reasoning_tokens;
         self.cost_usd += r.cost_usd;
     }
 
-    /// `3 calls, system prompt 2140 chars, first request 812 tokens in, 2950 in (1600 cached), 210 out`.
+    /// `3 calls, system prompt 2140 chars, first request 812 tokens in, 2950 in (1600 cached), 210 out (120 reasoning)`.
     pub fn describe(&self, system_chars: usize) -> String {
         format!(
-            "{} calls, system prompt {system_chars} chars, first request {} tokens in, {} in ({} cached), {} out",
-            self.calls, self.first_input, self.input, self.cached, self.output
+            "{} calls, system prompt {system_chars} chars, first request {} tokens in, {} in ({} cached), {} out ({} reasoning)",
+            self.calls, self.first_input, self.input, self.cached, self.output, self.reasoning
         )
     }
 
@@ -90,6 +94,7 @@ impl Tally {
             input: self.input,
             cached: self.cached,
             output: self.output,
+            reasoning: self.reasoning,
         }
     }
 }
@@ -329,6 +334,10 @@ fn openai_reply(model: &ModelRef, v: &Value) -> Result<Reply> {
             .and_then(Value::as_u64)
             .unwrap_or(0),
         output_tokens: v["usage"]["completion_tokens"].as_u64().unwrap_or(0),
+        reasoning_tokens: v
+            .pointer("/usage/completion_tokens_details/reasoning_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
     })
 }
 
@@ -427,6 +436,7 @@ fn anthropic_reply(model: &ModelRef, v: &Value) -> Result<Reply> {
         input_tokens: count("input_tokens") + cached + count("cache_creation_input_tokens"),
         cached_tokens: cached,
         output_tokens: count("output_tokens"),
+        reasoning_tokens: 0,
     })
 }
 

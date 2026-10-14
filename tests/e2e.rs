@@ -194,7 +194,12 @@ fn tool_call(id: &str, name: &str, args: Value) -> axum::Json<Value> {
                 "name": name, "arguments": args.to_string(),
             }}],
         }}],
-        "usage": {"prompt_tokens": 900, "completion_tokens": 40, "cost": 0.0001},
+        "usage": {
+            "prompt_tokens": 900,
+            "completion_tokens": 40,
+            "completion_tokens_details": {"reasoning_tokens": 30},
+            "cost": 0.0001,
+        },
     }))
 }
 
@@ -901,6 +906,16 @@ async fn daemon_and_cli_keep_a_toy_service() {
     let chats_after_install = mock.count("/chat/completions");
     // Two fact learner turns, four coder turns: firewall, mkdir, page, done.
     assert_eq!(chats_after_install, 6);
+    // The note that ends the coder's conversation counts its reasoning tokens.
+    let usage: Vec<Value> = b
+        .lines("note", |l| l["action"] == "install" && l["usage"].is_object())
+        .into_iter()
+        .map(|l| l["usage"].clone())
+        .collect();
+    assert_eq!(usage.len(), 1, "{usage:?}");
+    assert_eq!(usage[0]["calls"], 4);
+    assert_eq!(usage[0]["output"], 160);
+    assert_eq!(usage[0]["reasoning"], 120);
     assert!(
         mock.seen()
             .requests
