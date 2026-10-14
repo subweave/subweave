@@ -16,8 +16,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+argon2 = { version = "0.5", features = ["std"] }
+axum = "0.8"
 base64 = "0.22"
 clap = { version = "4.6", features = ["derive"] }
+futures-util = { version = "0.3", default-features = false }
 hex = "0.4"
 indexmap = { version = "2.14", features = ["serde"] }
 jiff = "0.2"
@@ -34,7 +37,6 @@ toml = { version = "1.1", default-features = false, features = ["std", "serde", 
 uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]
-axum = "0.8"
 tempfile = "3"
 
 [profile.release]

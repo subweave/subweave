@@ -2,7 +2,7 @@ use std::process::ExitCode;
 
 use anyhow::{Result, bail};
 
-use crate::service::{self, Command, Line};
+use crate::service::{self, Ask, Command};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -22,65 +22,50 @@ pub struct AnswerArgs {
     pub on: Option<String>,
 }
 
-/// Every open ask on this box, by number, with its service.
-fn open() -> Result<Vec<(String, Line)>> {
-    let mut out = Vec::new();
-    for name in service::names()? {
-        let journal = service::journal(&name)?;
-        out.extend(
-            service::open_asks(&journal)
-                .into_iter()
-                .map(|l| (name.clone(), l.clone())),
-        );
-    }
-    out.sort_by_key(|(_, l)| l.n);
-    Ok(out)
-}
-
 pub fn run() -> Result<ExitCode> {
-    let asks = open()?;
+    let asks = service::all_asks()?;
     if asks.is_empty() {
         println!("no open asks");
         return Ok(ExitCode::SUCCESS);
     }
-    let sw = asks.iter().map(|(s, _)| s.len()).max().unwrap_or(0);
+    let sw = asks.iter().map(|a| a.service.len()).max().unwrap_or(0);
     let gw = asks
         .iter()
-        .map(|(_, l)| l.goal.as_deref().map_or(1, str::len))
+        .map(|a| a.goal.as_deref().map_or(1, str::len))
         .max()
         .unwrap_or(0);
-    for (service, l) in &asks {
+    for a in &asks {
         println!(
-            "#{:<3} {service:sw$}  {:gw$}  {}  [{}]",
-            l.n.unwrap_or_default(),
-            l.goal.as_deref().unwrap_or("-"),
-            l.text.as_deref().unwrap_or("").trim(),
-            l.answers.as_deref().unwrap_or_default().join(" "),
+            "#{:<3} {:sw$}  {:gw$}  {}  [{}]",
+            a.n,
+            a.service,
+            a.goal.as_deref().unwrap_or("-"),
+            a.title.trim(),
+            a.answers.join(" "),
         );
     }
     println!("\nanswer with: subweave answer <n> <word>");
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn answer(args: AnswerArgs) -> Result<ExitCode> {
-    let asks = open()?;
-    let Some((service, ask)) = asks.iter().find(|(_, l)| l.n == Some(args.n)) else {
-        bail!("no open ask #{}: subweave inbox lists them", args.n);
+/// The open ask `n`, when `word` answers it.
+pub(crate) fn check_answer(n: u64, word: &str) -> Result<Ask> {
+    let Some(ask) = service::all_asks()?.into_iter().find(|a| a.n == n) else {
+        bail!("no open ask #{n}: subweave inbox lists them");
     };
-    let answers = ask.answers.as_deref().unwrap_or_default();
-    if !answers.iter().any(|a| *a == args.word) {
-        bail!(
-            "#{} takes {}, not {:?}",
-            args.n,
-            answers.join(", "),
-            args.word
-        );
+    if !ask.answers.iter().any(|a| a == word) {
+        bail!("#{n} takes {}, not {word:?}", ask.answers.join(", "));
     }
+    Ok(ask)
+}
+
+pub fn answer(args: AnswerArgs) -> Result<ExitCode> {
+    let ask = check_answer(args.n, &args.word)?;
     service::put(&Command::Answer {
         n: args.n,
         word: args.word.clone(),
-        by: format!("cli:{}", super::user()),
+        by: super::by(),
     })?;
-    println!("answered #{} for {service}: {}", args.n, args.word);
+    println!("answered #{} for {}: {}", args.n, ask.service, args.word);
     Ok(ExitCode::SUCCESS)
 }

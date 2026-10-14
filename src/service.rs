@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::paths;
 
+/// The `action` of every journal line of a person's task; no ACTION may take the name.
+pub const TASK: &str = "task";
+
 /// `services/<name>/service.json`: how a service was asked for, as the daemon keeps it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Spec {
@@ -39,7 +42,8 @@ pub struct Bundle {
     pub secrets: BTreeMap<String, String>,
 }
 
-/// One file in `inbox/`.
+/// One file in `inbox/`. `by`: who sent it, `cli:<user>` or `dash@<ip>`; lines it
+/// causes carry it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Command {
@@ -47,6 +51,8 @@ pub enum Command {
     /// commands stay).
     Run {
         bundle: Bundle,
+        #[serde(default)]
+        by: String,
     },
     /// New ARGs, after the request check; `decide`/`code` replace the models when given.
     /// `secrets`: SECRETs the new ARGs turn on, merged into `secrets.json`.
@@ -57,13 +63,23 @@ pub enum Command {
         secrets: BTreeMap<String, String>,
         decide: Option<String>,
         code: Option<Vec<String>>,
+        #[serde(default)]
+        by: String,
     },
     /// Run one action now, through the same rules.
     Do {
         service: String,
         action: String,
+        #[serde(default)]
+        by: String,
     },
-    /// `word`: `yes`, `no`, `always`, `never` or an action name. `by`: who answered.
+    /// A task in words for the coder, with no goal, through the same rules.
+    Task {
+        service: String,
+        text: String,
+        by: String,
+    },
+    /// `word`: `yes`, `no`, `always`, `never` or an action name.
     Answer {
         n: u64,
         word: String,
@@ -71,17 +87,25 @@ pub enum Command {
     },
     Stop {
         service: String,
+        #[serde(default)]
+        by: String,
     },
     Start {
         service: String,
+        #[serde(default)]
+        by: String,
     },
     Rm {
         service: String,
+        #[serde(default)]
+        by: String,
     },
     /// Drop a learned fact command or learned steps (`<action>` drops every goal's steps).
     Forget {
         service: String,
         name: String,
+        #[serde(default)]
+        by: String,
     },
 }
 
@@ -113,6 +137,15 @@ pub struct Line {
     /// `ask`: the words that answer it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answers: Option<Vec<String>>,
+    /// `ask`: what it says beyond its title, as the channels get it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// `command`: stdout and stderr, secrets redacted, the last 4 KB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Who acted, on lines the person causes: `cli:<user>`, `dash@<ip>`, a channel's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,6 +276,79 @@ pub fn open_asks(lines: &[Line]) -> Vec<&Line> {
         .iter()
         .filter(|l| l.kind == Kind::Ask && l.n.is_some_and(|n| !answered.contains(&n)))
         .collect()
+}
+
+/// Every line of a service's journal with its index among the file's non-blank lines;
+/// lines that do not parse are skipped, and keep their index.
+pub fn journal_numbered(service: &str) -> Result<Vec<(u64, Line)>> {
+    let path = paths::journal(service);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+    };
+    Ok(numbered_lines(&text)
+        .enumerate()
+        .filter_map(|(i, l)| Some((i as u64, serde_json::from_str(l).ok()?)))
+        .collect())
+}
+
+/// The lines of a journal that count: every line but blank ones. A line's index among
+/// them is its `i` in the dashboard.
+pub fn numbered_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().filter(|l| !l.trim().is_empty())
+}
+
+/// An open ask, as `subweave inbox` and the dashboard show it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Ask {
+    pub n: u64,
+    pub service: String,
+    pub goal: Option<String>,
+    pub action: Option<String>,
+    /// The rule that holds the action, from the ask's `gate` line.
+    pub rule: Option<String>,
+    pub title: String,
+    pub text: String,
+    pub facts: BTreeMap<String, String>,
+    pub answers: Vec<String>,
+    pub t: String,
+}
+
+/// A service's open asks, oldest first.
+pub fn asks(service: &str, lines: &[Line]) -> Vec<Ask> {
+    open_asks(lines)
+        .into_iter()
+        .filter_map(|l| {
+            let n = l.n?;
+            let rule = lines
+                .iter()
+                .find(|g| g.kind == Kind::Gate && g.n == Some(n))
+                .and_then(|g| g.text.clone());
+            Some(Ask {
+                n,
+                service: service.to_string(),
+                goal: l.goal.clone(),
+                action: l.action.clone(),
+                rule,
+                title: l.text.clone().unwrap_or_default(),
+                text: l.body.clone().unwrap_or_default(),
+                facts: l.facts.clone().unwrap_or_default(),
+                answers: l.answers.clone().unwrap_or_default(),
+                t: l.t.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Every open ask on this box, by number.
+pub fn all_asks() -> Result<Vec<Ask>> {
+    let mut out = Vec::new();
+    for name in names()? {
+        out.extend(asks(&name, &journal(&name)?));
+    }
+    out.sort_by_key(|a| a.n);
+    Ok(out)
 }
 
 /// Every service the daemon keeps, by name.

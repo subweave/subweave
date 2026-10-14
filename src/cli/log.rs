@@ -246,21 +246,39 @@ fn one_line(s: &str, max: usize) -> String {
 pub(crate) struct Tail {
     path: PathBuf,
     pos: u64,
+    /// Lines read so far, when read from the start: the index of the next line.
+    count: u64,
 }
 
 impl Tail {
     pub fn start(path: PathBuf) -> Tail {
-        Tail { path, pos: 0 }
+        Tail {
+            path,
+            pos: 0,
+            count: 0,
+        }
     }
 
     /// From the file's end now: only lines written later.
     pub fn end(path: PathBuf) -> Tail {
         let pos = std::fs::metadata(&path).map_or(0, |m| m.len());
-        Tail { path, pos }
+        Tail {
+            path,
+            pos,
+            count: 0,
+        }
     }
 
     pub fn lines(&mut self) -> Vec<String> {
-        self.read().unwrap_or_default()
+        self.numbered().1
+    }
+
+    /// The new lines and the 0-based index of the first, for a tail made by `start`.
+    pub fn numbered(&mut self) -> (u64, Vec<String>) {
+        let lines = self.read().unwrap_or_default();
+        let first = self.count;
+        self.count += lines.len() as u64;
+        (first, lines)
     }
 
     fn read(&mut self) -> Result<Vec<String>> {
@@ -271,6 +289,7 @@ impl Tail {
         };
         if f.metadata()?.len() < self.pos {
             self.pos = 0;
+            self.count = 0;
         }
         f.seek(SeekFrom::Start(self.pos))?;
         let mut buf = Vec::new();
@@ -280,9 +299,7 @@ impl Tail {
             return Ok(Vec::new());
         };
         self.pos += end as u64 + 1;
-        Ok(String::from_utf8_lossy(&buf[..end])
-            .lines()
-            .filter(|l| !l.trim().is_empty())
+        Ok(service::numbered_lines(&String::from_utf8_lossy(&buf[..end]))
             .map(String::from)
             .collect())
     }

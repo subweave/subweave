@@ -66,6 +66,21 @@ pub fn boxes() -> PathBuf {
     config().join("boxes.json")
 }
 
+/// The dashboard's bind address, port and password hash; mode 0600.
+pub fn dash() -> PathBuf {
+    config().join("dash.json")
+}
+
+/// What the dashboard keeps: `vitals.jsonl`.
+pub fn dash_state() -> PathBuf {
+    state().join("dash")
+}
+
+/// The running daemon's pid and start time.
+pub fn daemon() -> PathBuf {
+    state().join("daemon.json")
+}
+
 /// Commands from the CLI, one `<uuidv7>.json` each; the daemon consumes and deletes them.
 pub fn inbox() -> PathBuf {
     state().join("inbox")

@@ -2,23 +2,25 @@
 //! with `Args` and `run`. A command with `--on <user@host>`, or one naming a service that
 //! `boxes.json` places on a box, runs on that box instead (`crate::remote`).
 
-mod act;
+pub(crate) mod act;
 mod channel;
 mod control;
 mod daemon;
+mod dash;
 mod flow;
-mod inbox;
+pub(crate) mod inbox;
 mod key;
 mod learn;
-mod learned;
-mod log;
+pub(crate) mod learned;
+pub(crate) mod log;
 mod plan;
 mod provider;
 mod ps;
 mod review;
 mod run;
-mod stats;
-mod tell;
+pub(crate) mod stats;
+pub(crate) mod tell;
+mod task;
 mod term;
 mod version;
 mod watch;
@@ -61,6 +63,8 @@ enum Command {
     Answer(inbox::AnswerArgs),
     /// Run one action now, through the same rules
     Do(act::Args),
+    /// Give the coder a task in words, through the same rules
+    Task(task::Args),
     /// The commands this box learned for a service
     Learned(learned::Args),
     /// Drop a learned fact command, or an action's learned steps
@@ -85,6 +89,8 @@ enum Command {
     Review(review::Args),
     /// Run every service in the foreground; --install makes it a systemd service
     Daemon(daemon::Args),
+    /// The web dashboard; with flags, set where it listens and its password
+    Dash(dash::Args),
     /// Print the version
     Version,
 }
@@ -101,6 +107,7 @@ impl Command {
             Command::Inbox(a) => (a.on.as_deref(), None),
             Command::Answer(a) => (a.on.as_deref(), None),
             Command::Do(a) => (a.on.as_deref(), Some(&a.service)),
+            Command::Task(a) => (a.on.as_deref(), Some(&a.service)),
             Command::Learned(a) => (a.on.as_deref(), Some(&a.service)),
             Command::Forget(a) => (a.on.as_deref(), Some(&a.service)),
             Command::Learn(a) => (a.on.as_deref(), Some(&a.service)),
@@ -109,6 +116,7 @@ impl Command {
             Command::Channel(a) => (a.on.as_deref(), None),
             Command::Key(a) => (a.on.as_deref(), None),
             Command::Provider(a) => (a.on.as_deref(), None),
+            Command::Dash(a) => (a.on.as_deref(), None),
             Command::Plan(_)
             | Command::Review(_)
             | Command::Daemon(_)
@@ -157,6 +165,7 @@ async fn local(command: Command) -> Result<ExitCode> {
         Command::Inbox(_) => inbox::run(),
         Command::Answer(args) => inbox::answer(args),
         Command::Do(args) => act::run(args),
+        Command::Task(args) => task::run(args),
         Command::Learned(args) => learned::run(args),
         Command::Forget(args) => learned::forget(args),
         Command::Learn(args) => learn::run(args),
@@ -169,6 +178,7 @@ async fn local(command: Command) -> Result<ExitCode> {
         Command::Provider(args) => provider::run(args),
         Command::Review(args) => review::run(args).await,
         Command::Daemon(args) => daemon::run(args).await,
+        Command::Dash(args) => dash::run(args).await,
         Command::Version => version::run(),
     }
 }
@@ -251,8 +261,13 @@ pub(crate) fn service_weave(service: &str) -> Result<weave::Weave> {
     parsed(service, &text).with_context(|| format!("{} does not parse", file.display()))
 }
 
+/// `cli:<user>`: who acted, on the Commands this terminal sends.
+pub(crate) fn by() -> String {
+    format!("cli:{}", user())
+}
+
 /// Who answers at this terminal.
-pub(crate) fn user() -> String {
+fn user() -> String {
     std::env::var("SUDO_USER")
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_else(|_| "unknown".into())
