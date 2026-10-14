@@ -8,28 +8,33 @@ ABOUT  "PostgreSQL with WAL archiving to S3-compatible storage"
 FROM   ubuntu:24.04
 NEEDS  2 CPU, 4 GB RAM, 40 GB DISK
 
-ARG version=18
-    <version>  "a PostgreSQL major release, 14 or newer"
+ARG version=18  SHOULD "a PostgreSQL major release, like 18"
+ARG bucket      SHOULD "an S3 URL for base backups and WAL, like s3://acme-pg/db1"
 
-FACT up    pg_isready -q
-FACT disk  df --output=pcent /var/lib/postgresql | tail -1 | tr -dc 0-9
-
-GOAL running           up
-GOAL room   EVERY 5m   disk < 85
-
-ACTION restart FOR running
-  WHEN "postgres crashed once, and nothing on disk is wrong"
-  RUN  systemctl restart postgresql@$version-main
-
+NEVER IF version < 14
 NEVER "drop or truncate a database"
 ASK   BEFORE restore
 
-SKILL wal-g WHEN "configuring wal-g and base backups" <<EOF
+FACT up        pg_isready -q
+FACT archived  "1 when WAL archiving is on and has no failure newer than its last success, else 0"
+
+GOAL running                               up
+GOAL archiving  AFTER running  EVERY 5m    archived == 1     IF bucket
+
+ACTION restart FOR running WITHIN 2m
+  WHEN "postgres crashed once, and nothing on disk is wrong"
+  RUN  systemctl restart postgresql@$version-main
+
+ACTION restore FOR running WITHIN 6h IF bucket
+  WHEN "postgres reports lost or corrupt data"
+  DO   "restore the newest wal-g backup and replay the archived WAL"
+
+SKILL wal-g WHEN "configuring wal-g, archive_command and base backups" <<EOF
   One config file, /etc/wal-g/wal-g.json, owner postgres, mode 600.
 EOF
 ```
 
-The Subweave daemon runs it as one loop:
+The Subweave daemon runs it as one loop. There is no install block, no repair block and no schedule block: installing is making the goals hold on an empty box, and repairing is making them hold again.
 
 ```
 check the goals
@@ -44,15 +49,14 @@ a goal fails ──► the decider picks an action
                  the action runs
                         │
                         ▼
-                 check that goal again
+                 the goal holds WITHIN its time?
 ```
 
-The journal records every step. There is no install block, no repair block and no schedule block: installing is making the goals hold on an empty box, and repairing is making them hold again.
+## Three rules
 
-## Two rules
-
-1. **Keywords are capital words.** `GOAL`, `AFTER`, `SINCE`, `AND`. Names, commands and values are yours; a name cannot be a keyword.
+1. **Keywords are capital words.** `GOAL`, `AFTER`, `IF`, `AND`. Names, commands and values are yours; a name cannot be a keyword.
 2. **Quoted means model.** A `"quoted"` argument, and the body of a `DO` or a `SKILL`, goes to a model. Everything else is code. Inside a command, quotes are bash's.
+3. **Say what, not how.** A quoted `FACT` and a `DO` step let each box learn its own commands ([Learned commands](#learned-commands)). Write a command only when the exact command is the knowledge, like `pg_isready -q`. The wisdom goes into `WHEN`, the rules and `SKILL`s.
 
 ## Instructions
 
@@ -62,18 +66,19 @@ The journal records every step. There is no install block, no repair block and n
 | `FROM <os>:<version>` | the box's operating system |
 | `NEEDS <n> CPU, <n> GB RAM, <n> GB DISK` | the smallest box; also `TB` and `<n> GPU` |
 | `MODEL DECIDE <id>`, `MODEL CODE <id> [THEN <id>]` | a model hint; the run decides |
-| `ARG <name>[=<default>]` | a setting that the request chooses |
+| `ARG <name>[=<default>] MUST\|SHOULD\|MAY ["<what>"]` | a setting the request chooses |
 | `SECRET <NAME> "<what>"` | a value the person types once |
-| `FACT <name> [FOLLOW] <command>` | what the box shows |
+| `FACT <name> [FOLLOW] <command>\|"<what>"` | what the box shows |
 | `GOAL <name> ... <condition>` | what must hold |
-| `ACTION <name> [FOR <goals>]` | what the loop may do |
-| `WHEN "<text>"` | when the action above is the right fix |
+| `ACTION <name> [FOR <goals>] [WITHIN <duration>]` | what the loop may do |
+| `... IF <expr>` | at the end of a `SECRET`, `GOAL`, `ACTION` or `ASK BEFORE` line: in effect only while `<expr>` holds |
 | `RUN <command>` | a step of the action above, in code |
 | `DO "<task>"` | a step of the action above, for the coder |
 | `ADD <<EOF <path>` | a step of the action above: write a file on the box |
-| `NEVER "<text>"` | refuse |
+| `NEVER "<text>"`, `NEVER IF <expr>` | refuse |
 | `ASK "<text>"`, `ASK BEFORE <action>`, `ASK IF <expr>` | wait for the person |
 | `SKILL <name> WHEN "<text>" <<EOF` | what the coder reads, and when |
+| `... IF <expr>` | at the end of an `ARG`-reading line: in effect only while `<expr>` holds |
 
 ## Lines
 
@@ -81,10 +86,13 @@ The journal records every step. There is no install block, no repair block and n
 - `\` at the end of a line joins it to the next line, outside heredocs.
 - `#` at the start of a line makes it a comment.
 - `WHEN`, `RUN`, `DO` and `ADD` belong to the `ACTION` above them. Each action has one `WHEN`.
+- `IF <expr>` ends a `SECRET`, `GOAL`, `ACTION` or `ASK BEFORE` line. The instruction is in effect only while the expression holds. `NEVER IF` and `ASK IF` are rules of their own.
 - `<<EOF` in place of an instruction's text starts a heredoc: `RUN <<EOF`, `DO <<EOF`, `SKILL wal-g WHEN "…" <<EOF`. The text is the lines up to the one that holds only `EOF` and spaces, without their common indentation. Any capital word works in place of `EOF`.
   - `RUN` and `FACT`: a bash script. A bash heredoc inside a one-line `RUN` is bash's own.
   - `DO` and `SKILL`: text for a model.
   - `ADD`: a file's contents.
+- Each name is used once in a file, across `ARG`s, slots, `SECRET`s, `FACT`s, `GOAL`s, `ACTION`s and `SKILL`s.
+- Order is free. A weave reads best in sections, one per concern: its facts, goals, actions and skills together. The `postgres` weave has sections for install, settings, running, backups, disk, load, updates and logs.
 
 A weave is a directory with two files: the `Weavefile` and a `README.md` for people. The daemon reads only the `Weavefile`.
 
@@ -105,55 +113,100 @@ MODEL  CODE deepseek/deepseek-v4-flash-0731 THEN deepseek/deepseek-v4-pro
 ## ARG and SECRET
 
 ```weavefile
-ARG access=local
-    local      "connections from this box only"
-    private    "connections from the private network, with a password and TLS"
-ARG version=18
-    <version>  "a PostgreSQL major release, 14 or newer"
-SECRET AWS_SECRET_ACCESS_KEY "the secret key for the backup bucket"
+ARG version=18    SHOULD "a PostgreSQL major release, like 18"
+ARG access=local  SHOULD
+    local    "connections from this box only"
+    private  "connections from the private network, with a password and TLS"
+ARG bucket        SHOULD "an S3 URL for base backups and WAL, like s3://acme-pg/db1"
+ARG keep=7        MAY    "how many daily base backups to keep, a number"
+ARG network       MUST
+    mainnet  "Ethereum mainnet"
+    sepolia  "the Sepolia test network"
+
+SECRET AWS_SECRET_ACCESS_KEY "the secret key for the backup bucket"  IF bucket
 ```
 
-- A line under an `ARG` with no keyword is an option: a label, then its meaning in quotes.
-- `<slot>` in a label takes a value from the request, as in `last <blocks> blocks`. A slot is then a name, like an `ARG`.
-- An `ARG`'s value is the picked option's label, with its slots filled in: `history` is `last 1000 blocks`, and `blocks` is `1000`.
-- `=<value>` is the default. With no default, the request must say it, or the daemon asks.
-- `SECRET`: the daemon asks for it once and stores it on the box with mode 600.
+An `ARG` takes a value in one of two forms:
+
+- **Value:** `"<what>"` says what the value is. The request gives it in one word: `18`, `s3://acme-pg/db1`.
+- **Options:** the lines under the `ARG`, each a label and its meaning in quotes. `<slot>` in a label takes one word of the request, as in `last <blocks> blocks`. A slot is then a name, like an `ARG`.
+
+The level says what happens when the request does not say the `ARG`:
+
+| Level | Unsaid | Shown as |
+|---|---|---|
+| `MUST` | nothing runs | error |
+| `SHOULD` | the default, or empty | warning |
+| `MAY` | the default, or empty | info |
+
+- A `MUST` `ARG` has no default.
+- A value said wrong is an error at every level: a value that does not fit its `"<what>"`, or words that fit no option.
+- An empty `ARG` is an empty variable in commands and false in an expression. So `IF bucket` turns its instruction off.
+- `SECRET`: the daemon asks for it once and stores it on the box with mode 600. With `IF`, only while the expression holds.
   - It never goes to a model. The daemon removes its value from facts and transcripts.
   - Name it as the program reads it: wal-g reads `AWS_SECRET_ACCESS_KEY`.
 
-Each `ARG`, slot and `SECRET` is an environment variable for every command, the coder's too: `$version`, `$blocks`, `$AWS_SECRET_ACCESS_KEY`. Bash expands them, so the daemon changes no command text. In quoted text and in `DO` and `SKILL` bodies, the daemon replaces `$name` for each `ARG` and slot that has a value. It leaves every other `$` as written, a `SECRET`'s too, so a command in a skill still reads the secret from the environment.
+Each `ARG`, slot and `SECRET` is an environment variable for every command, the coder's too: `$version`, `$blocks`, `$AWS_SECRET_ACCESS_KEY`. Bash expands them, so the daemon changes no command text. In quoted text and in `DO` and `SKILL` bodies, the daemon replaces `$name` for each `ARG` and slot. It leaves every other `$` as written, a `SECRET`'s too, so a command in a skill still reads the secret from the environment.
+
+[Requests](#requests) says how the decider checks a request against the `ARG`s.
 
 ## FACT
 
 ```weavefile
-FACT up    pg_isready -q
-FACT disk  df --output=pcent /var/lib/postgresql | tail -1 | tr -dc 0-9
-FACT logs  FOLLOW journalctl -f -u postgresql@$version-main -p warning
+FACT up        pg_isready -q
+FACT disk      "percent used of the filesystem that holds /var/lib/postgresql, a number"
+FACT kernel    FOLLOW journalctl -k -f -p warning
+FACT logs      FOLLOW "new WARNING, ERROR, FATAL and PANIC lines of the PostgreSQL log"
 ```
 
 - `FACT <name> <command>`: the daemon runs the command when a goal needs the fact.
   - The value is the trimmed output. A bare name in a condition means "the command exits 0".
   - A number is also a metric for `subweave stats`.
-- `FACT <name> FOLLOW <command>`: the command keeps running. The value is the lines printed since the last check.
+- `FACT <name> "<what>"`: the box learns the command. See [Learned commands](#learned-commands).
+  - Say the form: "a number", "1 … else 0", or "exits 0 when …".
+- `FOLLOW`: the command keeps running. The value is the lines printed since the last check.
 - Commands run as root in `bash -eo pipefail`, with a 60 second limit for a `FACT` and 30 minutes for a `RUN`.
+- The daemon runs a fact only when a goal that is due needs it. A goal that is off reads no facts.
 - In a decider request, numbers and exit results go under `facts`. Other text goes under `program_output`.
 
 ## GOAL
 
 ```weavefile
-GOAL installed                      pg
-GOAL running  AFTER installed       up
-GOAL room     AFTER installed EVERY 5m   disk < 85
-GOAL backed   AFTER running         SINCE(backup) < 25h
-GOAL quiet    AFTER running   EVERY 10m \
-     "the new lines in `logs` show nothing that needs action"
+GOAL installed                                  present
+GOAL running     AFTER configured               up
+GOAL archiving   AFTER running    EVERY 5m      archived == 1        IF bucket
+GOAL backed      AFTER archiving                SINCE(backup) < 25h
+GOAL drilled     AFTER backed     EVERY 1d      SINCE(drill) < 30d
+GOAL room        AFTER installed  EVERY 5m      disk < 85
+GOAL quiet       AFTER running    EVERY 10m \
+     "the new lines in `logs` and `kernel` show nothing that needs action"
 ```
 
-`GOAL <name> [AFTER <goal>, …] [EVERY <duration>] [TRIES <n> PER <duration>] <condition>`
+`GOAL <name> [AFTER <goal>, …] [EVERY <duration>] [TRIES <n> PER <duration>] <condition> [IF <expr>]`
 
-- `AFTER`: the daemon checks this goal only while those goals hold. The goals make a graph.
+- `AFTER`: the daemon checks this goal only while those goals hold. The goals make a graph; `subweave plan <weave>` draws it.
+- `IF`: off while the expression is false. A goal after an off goal is off too: with no bucket, `archiving`, `backed` and `drilled` are all off.
 - `EVERY`: `1m` by default for code, `5m` for quoted conditions.
-- `TRIES`: `3 PER 1h` by default. Past it, the daemon asks the person. Code counts this, not the model.
+- `TRIES`: `3 PER 1h` by default. Past it, the daemon asks the person. Code counts this, not the model. A `wait` is not a try: a first sync that waits for hours asks nobody.
+- A goal that never held fails its first check: `SINCE(drill)` has no value until the first drill, so a new box drills right after its first backup.
+
+The `postgres` weave's graph:
+
+```
+installed
+├─ configured
+│  └─ running
+│     ├─ archiving   IF bucket
+│     │  └─ backed
+│     │     └─ drilled
+│     ├─ connections
+│     ├─ short-tx
+│     ├─ frozen
+│     ├─ patched
+│     ├─ current
+│     └─ quiet
+└─ room
+```
 
 A code condition:
 
@@ -167,78 +220,91 @@ A code condition:
 | `role == 'cache'` | a string compare; strings take single quotes, because double quotes mean model |
 | `a AND b`, `a OR b`, `NOT a` | as written |
 
-- Two values that both read as numbers compare as numbers: `major == version`. Two durations compare as durations: `SINCE(backup) < backups`.
-- A name with no value, such as an unused slot, makes its comparison false. In a command, it is an empty variable.
+- Two values that both read as numbers compare as numbers: `major == version`. Two durations compare as durations.
+- A name with no value makes its comparison false. In a command, it is an empty variable.
 - On a goal's first check, `PREV()` has no value, so the goal waits for the second check.
 
-A quoted condition goes to the decider as one yes/no question. Its backticked names say which facts it reads. All quoted goals due in one tick share one decider request.
+A quoted condition goes to the decider as one yes/no question. Its backticked names say which facts it reads. All quoted goals due in one tick share one decider request. A threshold is code, never prose: see [LIMITS.md](LIMITS.md#1-numbers-inside-prose).
 
 ## ACTION
 
 ```weavefile
-ACTION restart FOR running
+ACTION restart FOR running WITHIN 2m
   WHEN "postgres was killed, for example by the out-of-memory killer, \
         or crashed once, and nothing on disk is wrong"
   RUN  systemctl restart postgresql@$version-main
 
-ACTION fix
+ACTION free-disk FOR room WITHIN 10m
+  WHEN "old logs, not data or WAL, fill the disk"
+  DO   "delete compressed PostgreSQL logs older than 7 days and shrink the systemd journal to 200 MB"
+
+ACTION fix WITHIN 30m
   WHEN "no other action fits, or the fitting ones already failed"
   DO   "make the failing goal hold again without losing data"
 ```
 
+`ACTION <name> [FOR <goal>, …] [WITHIN <duration>] [IF <expr>]`
+
 - `FOR`: the goals this action may fix. Without `FOR`, any goal.
+- `WITHIN`: after the last step, the goal must hold again within this time; `5m` by default. Until then the loop does nothing else for that goal. A restore that replays WAL for hours says `WITHIN 6h`.
+- `IF`: not a candidate while the expression is false.
 - `WHEN` says when the action is the right fix, not what it does. The decider chooses by the name and `WHEN` alone. See [LIMITS.md](LIMITS.md#2-the-action-description-is-the-decision).
 - Steps run in order. A `RUN` that exits non-zero ends the action as failed.
+- `DO` hands the task to the coder, unless this box already learned its steps.
 - `ADD <<EOF <path>` writes the heredoc to the path, byte for byte, with no `$name` replaced.
 - `subweave do <service> <action>` runs an action by hand, through the same rules.
 
 ## Rules
 
 ```weavefile
-NEVER "drop or truncate a database"
-ASK   "before a major version upgrade"
+NEVER IF version < 14
+NEVER "drop or truncate a database, or delete table rows"
+NEVER "delete files in pg_wal by hand"
 ASK   BEFORE restore
-ASK   BEFORE restart IF used > 1073741824
+ASK   BEFORE patch IF updates == 'ask'
+ASK   "before dropping a PostgreSQL cluster that holds data"
 ASK   IF blocks < 10064
 ```
 
 | Rule | Checked | Then |
 |---|---|---|
 | `NEVER "<text>"` | the request, the decider's picks, each coder command | refused |
-| `ASK "<text>"` | the plan, the decider's picks, each coder command | the person answers first |
+| `NEVER IF <expr>` | the ARGs at `plan`, `run` and `tell`, and every action, in code | refused |
+| `ASK "<text>"` | the request, the decider's picks, each coder command | the person answers first |
 | `ASK BEFORE <action> [IF <expr>]` | every run of that action, in code | the person answers first |
-| `ASK IF <expr>` | the ARGs at `run` and `tell`, and every action, in code | the person answers first |
+| `ASK IF <expr>` | the ARGs at `plan`, `run` and `tell`, and every action, in code | the person answers first |
 
 - A quoted rule checks the request and what a model chose or wrote. The author's own text, a `RUN` step or a recipe, passes the code rules only.
-- A rule that turns on a number belongs in `ASK IF`: the decider does not compare numbers inside prose. See [LIMITS.md](LIMITS.md#1-numbers-inside-prose).
+- A rule that turns on a number is code: `NEVER IF version < 14`, not `NEVER "versions before 14"`.
 - After a refusal, the loop picks again or asks the person.
 - The person answers `yes`, `no`, `always` or `never`. The daemon keeps `always` and `never` in the journal for that rule and action, and does not ask again.
 
 ## SKILL
 
 ````weavefile
-SKILL wal-g-restore WHEN "restoring the newest wal-g backup" <<EOF
-  Recovery replays every archived WAL segment. Until it ends,
-  pg_isready says "rejecting connections": that is progress.
-
-  ```recipe
-  systemctl stop postgresql@$version-main
-  mv /var/lib/postgresql/$version/main /var/lib/postgresql/$version/main.old
-  sudo -u postgres wal-g backup-fetch /var/lib/postgresql/$version/main LATEST
-  ```
+SKILL wal-growth WHEN "pg_wal is large or growing, or WAL fills the disk" <<EOF
+  pg_wal grows when PostgreSQL cannot remove old segments:
+  - Archiving fails: pg_stat_archiver.last_failed_wal. Fix archiving; the segments then go.
+  - A replication slot nobody reads: pg_replication_slots with active = false.
+  Never delete files in pg_wal: PostgreSQL then cannot recover from a crash.
 EOF
 
-SKILL pg-tuning WHEN "memory and connection settings for a box's size" <<EOF
-  Write them to /etc/postgresql/$version/main/conf.d/tuning.conf.
+SKILL wal-g-restore WHEN "restoring the newest wal-g backup into the live data directory" <<EOF
+  ```recipe
+  systemctl stop postgresql@$version-main
+  mv /var/lib/postgresql/$version/main /var/lib/postgresql/$version/main.before-restore
+  sudo -u postgres wal-g backup-fetch /var/lib/postgresql/$version/main LATEST
+  ```
+  Until recovery ends, pg_isready says "rejecting connections": that is progress.
 EOF
 ````
 
-- The body is a heredoc, so the whole weave stays in one file.
+A skill is the weave's knowledge about one situation: what goes wrong, what causes it, what never to do, which commands work. This is where a weave's value lives.
+
 - Before a `DO` task, the decider answers one yes/no question per skill: does its `WHEN` help with this task? The coder gets only the skills that pass.
-- A body may hold a fenced block with the info string `recipe`.
+- A body may hold a fenced block with the info string `recipe`: steps the author knows work.
   - The daemon runs a recipe first, command by command, through the code rules.
-  - When the task's goal check then passes, the coder is not called.
-- `subweave learn <service>` turns `DO` tasks that passed into draft `SKILL` instructions with recipes. The person edits them into the Weavefile.
+  - When the task's goal then holds, the coder is not called.
 
 ## The loop
 
@@ -247,14 +313,38 @@ Each tick, the daemon:
 1. Reads the facts that due goals need.
 2. Checks the due goals in graph order: code conditions in code, quoted ones in one decider request.
 3. Takes the first goal that fails.
-   - It has no action: the daemon asks the person, with the facts. This is an alert.
+   - It has no action: the daemon asks the person, with the facts.
    - It has one action: the daemon runs it. No model.
    - It has several: the decider picks one of them, `wait` or `ask`.
-   - The daemon asks the person when the decider's confidence is under 0.5, `TRIES` is used up, or `program_output` steers.
-   - With no answer from the decider (network, provider down), a quoted goal stays unknown, and a choice counts as confidence 0.
 4. Gates the action with the rules.
-5. Runs the action.
-6. Checks the goal again, and writes the outcome to the journal.
+5. Runs the action: the learned steps, else a recipe, else its `RUN`, `DO` and `ADD` steps.
+6. Checks the goal until it holds or `WITHIN` ends, and writes the outcome to the journal.
+
+```
+a goal fails
+     │
+     ▼
+the decider picks ──── under 0.5, or steered ───► ask the person
+     │
+     ▼
+the rules gate ──── NEVER ──► pick again
+     │         └─── ASK ────► ask the person
+     ▼
+the steps run
+     │
+     ▼
+holds WITHIN? ──── yes ──► learn the steps, tell
+     │ no
+     ▼
+TRIES left? ──── yes ──► pick again
+     │ no
+     ▼
+ask the person
+```
+
+- The person is asked through the [channels](#channels).
+- With no answer from the decider (network, provider down), a quoted goal stays unknown, and a choice counts as confidence 0.
+- When a goal fails, the decider request carries every fact of the weave, read fresh, so it can tell full logs from full data.
 
 The decider's request, for a failing goal:
 
@@ -291,17 +381,34 @@ The decider's request, for a failing goal:
 
 `steered` at 0.5 or more makes the daemon ask the person and run nothing. See [LIMITS.md](LIMITS.md#3-text-on-the-box-can-steer-the-decider).
 
+## Learned commands
+
+A weave says what; each box learns how, once, and then runs code.
+
+| Quoted | Learned | Used |
+|---|---|---|
+| `FACT disk "percent used of …, a number"` | one command, written by the coder | at every check, as code |
+| `DO "delete compressed PostgreSQL logs older than 7 days …"` | the commands of the task that passed | the next time the decider picks this action for this goal |
+
+- **A quoted fact.** The coder writes a command. The decider asks whether it changes anything on the box; at 0.5 or more, the coder writes again. Code runs it and checks the form: a fact compared with a number must print a number.
+- **A `DO` step.** When the goal holds after the task, the coder's `done` names the commands that made the fix. The daemon keeps those that exited 0, in order, under the action and the failing goal.
+- **Reuse.** The decider still picks the action by its `WHEN`. The learned steps then run first, in code, through the code rules. When the goal does not hold `WITHIN` its time, the daemon drops them and calls the coder, with their output.
+- A learned command is kept for its exact text after `$name` replacement. A changed `ARG` or a new weave version makes a new one.
+- `subweave learned <service>` lists them. `subweave forget <service> <fact or action>` drops one.
+- `subweave learn <service>` turns learned steps into draft `SKILL` recipes for the weave's author.
+
+So the loop needs the coder on the first install and on new trouble, not on every check. Offline, the learned commands still run: see [LIMITS.md](LIMITS.md#8-offline-means-code-only).
+
 ## The coder
 
-A `DO` task runs this loop:
+A `DO` task, when no learned steps or recipe made the goal hold:
 
 1. The decider picks the skills.
-2. A recipe in a picked skill runs first. When the goal check then passes, the task is done.
-3. The coder gets the task, the failing goal, the ARGs, the rules, the facts and the picked skills, and one tool: `shell`.
-4. The coder sends each command with its purpose. The decider gates both against `NEVER` and `ASK`, then the box runs the command.
-5. After a failed command, the decider sorts the error into `missing package`, `permission`, `network`, `config` or `other`. The coder gets that answer with the output.
-6. The coder says `done`. The decider checks the task's goal from the transcript and fresh facts. At 0.8 or more, the task passed.
-7. After two failed checks, the `THEN` model takes over. After 40 commands without a pass, the task failed.
+2. The coder gets the task, the failing goal, the ARGs, the rules, the facts and the picked skills, and one tool: `shell`.
+3. The coder sends each command with its purpose. The decider gates both against `NEVER` and `ASK`, then the box runs the command.
+4. After a failed command, the decider sorts the error into `missing package`, `permission`, `network`, `config` or `other`. The coder gets that answer with the output.
+5. The coder says `done`, with the commands that made the fix and one line on the cause. The decider checks the task's goal from the transcript and fresh facts. At 0.8 or more, the task passed.
+6. After two failed checks, the `THEN` model takes over. After 40 commands without a pass, the task failed.
 
 ## Models
 
@@ -310,7 +417,7 @@ Two roles use a model. The run picks both; a Weavefile only hints.
 | Role | Does | Protocol | Default |
 |---|---|---|---|
 | decide | typed choices and yes/no answers, with probabilities | `systemone` | `typesafe/jev-1.13` |
-| code | `DO` tasks, one shell command at a time | `openai` or `anthropic` | `deepseek/deepseek-v4-flash-0731` |
+| code | quoted facts and `DO` tasks, one shell command at a time | `openai` or `anthropic` | `deepseek/deepseek-v4-flash-0731` |
 
 The default provider is OpenRouter. One OpenRouter key serves both roles:
 
@@ -351,20 +458,105 @@ subweave run postgres "postgres 18" --decide jev-1.13.0@typesafe
 
 ## Requests
 
-`subweave run <weave> "<request>"` turns one sentence into ARGs, with two decider requests:
+`subweave plan <weave> "<request>"` checks one sentence against the weave and changes nothing. `run` and `tell` do the same check first.
 
-1. Per `ARG`: which option the request asks for, or `unsaid`. Per slot: which word of the request fills it. Per `NEVER`: does the request ask for it. One more: does the request ask for something that no `ARG` covers.
-2. Per quoted `ASK`: does the resulting plan trigger it.
+```
+$ subweave plan postgres "postgres 18, private network, backups to acme-pg, keep 14"
 
-| Answer | Daemon |
+error    bucket    `acme-pg` is not an S3 URL for base backups and WAL, like s3://acme-pg/db1   0.04
+info     version   18   0.73
+info     access    private: connections from the private network, with a password and TLS   0.95
+info     endpoint  unsaid
+info     keep      14   0.73
+info     database  unsaid, default app
+info     updates   unsaid, default auto: install PostgreSQL minor releases as they come
+
+1 error: nothing runs.
+```
+
+```
+$ subweave plan postgres "just a database for my side project"
+
+warning  version   unsaid, default 18
+warning  access    unsaid, default local: connections from this box only
+warning  bucket    unsaid, so off: archiving, backed, drilled
+info     endpoint  unsaid
+info     keep      unsaid, default 7
+info     database  unsaid, default app
+info     updates   unsaid, default auto: install PostgreSQL minor releases as they come
+
+secrets asked once: APP_PASSWORD
+3 warnings: run asks to go on.
+```
+
+The check is two decider requests, then code:
+
+1. **What the request says.** One request, all questions at once:
+   - Per value `ARG` and per slot: which word of the request gives it, or `none`. "Pick a word even when its value looks wrong."
+   - Per option `ARG`: which option, `other` (says something no option fits) or `unsaid`.
+   - Per quoted `NEVER`: does the request ask for it.
+   - One more: besides values for these settings, does the request ask for a feature the service would have to add.
+2. **Code.** Each word fills one setting: when two slots pick one word, the more confident keeps it.
+3. **Whether the values fit.** Per value given: is it a valid example of its `"<what>"`. Per quoted `ASK`: does the request ask for it.
+4. **Code.** `NEVER IF` and `ASK IF` read the values. Unsaid `ARG`s take their level. Goals switched off by `IF` are listed.
+
+| Finding | Shown as |
 |---|---|
-| `unsaid` | the default; with no default, it asks |
-| confidence under 0.5 | asks the person to pick |
-| `NEVER` at 0.5 or more | refuses, and names the rule |
-| uncovered at 0.5 or more | asks whether to go on without it |
-| `ASK` at 0.5 or more | asks before the first action |
+| a quoted `NEVER` at 0.5 or more; a `NEVER IF` that holds | error |
+| a value that fits under 0.5; `other` | error |
+| an unsaid `MUST` | error |
+| a quoted `ASK` at 0.5 or more; an `ASK IF` that holds; an option picked under 0.5 | ask |
+| an unsaid `SHOULD`; a feature no `ARG` covers, at 0.5 or more | warning |
+| an unsaid `MAY`; each value said | info |
 
-`subweave tell <service> "<request>"` does the same for a running service. After the person says yes, the daemon checks every goal again. A goal that the new ARGs break fails, and the loop fixes it like any other.
+- An error stops `run` and `tell`. Nothing changes on the box.
+- An ask goes to the person, and the run waits for the answer.
+- A warning makes `run` ask the person at the terminal to go on; `--yes` goes on.
+- `plan --json` prints the findings with each probability.
+- `plan <weave>` with no request prints the `ARG`s and the goal graph.
+
+`subweave tell <service> "<request>"` changes the ARGs of a running service. Each quoted `ASK` then compares the ARGs now with the ARGs after. When the person says yes, the daemon checks every goal again. A goal that the new ARGs break fails, and the loop fixes it like any other.
+
+## Channels
+
+The daemon sends two kinds of message:
+
+| Message | Sent when | Answers |
+|---|---|---|
+| ask | the loop waits for the person: a rule, a decision under 0.5, `steered`, `TRIES` used up, a goal no action fits | `yes`, `no`, `always`, `never`, or an action's name |
+| warning | a goal starts failing, and the loop acts | — |
+| info | a goal holds again; `run` or `tell` finished; a command was learned | — |
+
+A goal that fails again within 10 minutes of holding sends nothing new.
+
+A channel is where messages go. Channels belong to the daemon, not to the weave: every service on the box uses them.
+
+```
+subweave channel add steery                        # a Steery key, read from stdin
+subweave channel add telegram 123456789            # the chat id; the bot token from stdin
+subweave channel add slack                         # an incoming-webhook URL, from stdin
+subweave channel add email ops@acme.dev            # an SMTP URL, from stdin
+subweave channel add webhook https://ops.acme.dev/subweave
+subweave channel add heartbeat https://hc-ping.com/<uuid>
+subweave channel test steery
+```
+
+| Channel | Gets | Answers |
+|---|---|---|
+| `steery` | asks as cards on the person's phone, [steery.dev](https://steery.dev) | yes, signed by the person's device |
+| `telegram` | every message, from the person's own bot | yes, with buttons |
+| `slack` | every message | no |
+| `email` | every message | no |
+| `webhook` | every message, as JSON | no |
+| `heartbeat` | a GET after every tick | — |
+
+- `--level ask|warning|info` sets the lowest message a channel gets. The default is `warning`; for `steery`, `ask`.
+- An ask goes to every channel that answers, and as a message to the rest, with the command that answers it: `subweave answer 3 yes`.
+- The first answer settles the ask. The other channels show who answered.
+- `steery`: the daemon raises each ask as a request with its own key, and reads the answer with a long poll, so the box needs no open port. Steery shows the person the facts and the rule; the answer is a signature from the person's device, which the daemon checks before it acts.
+- `heartbeat`: a service such as healthchecks.io alerts when the pings stop. That is the only alert when the whole box is down: see [LIMITS.md](LIMITS.md#9-one-box-no-failover).
+- On the person's computer, `subweave watch` shows every box's messages as system notifications.
+- Channel keys stay on the box in `/etc/subweave/channels`, mode 600. They never go to a model.
 
 ## Journal
 
@@ -375,7 +567,7 @@ subweave run postgres "postgres 18" --decide jev-1.13.0@typesafe
 {"t":"2026-10-13T10:02:11Z","goal":"running","kind":"decide","text":"restart","p":{"restart":0.98,"fix":0.01},"cost_usd":0.00003}
 ```
 
-- `kind`: `check`, `decide`, `gate`, `action`, `command`, `ask`, `answer`, `note`.
+- `kind`: `check`, `decide`, `gate`, `action`, `command`, `learn`, `ask`, `answer`, `message`, `note`.
 - A `check` line holds the facts the goal read.
 - The decider reads the newest journal lines for the failing goal. `SINCE()`, `PREV()` and `TRIES` read the journal in code.
 
@@ -390,28 +582,31 @@ brew install subweave                            # macOS: CLI only
 
 | Command | Does |
 |---|---|
-| `run <weave> ["<request>"]` | resolve the request, ask, then hand the service to the daemon |
-| `plan <weave> ["<request>"]` | the request check only; changes nothing |
+| `plan <weave> ["<request>"]` | the request check and the goal graph; changes nothing |
+| `run <weave> ["<request>"]` | the request check, then hand the service to the daemon |
+| `tell <service> "<request>"` | change ARGs by sentence, with the same check |
 | `ps` | services, failing goals, models, spend this month |
 | `log [-f] <service>` | the journal |
 | `stats <service>` | metrics from numeric facts |
-| `tell <service> "<request>"` | change ARGs by sentence |
-| `inbox`, `answer <n> <word>` | open questions from every service |
+| `inbox`, `answer <n> <word>` | open asks from every service |
+| `watch` | messages from every box, as system notifications on this computer |
 | `do <service> <action>` | run one action now |
-| `learn <service>` | draft skills from `DO` tasks that passed |
+| `learned <service>`, `forget <service> <name>` | the commands this box learned; drop one |
+| `learn <service>` | draft skill recipes from learned steps |
+| `channel add <kind> [<target>]`, `channel ls`, `channel rm <name>`, `channel test <name>` | where messages go |
 | `stop`, `start`, `rm <service>` | pause, resume, remove (asks) |
 | `key <provider>` | store a provider's key, read from stdin |
 | `provider add <name> <endpoint> [--protocol openai\|anthropic]`, `provider rm <name>` | add or remove a provider |
 
-- `run` takes `--on <host>`, `--name <service>`, `--decide <model>` and `--code <model>`. The name defaults to the weave's name.
+- `run` takes `--on <host>`, `--name <service>`, `--decide <model>`, `--code <model>` and `--yes`. The name defaults to the weave's name.
 - `tell` takes `--decide` and `--code` too, with or without a request.
 - The CLI remembers which box runs each service, so later commands take the name alone.
 - A weave is a local directory, or a name with an optional tag, as in Docker.
-  - `postgres:0.4` is `weaves/postgres` in github.com/subweave/subweave at the git tag `postgres-0.4`.
+  - `postgres:0.5` is `weaves/postgres` in github.com/subweave/subweave at the git tag `postgres-0.5`.
   - With no tag, the default branch.
 
 ```
-subweave run postgres:0.4 "postgres 18, private network, backups to s3://acme-pg"
+subweave run postgres:0.5 "postgres 18, private network, backups to s3://acme-pg/db1"
 subweave run ./weaves/postgres "postgres 18"
 ```
 
@@ -428,19 +623,21 @@ instruction
   | "NEEDS" size { "," size }
   | "MODEL" "DECIDE" model
   | "MODEL" "CODE" model { "THEN" model }
-  | "ARG" name [ "=" word ]
-  | "SECRET" name quoted
-  | "FACT" name [ "FOLLOW" ] body
+  | "ARG" name [ "=" word ] level [ quoted ]
+  | "SECRET" name quoted [ if ]
+  | "FACT" name [ "FOLLOW" ] ( body | quoted )
   | "GOAL" name [ "AFTER" names ] [ "EVERY" dur ]
-           [ "TRIES" num "PER" dur ] ( expr | quoted )
-  | "ACTION" name [ "FOR" names ]
+           [ "TRIES" num "PER" dur ] ( expr | quoted ) [ if ]
+  | "ACTION" name [ "FOR" names ] [ "WITHIN" dur ] [ if ]
   | "WHEN" quoted
   | "RUN" body
   | "DO" ( quoted | heredoc )
   | "ADD" heredoc path
-  | "NEVER" quoted
-  | "ASK" ( quoted | "BEFORE" name [ "IF" expr ] | "IF" expr )
+  | "NEVER" ( quoted | if )
+  | "ASK" ( quoted | "BEFORE" name [ if ] | if )
   | "SKILL" name "WHEN" quoted heredoc ;
+level    = "MUST" | "SHOULD" | "MAY" ;
+if       = "IF" expr ;
 body     = command | heredoc ;
 heredoc  = "<<" WORD newline { text newline } WORD ;
 size     = num ( "CPU" | "GPU" | "GB" ( "RAM" | "DISK" ) | "TB" "DISK" ) ;
