@@ -33,7 +33,7 @@ export function App() {
     api.session().then(setSession, (e: Error) => setError(e.message));
   }, []);
 
-  const signedIn = !!session && (session.auth === "none" || session.ok);
+  const signedIn = !!session?.ok;
   useEffect(() => {
     if (!signedIn) return;
     startLive();
@@ -54,19 +54,18 @@ export function App() {
     );
   }
   if (!session) return <div className="center-page" aria-busy="true" />;
-  if (!signedIn) return <Login onSignedIn={() => setSession({ ...session, ok: true })} />;
+  if (!signedIn) return <Login onSignedIn={() => setSession({ ok: true })} />;
   return (
     <Frame
-      auth={session.auth}
       onSignOut={async () => {
         await api.logout().catch(() => {});
-        setSession({ ...session, ok: false });
+        setSession({ ok: false });
       }}
     />
   );
 }
 
-function Frame({ auth, onSignOut }: { auth: Session["auth"]; onSignOut: () => void }) {
+function Frame({ onSignOut }: { onSignOut: () => void }) {
   const path = usePath();
   const route = parse(path);
   const live = useLive();
@@ -143,11 +142,9 @@ function Frame({ auth, onSignOut }: { auth: Session["auth"]; onSignOut: () => vo
             <span className="spend num" title="Model spend this month, every service">
               {usd(spend)} <span className="t-muted">· {month(Date.now())}</span>
             </span>
-            {auth === "password" && (
-              <button type="button" className="btn btn-quiet btn-small" onClick={onSignOut}>
-                Sign out
-              </button>
-            )}
+            <button type="button" className="btn btn-quiet btn-small" onClick={onSignOut}>
+              Sign out
+            </button>
           </div>
         </header>
         <Rail route={page} />

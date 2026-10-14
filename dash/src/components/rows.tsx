@@ -204,6 +204,15 @@ function Body({ line: l }: { line: Line }) {
         </>
       );
     case "answer":
+      // The daemon closes an ask whose goal holds again: by "daemon: <goal> holds again".
+      if (l.text === "withdrawn") {
+        return (
+          <span className="row-main">
+            Ask #{l.n} withdrawn
+            {l.by && <span className="t-muted">: {l.by.replace(/^daemon:\s*/, "")}</span>}
+          </span>
+        );
+      }
       return (
         <span className="row-main">
           Ask #{l.n} answered <b className="w-6">{l.text}</b>

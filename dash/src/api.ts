@@ -209,7 +209,6 @@ export interface TellResult {
 }
 
 export interface Session {
-  auth: "none" | "password";
   ok: boolean;
 }
 

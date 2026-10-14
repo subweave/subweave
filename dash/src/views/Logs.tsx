@@ -92,8 +92,14 @@ function Viewer({ service, name, box }: { service: string; name: string; box: bo
       push();
     });
     es.onerror = () => {
-      if (es.readyState === EventSource.CLOSED) return;
-      setState("retrying");
+      if (es.readyState !== EventSource.CLOSED) {
+        setState("retrying");
+        return;
+      }
+      // Refused outright (a 429 for too many open streams, or the session ended): the
+      // browser gives no body, so say it plainly.
+      setEndText("The stream closed. Close other log tabs, or reload the page.");
+      setState("ended");
     };
     return () => {
       es.close();
