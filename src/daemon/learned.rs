@@ -26,9 +26,10 @@ const FOLLOW_PROBE: Duration = Duration::from_secs(5);
 const FACT_SYSTEM: &str = "You write one bash command that reads a fact on this box. The \
     command must only read: never install, write, delete, restart or refresh a cache. It runs \
     as `bash -eo pipefail -c <command>` with a 60 second limit, and the ARGs are environment \
-    variables. The service may be down or not installed yet: the command still prints the \
-    fact's value for that case and exits 0, so guard each failing step (`|| true`, `if`). \
-    Answer by calling the tool `fact`.";
+    variables. The service may be down or not installed yet: test that first and print the \
+    fact's value for that case (`systemctl is-active -q <unit> || { echo 0; exit 0; }`). Then \
+    read the fact with no fallback: when the service runs and the read fails, the command must \
+    fail too, so a wrong query never reads as a healthy value. Answer by calling the tool `fact`.";
 
 pub(crate) fn key(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
@@ -152,9 +153,9 @@ pub(crate) fn learned_command(ctx: &Ctx, fact: &Fact) -> Option<String> {
 /// The command for a quoted fact: the learned one while its key holds, else a new one
 /// from the coder. `None` when none is learned and none can be now.
 pub(crate) async fn fact_command(ctx: &Ctx, fact: &Fact) -> Option<String> {
-    let FactSource::Quoted(text) = &fact.source else {
+    if !matches!(fact.source, FactSource::Quoted(_)) {
         return None;
-    };
+    }
     if let Some(c) = learned_command(ctx, fact) {
         return Some(c);
     }
@@ -162,6 +163,63 @@ pub(crate) async fn fact_command(ctx: &Ctx, fact: &Fact) -> Option<String> {
     if let Some(c) = learned_command(ctx, fact) {
         return Some(c);
     }
+    learn_and_keep(ctx, fact, None).await
+}
+
+/// Whether a nonzero exit of this fact's command is a failed read, not a value: true for
+/// a quoted fact read as a number or text. An exit-status fact says "no" with it.
+pub(crate) fn exits_zero(w: &Weave, fact: &Fact) -> bool {
+    matches!(fact.source, FactSource::Quoted(_)) && !fact.follow && form(w, &fact.name) != Form::Exit
+}
+
+/// A learned command that failed on this box: forgotten, and learned again with its
+/// error, at most once per `RELEARN` for the same fact.
+pub(crate) async fn relearn(
+    ctx: &Ctx,
+    fact: &Fact,
+    command: &str,
+    failed: &super::Out,
+) -> Option<String> {
+    let _one = ctx.learning.lock().await;
+    let now_learned = ctx.learned().facts.get(&fact.name).cloned();
+    let Some(was) = now_learned.filter(|l| l.command == command) else {
+        // Another check learned it again meanwhile.
+        return learned_command(ctx, fact);
+    };
+    let code = failed.code.map_or("killed".to_string(), |c| format!("exit {c}"));
+    let output = ctx.redact(&super::cap(&failed.both(), 1000));
+    ctx.journal().add(Line {
+        kind: Kind::Learn,
+        ok: Some(false),
+        text: Some(format!("fact {}: `{command}` failed on this box ({code})", fact.name)),
+        output: Some(output.clone()),
+        ..Default::default()
+    });
+    {
+        let mut l = ctx.learned();
+        l.facts.remove(&fact.name);
+        save(&ctx.name, &l);
+    }
+    let age = super::epoch() - super::epoch_of(&was.t).unwrap_or(0);
+    if age < RELEARN.as_secs() as i64 {
+        let wait = RELEARN - Duration::from_secs(age.max(0) as u64);
+        ctx.learn_wait
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(fact.name.clone(), Instant::now() + wait);
+        return None;
+    }
+    let hint = format!(
+        "The last command for this fact failed on this box ({code}):\n{command}\nIt printed:\n{output}\nWrite one that works here."
+    );
+    learn_and_keep(ctx, fact, Some(&hint)).await
+}
+
+/// Learns a quoted fact's command and keeps it. The caller holds `ctx.learning`.
+async fn learn_and_keep(ctx: &Ctx, fact: &Fact, hint: Option<&str>) -> Option<String> {
+    let FactSource::Quoted(text) = &fact.source else {
+        return None;
+    };
     let text = weave::subst(text, &ctx.spec.args);
     let k = key(&text);
     if ctx
@@ -175,7 +233,7 @@ pub(crate) async fn fact_command(ctx: &Ctx, fact: &Fact) -> Option<String> {
     }
     let mut cost = 0.0;
     let mut tally = Tally::default();
-    let result = learn(ctx, fact, &text, &mut cost, &mut tally).await;
+    let result = learn(ctx, fact, &text, hint, &mut cost, &mut tally).await;
     if tally.calls > 0 {
         let model = ctx
             .coder
@@ -239,10 +297,12 @@ pub(crate) async fn fact_command(ctx: &Ctx, fact: &Fact) -> Option<String> {
     }
 }
 
+/// `hint`: why the last learned command for this fact was dropped, for the coder.
 async fn learn(
     ctx: &Ctx,
     fact: &Fact,
     text: &str,
+    hint: Option<&str>,
     cost: &mut f64,
     tally: &mut Tally,
 ) -> Result<String> {
@@ -282,6 +342,9 @@ async fn learn(
             s.when,
             weave::subst(&s.body, &ctx.spec.args)
         ));
+    }
+    if let Some(h) = hint {
+        user.push_str(&format!("\n\n{h}"));
     }
     let tools = [Tool {
         name: "fact",
@@ -329,6 +392,9 @@ async fn learn(
             last = "an empty command".into();
             continue;
         }
+        // "hides" catches a read that prints a fallback when it fails: a query of a column
+        // that does not exist read 0 every five minutes as "no idle transaction". On 16
+        // commands it sorted 15 (#111-#126); the miss refused a `|| true` on a dpkg read.
         let mut q = IndexMap::new();
         q.insert(
             "changes".to_string(),
@@ -338,8 +404,20 @@ async fn learn(
                     .into(),
             },
         );
+        if !fact.follow && form != Form::Exit {
+            q.insert(
+                "hides".to_string(),
+                Question::Noul {
+                    instructions: "Does this command swallow the errors of its main read with \
+                        `|| echo`, `2>/dev/null`, `|| R=0` or a similar fallback that prints a \
+                        value, rather than only guarding for the service being down or not \
+                        installed?"
+                        .into(),
+                },
+            );
+        }
         let a = decider
-            .ask(json!({"command": ctx.redact(&command)}), q)
+            .ask(json!({"fact": text, "command": ctx.redact(&command)}), q)
             .await?;
         *cost += a.cost_usd;
         let p = a.noul("changes").unwrap_or(1.0);
@@ -351,6 +429,19 @@ async fn learn(
                 ),
             );
             last = format!("`{command}` changes the box ({p:.2})");
+            continue;
+        }
+        let p = a.noul("hides").unwrap_or(0.0);
+        if p >= 0.5 {
+            answer(
+                &mut msgs,
+                format!(
+                    "Refused: when the read fails, that command still prints a value ({p:.2}). \
+                     Test first that the service is installed and running, print the value for \
+                     that case, then read with no fallback."
+                ),
+            );
+            last = format!("`{command}` prints a value when its read fails ({p:.2})");
             continue;
         }
         if fact.follow {

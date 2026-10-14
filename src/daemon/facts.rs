@@ -195,7 +195,7 @@ async fn read_with(ctx: &Ctx, names: &BTreeSet<String>, consume: bool, learn: bo
         let Some(fact) = ctx.w.fact(name) else {
             continue;
         };
-        let command = match &fact.source {
+        let mut command = match &fact.source {
             FactSource::Command(c) => c.clone(),
             FactSource::Quoted(_) => {
                 let c = if learn {
@@ -224,7 +224,21 @@ async fn read_with(ctx: &Ctx, names: &BTreeSet<String>, consume: bool, learn: bo
             out.insert(name.clone(), FactValue { text, code: None });
             continue;
         }
-        let o = sh(&command, &ctx.env, FACT_LIMIT).await;
+        let mut o = sh(&command, &ctx.env, FACT_LIMIT).await;
+        // A learned number or text that fails is a broken read, not a value: a query of a
+        // column that does not exist. Learn it again with the error, and read once more.
+        if !o.ok() && learn && learned::exits_zero(&ctx.w, fact) {
+            match learned::relearn(ctx, fact, &command, &o).await {
+                Some(c) => {
+                    command = c;
+                    o = sh(&command, &ctx.env, FACT_LIMIT).await;
+                }
+                None => continue,
+            }
+            if !o.ok() {
+                continue;
+            }
+        }
         out.insert(
             name.clone(),
             FactValue {

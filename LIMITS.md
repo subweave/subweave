@@ -1,7 +1,7 @@
 # Limits
 
 What Subweave does badly, and what the design does about it.
-Sections 1 to 7 are measured: 98 calls to `typesafe/jev-1.13` (build `jev-1.13-20260917`) on 2026-10-13 and 2026-10-14. Each call, with its request and answer, is one line of [evidence/jev-1.13-2026-10-13.jsonl](evidence/jev-1.13-2026-10-13.jsonl); `#n` below is that line. They are examples, not a benchmark.
+Sections 1 to 7 are measured: 126 calls to `typesafe/jev-1.13` (build `jev-1.13-20260917`) on 2026-10-13 and 2026-10-14. Each call, with its request and answer, is one line of [evidence/jev-1.13-2026-10-13.jsonl](evidence/jev-1.13-2026-10-13.jsonl); `#n` below is that line. They are examples, not a benchmark.
 Sections 8 to 12 follow from the design.
 
 ## 1. Numbers inside prose
@@ -130,6 +130,15 @@ A learned fact command must only read the box. The decider judged eight commands
 | `apt-get update -qq && apt-get -s install …` | yes: it rewrites the package lists | **0.36** `#47` |
 
 The gate stops commands that change services and data. A fact that refreshes a cache passes it.
+
+A learned read can hide its own failure. On the test box, `idle_tx` read a column that does not exist, `… 2>/dev/null) || R=0`, and printed `0` every five minutes: "no idle transaction", while each check wrote an ERROR to the PostgreSQL log.
+
+| Question | Commands | Wrong |
+|---|---|---|
+| "does it hide a failure of its own read … instead of testing first that the service runs" | 8 | 0, but a correct guard scored 0.52 `#99`–`#106` |
+| "does it swallow the errors of its main read with `\|\| echo`, `2>/dev/null` … rather than only guarding for the service being down" | 16 | 1: `\|\| true` on a `dpkg-query`, 0.72 `#111`–`#126` |
+
+**Design:** the learn gate asks both questions of the command in one call, and the prompt says to test for a down service first, then read with no fallback. A learned number or text fact that exits non-zero is learned again with its error.
 
 When should a box reuse steps it learned? Two designs failed:
 
