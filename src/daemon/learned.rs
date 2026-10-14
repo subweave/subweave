@@ -23,6 +23,10 @@ const TRIES: usize = 3;
 const RELEARN: Duration = Duration::from_secs(600);
 /// A FOLLOW command still running after this long follows; one that ended does not.
 const FOLLOW_PROBE: Duration = Duration::from_secs(5);
+/// The coder's reasoning effort for a learn. On the 14 number and text facts of
+/// weaves/postgres, twice each on the test box: `low` passed 21 of 28 as the default did,
+/// with 38k output tokens against 78k.
+const LEARN_EFFORT: &str = "low";
 const FACT_SYSTEM: &str = "You write one bash command that reads a fact on this box. The \
     command must only read: never install, write, delete, restart or refresh a cache. It runs \
     as `bash -eo pipefail -c <command>` with a 60 second limit, and the ARGs are environment \
@@ -323,20 +327,16 @@ async fn learn(
             Form::Text => "the text it prints",
         }
     };
-    let system = FACT_SYSTEM.to_string();
-    let mut user = format!(
-        "Fact `{}`: {text}\nThe weave reads it as {reads}.\nBox: {}\nService: {}",
-        fact.name,
-        ctx.box_line(),
-        ctx.name
-    );
+    // What every learn of this service shares comes first, so the provider's prompt
+    // cache can hold it; only the skills the decider picks for this fact go along.
+    let mut user = format!("Box: {}\nService: {}", ctx.box_line(), ctx.name);
     if !ctx.spec.args.is_empty() {
         user.push_str("\nARGs:");
         for (k, v) in &ctx.spec.args {
             user.push_str(&format!("\n  {k}={v}"));
         }
     }
-    for s in &ctx.w.skills {
+    for s in super::coder_task::pick_skills(ctx, None, text, None).await {
         user.push_str(&format!(
             "\n\nSkill {} (when {}):\n{}",
             s.name,
@@ -344,6 +344,10 @@ async fn learn(
             weave::subst(&s.body, &ctx.spec.args)
         ));
     }
+    user.push_str(&format!(
+        "\n\nFact `{}`: {text}\nThe weave reads it as {reads}.",
+        fact.name
+    ));
     if let Some(h) = hint {
         user.push_str(&format!("\n\n{h}"));
     }
@@ -358,8 +362,11 @@ async fn learn(
     }];
     let mut msgs = vec![Msg::User(user)];
     let mut last = String::new();
+    let sid = super::coder_task::session_id(0);
     for _ in 0..TRIES {
-        let reply = coder.send(0, &system, &msgs, &tools).await?;
+        let reply = coder
+            .send(0, sid.as_deref(), Some(LEARN_EFFORT), FACT_SYSTEM, &msgs, &tools)
+            .await?;
         *cost += reply.cost_usd;
         tally.add(&reply);
         let call = reply.calls.iter().find(|c| c.name == "fact").cloned();

@@ -194,7 +194,12 @@ fn tool_call(id: &str, name: &str, args: Value) -> axum::Json<Value> {
                 "name": name, "arguments": args.to_string(),
             }}],
         }}],
-        "usage": {"prompt_tokens": 900, "completion_tokens": 40, "cost": 0.0001},
+        "usage": {
+            "prompt_tokens": 900,
+            "completion_tokens": 40,
+            "completion_tokens_details": {"reasoning_tokens": 30},
+            "cost": 0.0001,
+        },
     }))
 }
 
@@ -862,6 +867,30 @@ async fn daemon_and_cli_keep_a_toy_service() {
         mkdir[0]["output"],
         format!("web root {}, token [TOY_TOKEN]", www.display())
     );
+    // The coder's commands keep their whole output, redacted, in files only the owner reads.
+    let kept: Vec<PathBuf> = std::fs::read_dir(b.service().join("output"))
+        .map(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+        .unwrap_or_default();
+    let mkdir_file = kept
+        .iter()
+        .find(|p| {
+            std::fs::read_to_string(p).is_ok_and(|t| {
+                t == format!("web root {}, token [TOY_TOKEN]", www.display())
+            })
+        })
+        .unwrap_or_else(|| b.fail(&format!("no output file for mkdir in {kept:?}")));
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(mkdir_file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    assert!(
+        kept.iter().all(|p| p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".txt") && n.contains('-'))),
+        "{kept:?}"
+    );
     let learned = b.learned();
     assert_eq!(
         learned["steps"]["install/installed"]["commands"],
@@ -877,6 +906,16 @@ async fn daemon_and_cli_keep_a_toy_service() {
     let chats_after_install = mock.count("/chat/completions");
     // Two fact learner turns, four coder turns: firewall, mkdir, page, done.
     assert_eq!(chats_after_install, 6);
+    // The note that ends the coder's conversation counts its reasoning tokens.
+    let usage: Vec<Value> = b
+        .lines("note", |l| l["action"] == "install" && l["usage"].is_object())
+        .into_iter()
+        .map(|l| l["usage"].clone())
+        .collect();
+    assert_eq!(usage.len(), 1, "{usage:?}");
+    assert_eq!(usage[0]["calls"], 4);
+    assert_eq!(usage[0]["output"], 160);
+    assert_eq!(usage[0]["reasoning"], 120);
     assert!(
         mock.seen()
             .requests

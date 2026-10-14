@@ -48,6 +48,8 @@ pub struct Reply {
     /// Input tokens the provider read from its prompt cache, part of `input_tokens`.
     pub cached_tokens: u64,
     pub output_tokens: u64,
+    /// Output tokens spent reasoning, part of `output_tokens`.
+    pub reasoning_tokens: u64,
 }
 
 /// What one conversation with a model used.
@@ -59,6 +61,7 @@ pub struct Tally {
     pub input: u64,
     pub cached: u64,
     pub output: u64,
+    pub reasoning: u64,
     pub cost_usd: f64,
 }
 
@@ -71,14 +74,15 @@ impl Tally {
         self.input += r.input_tokens;
         self.cached += r.cached_tokens;
         self.output += r.output_tokens;
+        self.reasoning += r.reasoning_tokens;
         self.cost_usd += r.cost_usd;
     }
 
-    /// `3 calls, system prompt 2140 chars, first request 812 tokens in, 2950 in (1600 cached), 210 out`.
+    /// `3 calls, system prompt 2140 chars, first request 812 tokens in, 2950 in (1600 cached), 210 out (120 reasoning)`.
     pub fn describe(&self, system_chars: usize) -> String {
         format!(
-            "{} calls, system prompt {system_chars} chars, first request {} tokens in, {} in ({} cached), {} out",
-            self.calls, self.first_input, self.input, self.cached, self.output
+            "{} calls, system prompt {system_chars} chars, first request {} tokens in, {} in ({} cached), {} out ({} reasoning)",
+            self.calls, self.first_input, self.input, self.cached, self.output, self.reasoning
         )
     }
 
@@ -90,6 +94,7 @@ impl Tally {
             input: self.input,
             cached: self.cached,
             output: self.output,
+            reasoning: self.reasoning,
         }
     }
 }
@@ -136,10 +141,14 @@ impl Coder {
         &self.chain[i].model
     }
 
-    /// One model turn of a conversation. The model must call a tool.
+    /// One model turn of a conversation. The model must call a tool. On OpenRouter,
+    /// `session` goes as `session_id`: it pins one provider from the first request, so the
+    /// conversation's prompt cache holds; `effort` as `reasoning.effort`.
     pub async fn send(
         &self,
         i: usize,
+        session: Option<&str>,
+        effort: Option<&str>,
         system: &str,
         msgs: &[Msg],
         tools: &[Tool],
@@ -148,7 +157,7 @@ impl Coder {
         let (url, body) = match ep.provider.protocol {
             Protocol::OpenAi => (
                 ep.provider.url("chat/completions"),
-                openai_body(ep, system, msgs, tools),
+                openai_body(ep, session, effort, system, msgs, tools),
             ),
             Protocol::Anthropic => (
                 ep.provider.url("messages"),
@@ -216,7 +225,14 @@ impl Coder {
     }
 }
 
-fn openai_body(ep: &Endpoint, system: &str, msgs: &[Msg], tools: &[Tool]) -> Value {
+fn openai_body(
+    ep: &Endpoint,
+    session: Option<&str>,
+    effort: Option<&str>,
+    system: &str,
+    msgs: &[Msg],
+    tools: &[Tool],
+) -> Value {
     let mut messages = vec![json!({"role": "system", "content": system})];
     for m in msgs {
         match m {
@@ -252,6 +268,17 @@ fn openai_body(ep: &Endpoint, system: &str, msgs: &[Msg], tools: &[Tool]) -> Val
             }})
         })
         .collect();
+    // Anthropic caches only up to a marked block: the system prompt, and the newest
+    // message so the next turn reads the whole conversation from the cache.
+    if ep.provider.name == provider::OPENROUTER && ep.model.id.starts_with("anthropic/") {
+        messages[0]["content"] = cached_text(system);
+        if let Some(last) = messages.last_mut().filter(|_| !msgs.is_empty()) {
+            let text = last["content"].as_str().filter(|t| !t.is_empty()).map(cached_text);
+            if let Some(blocks) = text {
+                last["content"] = blocks;
+            }
+        }
+    }
     let mut body = json!({
         "model": ep.model.id,
         "messages": messages,
@@ -260,6 +287,12 @@ fn openai_body(ep: &Endpoint, system: &str, msgs: &[Msg], tools: &[Tool]) -> Val
     });
     if ep.provider.name == provider::OPENROUTER {
         body["usage"] = json!({"include": true});
+        if let Some(s) = session {
+            body["session_id"] = json!(s);
+        }
+        if let Some(e) = effort {
+            body["reasoning"] = json!({"effort": e});
+        }
     }
     body
 }
@@ -301,6 +334,10 @@ fn openai_reply(model: &ModelRef, v: &Value) -> Result<Reply> {
             .and_then(Value::as_u64)
             .unwrap_or(0),
         output_tokens: v["usage"]["completion_tokens"].as_u64().unwrap_or(0),
+        reasoning_tokens: v
+            .pointer("/usage/completion_tokens_details/reasoning_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
     })
 }
 
@@ -339,6 +376,14 @@ fn anthropic_body(ep: &Endpoint, system: &str, msgs: &[Msg], tools: &[Tool]) -> 
             ),
         }
     }
+    // Marked like the openai protocol's Anthropic models: the system prompt and the newest block.
+    if let Some(block) = messages
+        .last_mut()
+        .and_then(|m| m["content"].as_array_mut())
+        .and_then(|b| b.last_mut())
+    {
+        block["cache_control"] = json!({"type": "ephemeral"});
+    }
     let tools: Vec<Value> = tools
         .iter()
         .map(
@@ -348,11 +393,16 @@ fn anthropic_body(ep: &Endpoint, system: &str, msgs: &[Msg], tools: &[Tool]) -> 
     json!({
         "model": ep.model.id,
         "max_tokens": MAX_TOKENS,
-        "system": system,
+        "system": cached_text(system),
         "messages": messages,
         "tools": tools,
         "tool_choice": {"type": "any"},
     })
+}
+
+/// One text block that Anthropic caches up to and including.
+fn cached_text(text: &str) -> Value {
+    json!([{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}])
 }
 
 fn anthropic_reply(model: &ModelRef, v: &Value) -> Result<Reply> {
@@ -386,6 +436,7 @@ fn anthropic_reply(model: &ModelRef, v: &Value) -> Result<Reply> {
         input_tokens: count("input_tokens") + cached + count("cache_creation_input_tokens"),
         cached_tokens: cached,
         output_tokens: count("output_tokens"),
+        reasoning_tokens: 0,
     })
 }
 

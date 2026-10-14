@@ -124,6 +124,11 @@ pub fn learned(service: &str) -> PathBuf {
     self::service(service).join("learned.json")
 }
 
+/// The coder's command output, whole and redacted: `<episode>-<n>.txt`, mode 0600.
+pub fn output(service: &str) -> PathBuf {
+    self::service(service).join("output")
+}
+
 pub fn status(service: &str) -> PathBuf {
     self::service(service).join("status.json")
 }

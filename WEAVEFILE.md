@@ -399,6 +399,7 @@ A weave says what; each box learns how, once, and then runs code.
 | `DO "delete compressed PostgreSQL logs older than 7 days …"` | the commands of the task that passed | the next time the decider picks this action for this goal |
 
 - **A quoted fact.** The first check that reads it has the coder write a command. The decider asks whether it changes anything on the box, and whether it prints a fallback value when its read fails; at 0.5 or more, the coder writes again. Code runs it and checks the form: a fact compared with a number must print a number. A repair shows the models only facts already learned, so a first install waits on no fact its goals do not read yet.
+- **What the fact's coder gets.** The box, the service, the ARGs, the skills the decider picks for the fact's text, and the fact. On OpenRouter it reasons at low effort: on the postgres weave's facts, low effort wrote as many working commands as the default, with half the output tokens.
 - **A learned fact that fails.** A number or text fact whose command exits non-zero is a broken read, not a value. The daemon drops the command and has the coder write a new one, with the error. Within 10 minutes of learning it, the fact waits instead.
 - **A `DO` step.** When the goal holds after the task, the coder's `done` names the commands that made the fix. The daemon keeps those that exited 0, in order, under the action and the failing goal.
 - **Reuse.** The decider still picks the action by its `WHEN`. The learned steps then run first, in code, through the code rules. When the goal does not hold `WITHIN` its time, the daemon drops them and calls the coder, with their output.
@@ -418,6 +419,9 @@ A `DO` task, when no learned steps or recipe made the goal hold:
 4. After a failed command, the decider sorts the error into `missing package`, `permission`, `network`, `config` or `other`. The coder gets that answer with the output.
 5. The coder says `done`, with the commands that made the fix and one line on the cause. The daemon checks the task's goal again with fresh facts; when it holds, the task passed.
 6. After two failed checks, the `THEN` model takes over. After 40 commands without a pass, the task failed.
+7. Every 10 commands, counted over the `THEN` models, the decider reads the task, the facts at the start and now, and the last 10 commands with their purposes and exit codes, and says whether the coder gets closer to the end of the task. When it does not, the task ends with an ask that says what the coder tried; `yes` runs it again.
+
+The coder reads at most 8 KB of a command's output: the head and the tail. The whole output, with SECRETs redacted, is kept in `/var/lib/subweave/services/<service>/output/<episode>-<n>.txt`, mode 600, the newest 200 files per service. A cut output names its file, so the coder can read the rest with `sed -n` or `tail`. When a conversation's messages pass 48 KB, every command result but the newest 4 becomes its first line (`exit 0`) and its file name.
 
 A person's task, from `subweave task <service> "<what to do>"` or the dashboard, is a `DO` task with no goal. It waits for the repair slot: one repair or task at a time. The coder gets the person's words as the task, with the ARGs, the rules, the facts and the skills. The same gates hold: every `NEVER` and `ASK`, and the box's own rule never to cut off SSH. `done` ends it, with the coder's summary. An `ask`, from a rule or from the coder, waits for the person; `yes` runs the task again with that rule passed, `no` ends it.
 
@@ -462,6 +466,8 @@ subweave run postgres "postgres 18" --decide jev-1.13.0@typesafe
 
 - The coder calls `<endpoint>/chat/completions` for `openai` and `<endpoint>/messages` for `anthropic`. The decider calls `<endpoint>/systemone`.
 - `openrouter` is built in: `https://openrouter.ai/api/v1`, protocol `openai`. It also serves `systemone` for Jev and `messages` for `--protocol anthropic`, with the same key.
+- On `openrouter`, the coder sends a `session_id`, one per job and model, so that one provider serves the whole conversation and its prompt cache holds.
+- For an `anthropic/*` model on `openrouter`, and for any model on the `anthropic` protocol, the coder marks the system prompt and the newest message with `cache_control`. Anthropic caches only up to a marked block.
 - The decider needs a System One model: the loop's thresholds read its probabilities, and a chat model gives none.
 - A provider with no key sends no `Authorization` header.
 - `key` stores the key on each box that uses the provider, with mode 600, like a `SECRET`. It never goes to a model.

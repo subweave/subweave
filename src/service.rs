@@ -166,6 +166,9 @@ pub struct Usage {
     pub input: u64,
     pub cached: u64,
     pub output: u64,
+    /// Output tokens the model spent reasoning, part of `output`.
+    #[serde(default)]
+    pub reasoning: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
