@@ -701,10 +701,14 @@ async fn dashboard(b: &mut Box_) {
     assert_eq!(end["ok"], true, "{end}");
     assert_eq!(end["text"], TASK_SUMMARY);
     assert_eq!(end["by"], "dash@127.0.0.1");
+    // The start line, the command and the end are one episode.
+    assert!(start["line"]["ep"].is_string(), "{start}");
+    assert_eq!(end["ep"], start["line"]["ep"], "{end}");
     let cmd = b.lines("command", |l| l["action"] == "task");
     assert_eq!(cmd.len(), 1, "one command for the task");
     assert!(cmd[0].get("goal").is_none(), "{}", cmd[0]);
     assert_eq!(cmd[0]["text"], TASK_CMD);
+    assert_eq!(cmd[0]["ep"], start["line"]["ep"], "{}", cmd[0]);
     assert!(
         cmd[0]["output"]
             .as_str()

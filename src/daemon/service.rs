@@ -816,7 +816,11 @@ impl Loop {
                 }
             }
             Ctl::Task { text, by } => {
-                self.pending.push_back(Job::Task(TaskJob::new(text, by)));
+                self.pending.push_back(Job::Task(TaskJob::new(
+                    text,
+                    by,
+                    super::episode::new_id(),
+                )));
             }
             Ctl::Do { action, by } => {
                 let Some(a) = ctx.w.action(&action) else {
@@ -896,6 +900,7 @@ impl Loop {
         let mut job = TaskJob::new(
             lines[0].text.clone().unwrap_or_default(),
             lines[0].by.clone().unwrap_or_default(),
+            lines[0].ep.clone().unwrap_or_else(super::episode::new_id),
         );
         job.again = true;
         if !matches!(word, "yes" | "always") {

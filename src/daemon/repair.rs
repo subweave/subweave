@@ -78,6 +78,8 @@ pub(crate) struct Repair {
 pub(crate) struct TaskJob {
     pub text: String,
     pub by: String,
+    /// The task's episode, from when it was queued: every run and its start line share it.
+    pub ep: String,
     /// Quoted ASK rules the person approved for the coder's commands.
     pub rules_ok: Vec<String>,
     /// Run again after a yes: its start line is in the journal already.
@@ -89,10 +91,11 @@ pub(crate) struct TaskJob {
 }
 
 impl TaskJob {
-    pub fn new(text: String, by: String) -> TaskJob {
+    pub fn new(text: String, by: String, ep: String) -> TaskJob {
         TaskJob {
             text,
             by,
+            ep,
             rules_ok: Vec::new(),
             again: false,
             prior: String::new(),
@@ -108,6 +111,7 @@ impl TaskJob {
             ok,
             text: Some(text),
             by: Some(self.by.clone()).filter(|b| !b.is_empty()),
+            ep: Some(self.ep.clone()),
             ..Default::default()
         }
     }
@@ -136,13 +140,16 @@ enum Pick {
 /// The goal the job was for, and how it ended.
 pub(crate) async fn run(ctx: Arc<Ctx>, job: Job) -> (Option<String>, Outcome) {
     *ctx.by.lock().unwrap_or_else(|e| e.into_inner()) = job.by().map(str::to_string);
-    let out = super::episode::scope(async {
+    let work = async {
         match &job {
             Job::Repair(r) => repair(&ctx, r).await,
             Job::Task(t) => task(&ctx, t).await,
         }
-    })
-    .await;
+    };
+    let out = match &job {
+        Job::Repair(_) => super::episode::scope(work).await,
+        Job::Task(t) => super::episode::within(t.ep.clone(), work).await,
+    };
     *ctx.repair.lock().unwrap_or_else(|e| e.into_inner()) = None;
     *ctx.by.lock().unwrap_or_else(|e| e.into_inner()) = None;
     match job {

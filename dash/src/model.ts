@@ -258,16 +258,14 @@ export function timeline(lines: Line[], running: string | null): Item[] {
   const groups = new Map<string, Line[]>();
   for (const l of chrono) if (l.ep) push(groups, l.ep, l);
 
-  // Lines other tasks wrote for an episode: the task's words, "do X: asked by hand" just
-  // before it, and its goal's checks while it ran (and the failing one that began it).
+  // Lines other tasks wrote for an episode: "do X: asked by hand" just before it, and its
+  // goal's checks while it ran (and the failing one that began it).
   const spans = [...groups.entries()].map(([ep, ls]) => ({
     ep,
     ls,
     goal: ls.find((l) => l.goal)?.goal,
-    task: ls.some((l) => l.action === TASK),
     t0: ms(ls[0].t),
     t1: ms(ls[ls.length - 1].t),
-    start: false,
     hand: false,
   }));
   const adopted = new Set<number>();
@@ -276,10 +274,7 @@ export function timeline(lines: Line[], running: string | null): Item[] {
     const t = ts[k];
     let s: (typeof spans)[number] | undefined;
     const hand = l.kind === "note" ? HAND.exec(l.text ?? "") : null;
-    if (l.kind === "action" && l.action === TASK && l.ok === undefined) {
-      s = spans.find((s) => s.task && !s.start && s.t0 >= t - 1000 && s.t0 - t <= 60_000);
-      if (s) s.start = true;
-    } else if (hand) {
+    if (hand) {
       s = spans.find((s) => !s.hand && s.t0 >= t - 1000 && s.t0 - t <= 10_000 && s.ls.some((x) => x.action === hand[1]));
       if (s) s.hand = true;
     } else if (l.kind === "check" && l.goal) {
