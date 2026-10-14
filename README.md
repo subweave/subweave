@@ -59,9 +59,15 @@ info     access    private: connections from the private network, with a passwor
 
 Each weave's README says what it cannot do. [LIMITS.md](LIMITS.md) says what Subweave does badly, with the decider calls that show it in [evidence/](evidence).
 
+## For weave authors
+
+`subweave review <weave>` scores a Weavefile from 0 to 100 against 48 rules and points at the lines to fix. The shipped postgres weave scores 100 in 221 checks for $0.0020.
+
 ## Status
 
-Design. The format and the six weaves are written; the engine is not. The decider is measured on 77 calls, including seven request checks of the postgres weave; no weave has run on a box yet.
+The engine runs: `plan`, `run`, `tell`, `review`, the daemon with its coder, learned commands, asks and channels, and `--on` over SSH. On a Mac, a toy weave installed itself through the coder, learned its fact once, came back from a kill on the decider's pick, and asked before an `ASK BEFORE` action, for $0.0011 in all. `tests/e2e.rs` walks the same flows against a mock OpenRouter in 28 s.
+
+Not yet: any weave on a real Linux box, and the six weaves end to end.
 
 ## License
 
