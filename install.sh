@@ -12,7 +12,7 @@ fail() {
   exit 1
 }
 
-[ "$(uname -s)" = Linux ] || fail "this installs on Linux; on macOS: brew install subweave"
+[ "$(uname -s)" = Linux ] || fail "this installs on Linux; on macOS: cargo install --locked --git https://github.com/$repo"
 case "$(uname -m)" in
   x86_64 | amd64) target=x86_64-unknown-linux-musl ;;
   aarch64 | arm64) target=aarch64-unknown-linux-musl ;;

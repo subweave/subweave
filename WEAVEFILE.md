@@ -594,7 +594,7 @@ One binary, `subweave`. On a box, `subweave daemon` runs under systemd and keeps
 
 ```
 curl -fsSL https://subweave.com/install.sh | sh   # Linux: CLI and daemon
-brew install subweave                            # macOS: CLI only
+cargo install --locked --git https://github.com/subweave/subweave   # macOS: CLI only, needs Rust and npm
 ```
 
 | Command | Does |

@@ -1,0 +1,29 @@
+# subweave.com: the static site and install.sh. scripts/deploy-site.sh installs this file
+# into the proxy on steery.dev's box; the proxy is a container, so paths are inside it.
+subweave.com {
+	root * /data/subweave.com/site
+	encode zstd gzip
+	@install path /install.sh
+	header @install Content-Type "text/plain; charset=utf-8"
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+	file_server
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "SAMEORIGIN"
+		-Server
+	}
+	log {
+		output file /data/subweave.com/log/access.log {
+			roll_size 50MiB
+			roll_keep 3
+		}
+		format json
+	}
+}
+
+www.subweave.com {
+	redir https://subweave.com{uri} permanent
+}

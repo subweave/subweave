@@ -69,9 +69,11 @@ Each weave's README says what it cannot do. [LIMITS.md](LIMITS.md) says what Sub
 
 ## Status
 
-The engine runs: `plan`, `run`, `tell`, `review`, the daemon with its coder, learned commands, asks and channels, and `--on` over SSH. On a Mac, a toy weave installed itself through the coder, learned its fact once, came back from a kill on the decider's pick, and asked before an `ASK BEFORE` action, for $0.0011 in all. `tests/e2e.rs` walks the same flows against a mock OpenRouter in 28 s.
+`v0.1.0` runs `plan`, `run`, `tell`, `task`, `review` and `dash`, the daemon with its coder, learned commands, asks and channels, and `--on` over SSH. `tests/e2e.rs` walks the same flows against a mock OpenRouter.
 
-Not yet: any weave on a real Linux box, and the six weaves end to end.
+On a Hetzner VM (Ubuntu 24.04, 4 vCPU, 8 GB), the postgres weave installed PostgreSQL 18 and learned its fact commands. After a reboot left SSH closed, the daemon opened it again in 3 s. A task given in words in the dashboard ran in 19 s. Its first 3 hours of model calls cost $0.26.
+
+Not yet: the other five weaves end to end.
 
 ## License
 
