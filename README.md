@@ -2,15 +2,19 @@
 
 A Weavefile says what must stay true on a Linux box. The Subweave daemon keeps it true: it installs, watches, repairs, backs up and upgrades one service, and asks a person when it should not decide alone.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/hero-dark.svg">
+  <img alt="A shortened postgres Weavefile beside its goals: running, archiving after running, backed after archiving" src="docs/img/hero-light.svg">
+</picture>
+
 ```
 subweave run postgres "postgres 18 for our app, private network, backups to s3://acme-pg/db1"
 ```
 
-```
-check the goals ──► a goal fails ──► the decider picks an action ──► the rules gate it ──► the action runs
-       ▲                                                                                        │
-       └──────────────────────────── the journal records every step ◄───────────────────────────┘
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/loop-dark.svg">
+  <img alt="The loop: check the goals, a goal fails, the decider picks an action, the rules gate it, the steps run, the goal must hold within its time, else ask the person" src="docs/img/loop-light.svg">
+</picture>
 
 - **Code** checks numbers, runs learned commands and enforces named rules.
 - **The decider** (default [Jev](https://docs.typesafe.ai), a System One model) checks the request against the weave's `ARG`s, picks the next action and judges text. Each decision costs about $0.00004.
