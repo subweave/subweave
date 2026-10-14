@@ -12,13 +12,13 @@ ARG join=whitelist   SHOULD
     whitelist  "only players on the whitelist"
     open       "anyone with the address"
 ARG backups=6h       SHOULD "how often to back up the world, a duration like 6h"
-ARG max_players=20   MAY    "the most players online at once, a number"
+ARG max_players=20   MAY    "the most players online at once, a number like 20"
 ARG mode=survival    MAY
     survival   "survival mode"
     creative   "creative mode"
-ARG keep=14          MAY    "how many world backups to keep on the box, a number"
+ARG keep=14          MAY    "how many world backups to keep on the box, a number like 14"
 ARG updates=auto     MAY
-    auto       "install new Paper builds for $version while nobody plays"
+    auto       "install new Paper builds for $version, which keep the Minecraft version, while nobody plays"
     off        "keep the installed Paper build"
 
 # mcrcon reads MCRCON_PASS
@@ -31,7 +31,7 @@ NEVER "delete or reset a world"
 NEVER "open the RCON port 25575 to the internet"
 NEVER IF keep < 1
 ASK   BEFORE restore
-ASK   "before changing the Minecraft version: a world cannot go back to an older one"
+ASK   "before installing Paper for a Minecraft version other than $version: a world cannot go back to an older one"
 
 # ── Install ────────────────────────────────────────────
 
@@ -48,7 +48,7 @@ ACTION install-java FOR runtime WITHIN 10m
 ACTION install FOR installed WITHIN 20m
   WHEN "Paper is missing"
   DO <<EOF
-    Create the user minecraft and /opt/minecraft.
+    Create the user minecraft and /opt/minecraft. Keep any worlds already there.
     Download the latest Paper $version build from the Fill API, check its sha256,
     and write its build id to /opt/minecraft/build. Accept the EULA.
     server.properties: max-players $max_players, gamemode $mode,
@@ -95,20 +95,23 @@ GOAL running  AFTER installed             up AND rcon
 GOAL smooth   AFTER running    EVERY 5m   players == 0 OR tps >= 18
 
 ACTION restart FOR running, smooth WITHIN 5m
-  WHEN "the server crashed, or stays slow with players online"
+  WHEN "the server crashed or stays slow on a build that ran well before, and its worlds load"
   RUN  mcrcon -c "say Restarting in 30 seconds" || true
   RUN  sleep 30
   RUN  systemctl restart minecraft
 
 SKILL lag WHEN "low TPS, lag with players online, or the server running out of memory" <<EOF
   20 ticks per second is full speed; under 18 players feel it.
+  - Paper ships the spark profiler: mcrcon -c "spark tps", then
+    mcrcon -c "spark profiler start --timeout 60" names the slow plugin, entity type or chunk.
   - Usual causes: new chunks being generated as players explore, large farms with many
     entities or hoppers, redstone clocks, too large view-distance or simulation-distance.
   - A restart helps only a leak; a farm makes the lag again within minutes. Lowering
-    simulation-distance in server.properties (needs a restart) helps without touching worlds.
+    simulation-distance in server.properties (needs a restart) helps without touching worlds;
+    entity limits live in config/paper-world-defaults.yml.
   - Garbage collection pauses: -Xmx too small for the players, or too large for the box.
   - Never kill entities or delete chunks to make it faster: that changes the worlds.
-  - Tell the person which farm or area, with coordinates, when the logs name one.
+  - Tell the person which farm or area, with coordinates, when spark or the logs name one.
 EOF
 
 # ── Backups ────────────────────────────────────────────
@@ -130,12 +133,27 @@ ACTION restore FOR running, quiet WITHIN 15m
   WHEN "a corrupt world stops the server from starting"
   RUN <<EOF
     systemctl stop minecraft
-    t=$(date +%Y%m%d%H%M)
+    t=$(date +%Y%m%d%H%M%S)
     for w in world world_nether world_the_end; do
-      mv /opt/minecraft/$w /opt/minecraft/$w.before-restore-$t
+      if [ -e /opt/minecraft/$w ]; then mv -T /opt/minecraft/$w /opt/minecraft/$w.before-restore-$t; fi
     done
     tar -xzf "$(ls -1t /var/backups/minecraft/world-*.tgz | head -1)" -C /opt/minecraft
+    chown -R minecraft: /opt/minecraft/world /opt/minecraft/world_nether /opt/minecraft/world_the_end
     systemctl start minecraft
+  EOF
+
+GOAL drilled  AFTER saved  EVERY 1d  SINCE(drill) < 30d
+
+ACTION drill FOR drilled WITHIN 30m
+  WHEN "no world backup was test-restored in the last 30 days"
+  RUN <<EOF
+    d=$(mktemp -d /var/tmp/drill.XXXXXX)
+    trap 'rm -rf "$d"' EXIT
+    tar -xzf "$(ls -1t /var/backups/minecraft/world-*.tgz | head -1)" -C "$d"
+    for w in world world_nether world_the_end; do
+      test -s "$d/$w/level.dat"
+      find "$d/$w" -name '*.mca' -size +0 | grep -q .
+    done
   EOF
 
 SKILL worlds WHEN "world backups, restores and corrupt worlds" <<EOF
@@ -151,11 +169,12 @@ EOF
 
 # ── Disk ───────────────────────────────────────────────
 
-FACT disk  "percent used of the filesystem that holds /opt/minecraft, a number"
+FACT disk     "percent used of the filesystem that holds /opt/minecraft, a number"
+FACT logs_gb  "the size of /opt/minecraft/logs and the systemd journal together, in GB, a number"
 
 GOAL room  AFTER installed  EVERY 10m  disk < 85
 
-ACTION trim FOR room WITHIN 10m
+ACTION trim FOR room WITHIN 10m IF logs_gb > 1
   WHEN "old server logs or the systemd journal, not worlds or backups, fill the disk"
   DO   "delete compressed server logs in /opt/minecraft/logs older than 14 days \
         and shrink the systemd journal to 200 MB"
@@ -176,10 +195,12 @@ ACTION update FOR current WITHIN 10m
         as .previous, and restart the server"
 
 ACTION rollback FOR running, smooth WITHIN 5m IF SINCE(update) < 2h
-  WHEN "the server broke right after an update"
+  WHEN "the server fails since its update: it crashes on start, or logs errors the old build did not"
   RUN <<EOF
     cd /opt/minecraft
-    cp build skip-build && mv paper.jar.previous paper.jar && mv build.previous build
+    if [ -f paper.jar.previous ]; then
+      cp build skip-build && mv paper.jar.previous paper.jar && mv build.previous build
+    fi
     systemctl restart minecraft
   EOF
 

@@ -17,12 +17,12 @@ ARG history=full  SHOULD
     full                  "current state, and the last 10064 blocks of state history and receipts"
     minimal               "the smallest disk: receipts for the last 64 blocks, \
                            state history for the last 10064"
-    last <blocks> blocks  "prune history older than this many blocks; reth keeps at least 10064"
+    last <blocks> blocks  "prune history older than this many blocks, a number"
 ARG rpc=local     SHOULD
     local                 "JSON-RPC on localhost only"
     private               "JSON-RPC on the private network"
 ARG updates=auto  MAY
-    auto                  "install new reth and lighthouse releases as they come"
+    auto                  "install routine and security releases of reth and lighthouse as they come"
     ask                   "ask the person before each client update"
 
 # ── Rules ──────────────────────────────────────────────
@@ -48,7 +48,7 @@ ACTION install FOR installed WITHIN 30m
   DO <<EOF
     Install the latest reth and lighthouse releases from GitHub, after checking their signatures.
     Run them as the systemd services reth and lighthouse: data in /var/lib/eth,
-    one JWT secret at /etc/eth/jwt.hex.
+    one JWT secret at /etc/eth/jwt.hex. Keep any chain data already in /var/lib/eth.
     Network: $network. History: $history. JSON-RPC: $rpc.
     Lighthouse starts from a checkpoint.
   EOF
@@ -79,7 +79,7 @@ FACT up  systemctl is-active -q reth lighthouse
 GOAL running  AFTER installed  up
 
 ACTION restart FOR running, moving, quiet WITHIN 10m
-  WHEN "a client crashed, hung or stopped following the chain, and nothing on disk is wrong"
+  WHEN "a client crashed or hung on a release that ran well before, and nothing on disk is wrong"
   RUN  systemctl restart reth lighthouse
 
 # ── Engine API and JSON-RPC ────────────────────────────
@@ -202,13 +202,34 @@ EOF
 
 # ── Disk ───────────────────────────────────────────────
 
-FACT disk  "percent used of the filesystem that holds /var/lib/eth, a number"
+FACT disk        "percent used of the filesystem that holds /var/lib/eth, a number"
+FACT journal_gb  "the size of the systemd journal in GB, a number"
+FACT chain_gb    "the size of /var/lib/eth in GB, a number"
 
 GOAL room  AFTER installed  EVERY 5m  disk < 85
 
-ACTION free-disk FOR room WITHIN 10m
-  WHEN "the disk is full of journal files, not of chain data"
+ACTION free-disk FOR room WITHIN 10m IF journal_gb > 1
+  WHEN "the systemd journal, not chain data, fills the disk"
   DO   "shrink the systemd journal to 500 MB"
+
+SKILL chain-growth WHEN "chain data fills the disk" <<EOF
+  A synced node's data grows every day; only two things make room:
+  - A shorter history (full or minimal, or fewer blocks): pruned data never comes back, and
+    moving between modes is a resync, so the person decides.
+  - A bigger disk: only the person can add one.
+  Never delete files under /var/lib/eth/reth or /var/lib/eth/lighthouse by hand: reth's
+  database then fails to open. Ask the person, with chain_gb and disk in the question.
+EOF
+
+# ── Clock ──────────────────────────────────────────────
+
+FACT ntp  test "$(timedatectl show -p NTPSynchronized --value)" = yes
+
+GOAL clock  AFTER installed  EVERY 1h  ntp
+
+ACTION sync-clock FOR clock WITHIN 15m
+  WHEN "the system clock is not synchronized with NTP"
+  RUN  timedatectl set-ntp true
 
 # ── Updates ────────────────────────────────────────────
 
@@ -224,7 +245,7 @@ ACTION update FOR current WITHIN 1h
         to /opt/eth/previous first; restart it"
 
 ACTION rollback FOR running, synced, moving WITHIN 15m IF SINCE(update) < 2h
-  WHEN "a client broke right after an update"
+  WHEN "a client fails since its update: it crashes on start, or logs errors the old release did not"
   RUN  install -m 755 /opt/eth/previous/* /usr/local/bin/
   RUN  systemctl restart reth lighthouse
 

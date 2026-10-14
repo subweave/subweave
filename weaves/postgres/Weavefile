@@ -15,8 +15,8 @@ ARG access=local   SHOULD
 ARG bucket         SHOULD "an S3 URL for base backups and WAL, like s3://acme-pg/db1"
 ARG endpoint       MAY    "the HTTPS endpoint of an S3-compatible store that is not Amazon S3, \
                            like https://fsn1.your-objectstorage.com"
-ARG keep=7         MAY    "how many daily base backups to keep, a number"
-ARG database=app   MAY    "the name of the database and role the app uses"
+ARG keep=7         MAY    "how many daily base backups to keep, a number like 14"
+ARG database=app   MAY    "the name of the database and role the app uses, like shop"
 ARG updates=auto   MAY
     auto     "install PostgreSQL minor releases as they come"
     ask      "ask the person before installing a minor release"
@@ -53,10 +53,12 @@ SKILL pg-install WHEN "installing PostgreSQL or wal-g" <<EOF
   - PostgreSQL comes from the PGDG apt repository, not Ubuntu's, which ships one major
     release per LTS: apt-get install -y postgresql-common, then
     /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y.
-  - Installing postgresql-$version creates and starts the cluster $version/main.
+  - Installing postgresql-$version creates and starts the cluster $version/main. Never
+    run initdb by hand beside it: Ubuntu's tools then lose track of the cluster.
   - wal-g comes from https://api.github.com/repos/wal-g/wal-g/releases/latest, asset
     wal-g-pg-24.04-amd64.tar.gz (aarch64 on ARM). Check it against the .sha256 file beside
-    it, then install the binary as /usr/local/bin/wal-g, mode 755.
+    it, then install the binary as /usr/local/bin/wal-g, mode 755. A checksum that fails:
+    install nothing, and say so in done.
 EOF
 
 # ── Connections and settings ───────────────────────────
@@ -103,6 +105,8 @@ SKILL pg-tuning WHEN "memory, connection and WAL settings for a box's size" <<EO
   | random_page_cost     | 1.1 on SSD                                         |
 
   shared_buffers and max_connections need a restart; the rest need select pg_reload_conf().
+  Never set shared_buffers above 40% of memory: the page cache then starves, and the
+  out-of-memory killer picks postgres first.
 EOF
 
 # ── Running ────────────────────────────────────────────
@@ -148,9 +152,9 @@ SKILL wal-g WHEN "configuring wal-g, archive_command and base backups" <<EOF
   appear in a command:
 
       install -d -o postgres -m 700 /etc/wal-g
-      jq -n --arg p "$bucket" --arg i "$AWS_ACCESS_KEY_ID" --arg k "$AWS_SECRET_ACCESS_KEY" \
-        '{WALG_S3_PREFIX: $p, AWS_ACCESS_KEY_ID: $i, AWS_SECRET_ACCESS_KEY: $k,
-          PGHOST: "/var/run/postgresql", WALG_COMPRESSION_METHOD: "zstd"}' \
+      jq -n '{WALG_S3_PREFIX: env.bucket, AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY_ID,
+              AWS_SECRET_ACCESS_KEY: env.AWS_SECRET_ACCESS_KEY,
+              PGHOST: "/var/run/postgresql", WALG_COMPRESSION_METHOD: "zstd"}' \
         > /etc/wal-g/wal-g.json
 
   With $endpoint set, add AWS_ENDPOINT, AWS_REGION and AWS_S3_FORCE_PATH_STYLE: "true".
@@ -217,8 +221,8 @@ FACT logs_gb  "the size of /var/log/postgresql and the systemd journal together,
 
 GOAL room  AFTER installed  EVERY 5m  disk < 85
 
-ACTION free-disk FOR room WITHIN 10m
-  WHEN "old logs, not data or WAL, fill the disk"
+ACTION free-disk FOR room WITHIN 10m IF logs_gb > 1
+  WHEN "old PostgreSQL logs or the systemd journal, not data or WAL, fill the disk"
   DO   "delete compressed PostgreSQL logs older than 7 days and shrink the systemd journal to 200 MB"
 
 SKILL wal-growth WHEN "pg_wal is large or growing, or WAL fills the disk" <<EOF
@@ -229,7 +233,8 @@ SKILL wal-growth WHEN "pg_wal is large or growing, or WAL fills the disk" <<EOF
     slot is the person's decision.
   - max_wal_size is high: a checkpoint keeps up to that much.
   Never delete files in pg_wal: PostgreSQL then cannot recover from a crash, and the backups
-  lose their chain. When the data itself outgrew the disk, only the person can add disk.
+  lose their chain. When the data itself outgrew the disk, only the person can add disk:
+  ask them, with data_gb, wal_gb and disk in the question.
 EOF
 
 # ── Load ───────────────────────────────────────────────
