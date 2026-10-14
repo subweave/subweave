@@ -342,12 +342,13 @@ async fn learn(
             last = format!("`{command}` changes the box ({p:.2})");
             continue;
         }
-        if form == Form::Number && !fact.follow {
+        if form != Form::Exit && !fact.follow {
             let o = sh(&command, &ctx.env, Duration::from_secs(60)).await;
             let printed = o.stdout.trim();
-            if crate::weave::Value::Text(printed.to_string())
-                .num()
-                .is_none()
+            if form == Form::Number
+                && crate::weave::Value::Text(printed.to_string())
+                    .num()
+                    .is_none()
             {
                 let shown = ctx.redact(&super::cap(&o.both(), 2000));
                 answer(
@@ -355,6 +356,35 @@ async fn learn(
                     format!("It printed this, not one number:\n{shown}\nPrint one number."),
                 );
                 last = format!("`{command}` printed no number");
+                continue;
+            }
+            // A command can read the right thing in the wrong form: an HTTP status for a
+            // 0/1 flag, bytes for GB. Measured on 14 cases, all sorted at 0.5.
+            let mut q = IndexMap::new();
+            q.insert(
+                "fits".to_string(),
+                Question::Noul {
+                    instructions: "Is `printed` a value that `fact` can have, in the form \
+                        `fact` describes? Judge the form and the scale, not whether the box \
+                        is healthy."
+                        .into(),
+                },
+            );
+            let shown = ctx.redact(&super::cap(printed, 500));
+            let a = decider
+                .ask(json!({"fact": text, "printed": shown}), q)
+                .await?;
+            *cost += a.cost_usd;
+            let p = a.noul("fits").unwrap_or(0.0);
+            if p < 0.5 {
+                answer(
+                    &mut msgs,
+                    format!(
+                        "It printed `{shown}`, which is not a value of the fact in the form it \
+                         describes ({p:.2}). Print exactly that form."
+                    ),
+                );
+                last = format!("`{command}` printed `{shown}`, not the fact's form ({p:.2})");
                 continue;
             }
         }
