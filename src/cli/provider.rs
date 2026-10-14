@@ -9,6 +9,9 @@ use crate::model::provider::{self, KeySource, Protocol, Provider};
 pub struct Args {
     #[command(subcommand)]
     command: Cmd,
+    /// Run on this box, over ssh
+    #[arg(long, global = true, value_name = "USER@HOST")]
+    pub on: Option<String>,
 }
 
 #[derive(Subcommand)]

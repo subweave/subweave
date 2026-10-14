@@ -9,6 +9,9 @@ use crate::model::provider;
 pub struct Args {
     /// The provider, like openrouter
     provider: String,
+    /// Run on this box, over ssh
+    #[arg(long, value_name = "USER@HOST")]
+    pub on: Option<String>,
 }
 
 pub fn run(args: Args) -> Result<ExitCode> {

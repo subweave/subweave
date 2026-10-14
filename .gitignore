@@ -3,3 +3,4 @@ site/node_modules
 site/dist
 editors/vscode/weavefile.tmLanguage.json
 editors/vscode/*.vsix
+/dist
