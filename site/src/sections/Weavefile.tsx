@@ -2,7 +2,7 @@ import { useRef, type KeyboardEvent } from "react";
 import content from "virtual:content";
 import { Code } from "../components/Code";
 import { Section } from "../components/Section";
-import { REPO } from "../links";
+import { LIBRARY } from "../links";
 
 export function Weavefile({ n, selected, onSelect }: { n: number; selected: string; onSelect: (name: string) => void }) {
   const tabs = useRef<Record<string, HTMLButtonElement | null>>({});
@@ -69,7 +69,7 @@ export function Weavefile({ n, selected, onSelect }: { n: number; selected: stri
               <span className="panel-name">examples/{selected}/Weavefile</span>
               <span className="panel-about">{weave.about}</span>
             </p>
-            <a href={`${REPO}/blob/main/examples/${selected}/Weavefile`}>{weave.lines} lines on GitHub</a>
+            <a href={`${LIBRARY}/blob/main/${selected}/Weavefile`}>{weave.lines} lines on GitHub</a>
           </div>
           <Code key={selected} name={selected} label={`The ${selected} Weavefile, in full`} numbered className="weave" />
         </div>

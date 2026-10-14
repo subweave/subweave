@@ -1,11 +1,17 @@
 import content from "virtual:content";
 import { Code } from "../components/Code";
 import { Section } from "../components/Section";
-import { REPO } from "../links";
+import { LIBRARY } from "../links";
 
 export function Catalog({ n, onRead }: { n: number; onRead: (name: string) => void }) {
   return (
-    <Section id="examples" n={n} kicker="Examples" title="Six examples to start from.">
+    <Section
+      id="examples"
+      n={n}
+      kicker="Examples"
+      title="Six examples to start from."
+      lede={<a href={LIBRARY}>All weaves on GitHub</a>}
+    >
       <div className="catalog">
         {content.examples.map((w) => (
           <article key={w.name} className="weave-card">
@@ -19,7 +25,7 @@ export function Catalog({ n, onRead }: { n: number; onRead: (name: string) => vo
               <a href="#weavefile" onClick={() => onRead(w.name)}>
                 Read the Weavefile
               </a>
-              <a href={`${REPO}/tree/main/examples/${w.name}`}>README</a>
+              <a href={`${LIBRARY}/tree/main/${w.name}`}>README</a>
             </footer>
           </article>
         ))}
