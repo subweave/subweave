@@ -5,6 +5,7 @@
 mod act;
 mod channel;
 mod control;
+mod daemon;
 mod flow;
 mod inbox;
 mod key;
@@ -82,6 +83,8 @@ enum Command {
     Provider(provider::Args),
     /// Score a weave against the review rules; changes nothing
     Review(review::Args),
+    /// Run every service in the foreground; --install makes it a systemd service
+    Daemon(daemon::Args),
     /// Print the version
     Version,
 }
@@ -106,9 +109,11 @@ impl Command {
             Command::Channel(a) => (a.on.as_deref(), None),
             Command::Key(a) => (a.on.as_deref(), None),
             Command::Provider(a) => (a.on.as_deref(), None),
-            Command::Plan(_) | Command::Review(_) | Command::Watch | Command::Version => {
-                (None, None)
-            }
+            Command::Plan(_)
+            | Command::Review(_)
+            | Command::Daemon(_)
+            | Command::Watch
+            | Command::Version => (None, None),
         }
     }
 
@@ -163,6 +168,7 @@ async fn local(command: Command) -> Result<ExitCode> {
         Command::Key(args) => key::run(args),
         Command::Provider(args) => provider::run(args),
         Command::Review(args) => review::run(args).await,
+        Command::Daemon(args) => daemon::run(args).await,
         Command::Version => version::run(),
     }
 }

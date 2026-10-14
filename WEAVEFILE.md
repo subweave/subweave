@@ -358,7 +358,7 @@ The decider's request, for a failing goal:
     "program_output": {
       "logs": "kernel: Out of memory: Killed process 2211 (postgres)"
     },
-    "journal": ["10:02 restart: passed", "10:31 running failed again"]
+    "journal": ["10:02 restart: passed", "10:31 restart: passed"]
   },
   "questions": {
     "next": {
@@ -380,6 +380,8 @@ The decider's request, for a failing goal:
 ```
 
 `steered` at 0.5 or more makes the daemon ask the person and run nothing. See [LIMITS.md](LIMITS.md#3-text-on-the-box-can-steer-the-decider).
+
+`journal` holds only this goal's past action outcomes. With failed checks and earlier asks beside them, Jev picked `ask` over a plain restart (confidence 0.13 to 0.35); with outcomes alone, `restart` scored 0.83. Repeat failures are `TRIES`, counted in code.
 
 ## Learned commands
 
@@ -407,7 +409,7 @@ A `DO` task, when no learned steps or recipe made the goal hold:
 2. The coder gets the task, the failing goal, the ARGs, the rules, the facts and the picked skills, and one tool: `shell`.
 3. The coder sends each command with its purpose. The decider gates both against `NEVER` and `ASK`, then the box runs the command.
 4. After a failed command, the decider sorts the error into `missing package`, `permission`, `network`, `config` or `other`. The coder gets that answer with the output.
-5. The coder says `done`, with the commands that made the fix and one line on the cause. The decider checks the task's goal from the transcript and fresh facts. At 0.8 or more, the task passed.
+5. The coder says `done`, with the commands that made the fix and one line on the cause. The daemon checks the task's goal again with fresh facts; when it holds, the task passed.
 6. After two failed checks, the `THEN` model takes over. After 40 commands without a pass, the task failed.
 
 ## Models

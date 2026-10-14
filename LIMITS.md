@@ -159,7 +159,8 @@ Facts, log lines and coder transcripts go to OpenRouter, then to TypeSafe and De
 - A task stops after 40 commands without passing its goal check.
 - Learned steps run again in code, through the code rules only: the quoted rules judged them once, when the coder wrote them.
 - Only `steery` answers are signed. A Telegram answer is as safe as the bot's chat.
-- The coder's quality and cost are not measured yet: no `DO` task has run on a real box.
+- The shell can read the daemon's files, channel and provider keys among them. The daemon replaces every key's value in what goes to a model, a channel or the journal; a key the coder re-encodes (base64, split) gets past that.
+- On this Mac, one toy task: the coder installed a page in 3 calls ($0.00046) and fixed a stopped server in 7 calls and 9 commands ($0.0040). No `DO` task has run on a real box yet.
 
 ## 12. Speed and cost
 
