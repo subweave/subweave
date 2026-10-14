@@ -27,7 +27,7 @@ export function App() {
     (n: number) => <Weavefile key="weavefile" n={n} selected={weave} onSelect={setWeave} />,
     (n: number) => <Learned key="learned" n={n} />,
     (n: number) => <Channels key="channels" n={n} />,
-    (n: number) => <Catalog key="weaves" n={n} onRead={setWeave} />,
+    (n: number) => <Catalog key="examples" n={n} onRead={setWeave} />,
     (n: number) => <Review key="review" n={n} />,
     (n: number) => <Costs key="costs" n={n} />,
     (n: number) => <Install key="install" n={n} />,
@@ -55,7 +55,7 @@ export function App() {
               <a href="#weavefile">Weavefile</a>
             </li>
             <li>
-              <a href="#weaves">Weaves</a>
+              <a href="#examples">Examples</a>
             </li>
             <li>
               <a href={REPO}>GitHub</a>

@@ -89,7 +89,7 @@ function tree(p: Palette, rows: Row[], x0: number, y0: number, h: number): strin
 }
 
 function hero(p: Palette): string {
-  const eth = content.weaves.find((w) => w.name === "ethereum")!;
+  const eth = content.examples.find((w) => w.name === "ethereum")!;
   const { findings, ask } = heroFindings(eth);
   const rows = goalRows(eth.goals);
   const height = 290 + rows.length * 24 + 20;

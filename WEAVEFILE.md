@@ -625,12 +625,12 @@ cargo install --locked --git https://github.com/subweave/subweave   # macOS: CLI
 - `tell` takes `--decide` and `--code` too, with or without a request.
 - The CLI remembers which box runs each service, so later commands take the name alone.
 - A weave is a local directory, or a name with an optional tag, as in Docker.
-  - `postgres:0.5` is `weaves/postgres` in github.com/subweave/subweave at the git tag `postgres-0.5`.
+  - `postgres:0.5` is `examples/postgres` in github.com/subweave/subweave at the git tag `postgres-0.5`.
   - With no tag, the default branch.
 
 ```
 subweave run postgres:0.5 "postgres 18, private network, backups to s3://acme-pg/db1"
-subweave run ./weaves/postgres "postgres 18"
+subweave run ./examples/postgres "postgres 18"
 ```
 
 Files, as root on Linux. Elsewhere, `~/.config/subweave` and `~/.local/state/subweave`; `SUBWEAVE_CONFIG` and `SUBWEAVE_STATE` override both.
@@ -681,7 +681,7 @@ subweave dash --bind 0.0.0.0 --host dash.acme.dev --on root@host
 `subweave review <weave>` scores a Weavefile from 0 to 100 against 48 authoring rules, with the decider. It changes nothing and runs no command.
 
 ```
-$ subweave review weaves/postgres
+$ subweave review examples/postgres
 postgres  100/100   48 rules, 221 checks, $0.0020
 ```
 

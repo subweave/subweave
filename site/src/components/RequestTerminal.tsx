@@ -3,7 +3,7 @@ import content from "virtual:content";
 import { useReducedMotion } from "../motion";
 import { COMMAND, heroFindings } from "../weave/example";
 
-const eth = content.weaves.find((w) => w.name === "ethereum")!;
+const eth = content.examples.find((w) => w.name === "ethereum")!;
 const { findings, ask } = heroFindings(eth);
 
 const LINES: { cls: string; node: ReactNode; ms: number }[] = [

@@ -6,8 +6,8 @@ import { REPO } from "../links";
 
 export function Weavefile({ n, selected, onSelect }: { n: number; selected: string; onSelect: (name: string) => void }) {
   const tabs = useRef<Record<string, HTMLButtonElement | null>>({});
-  const names = content.weaves.map((w) => w.name);
-  const weave = content.weaves.find((w) => w.name === selected)!;
+  const names = content.examples.map((w) => w.name);
+  const weave = content.examples.find((w) => w.name === selected)!;
 
   const onKey = (e: KeyboardEvent) => {
     const i = names.indexOf(selected);
@@ -37,7 +37,7 @@ export function Weavefile({ n, selected, onSelect }: { n: number; selected: stri
     >
       <div className="tabs">
         <div className="tabs-head">
-          <div className="tablist" role="tablist" aria-label="Weaves" onKeyDown={onKey}>
+          <div className="tablist" role="tablist" aria-label="Examples" onKeyDown={onKey}>
             {names.map((name) => (
               <button
                 key={name}
@@ -66,10 +66,10 @@ export function Weavefile({ n, selected, onSelect }: { n: number; selected: stri
         <div className="tabpanel" role="tabpanel" id="weave-panel" aria-labelledby={`tab-${selected}`}>
           <div className="panel-head">
             <p>
-              <span className="panel-name">weaves/{selected}/Weavefile</span>
+              <span className="panel-name">examples/{selected}/Weavefile</span>
               <span className="panel-about">{weave.about}</span>
             </p>
-            <a href={`${REPO}/blob/main/weaves/${selected}/Weavefile`}>{weave.lines} lines on GitHub</a>
+            <a href={`${REPO}/blob/main/examples/${selected}/Weavefile`}>{weave.lines} lines on GitHub</a>
           </div>
           <Code key={selected} name={selected} label={`The ${selected} Weavefile, in full`} numbered className="weave" />
         </div>
