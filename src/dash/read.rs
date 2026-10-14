@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use super::ApiError;
 use crate::cli::log::kind_str;
+use crate::cli::stats;
 use crate::service::{self, Line, Spec, Status};
 use crate::{paths, weave};
 
@@ -131,4 +132,35 @@ fn matches(l: &Line, needle: &str) -> bool {
             .facts
             .as_ref()
             .is_some_and(|f| f.iter().any(|(k, v)| has(k) || has(v)))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct Range {
+    range: Option<String>,
+}
+
+/// Numeric fact values from `check` lines, the mean of each step, as `stats` reads them.
+pub(crate) async fn metrics(
+    Path(s): Path<String>,
+    Query(q): Query<Range>,
+) -> Result<Json<Value>, ApiError> {
+    spec(&s)?;
+    let (step, steps) = match q.range.as_deref().unwrap_or("24h") {
+        "24h" => (600, 144),
+        "7d" => (3600, 168),
+        "30d" => (4 * 3600, 180),
+        other => return Err(ApiError::bad(format!("range {other:?}: 24h, 7d or 30d"))),
+    };
+    let now = crate::daemon::epoch();
+    let lines = service::journal(&s).map_err(ApiError::internal)?;
+    let series = stats::series(&lines, now, step, steps);
+    let t: Vec<String> = (0..steps as i64)
+        .filter_map(|k| jiff::Timestamp::from_second(now - (steps as i64 - k) * step).ok())
+        .map(|ts| ts.strftime("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .collect();
+    let facts: serde_json::Map<String, Value> = series
+        .into_iter()
+        .map(|(name, s)| (name, json!(s.means)))
+        .collect();
+    Ok(Json(json!({"step_s": step, "t": t, "facts": facts})))
 }

@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use jiff::Timestamp;
 
-use crate::service::{self, Kind};
+use crate::service::{self, Kind, Line};
 
 const HOURS: usize = 24;
 const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -17,20 +17,20 @@ pub struct Args {
     pub on: Option<String>,
 }
 
-#[derive(Default)]
-struct Series {
-    last: f64,
-    min: f64,
-    max: f64,
-    sum: [f64; HOURS],
-    count: [u32; HOURS],
+/// One numeric fact over a span: its last, lowest and highest value, and the mean of
+/// each step, oldest first; `None` for a step with no check.
+pub(crate) struct Series {
+    pub last: f64,
+    pub min: f64,
+    pub max: f64,
+    pub means: Vec<Option<f64>>,
 }
 
-pub fn run(args: Args) -> Result<ExitCode> {
-    super::known(&args.service)?;
-    let now = Timestamp::now().as_second();
-    let mut facts: BTreeMap<String, Series> = BTreeMap::new();
-    for l in service::journal(&args.service)? {
+/// The numeric fact values of `check` lines in the `steps` steps of `step` seconds that
+/// end at `now`, per fact. Step `k` starts at `now - (steps - k) * step`.
+pub(crate) fn series(lines: &[Line], now: i64, step: i64, steps: usize) -> BTreeMap<String, Series> {
+    let mut sums: BTreeMap<String, (Series, Vec<f64>, Vec<u32>)> = BTreeMap::new();
+    for l in lines {
         if l.kind != Kind::Check {
             continue;
         }
@@ -39,10 +39,10 @@ pub fn run(args: Args) -> Result<ExitCode> {
             continue;
         };
         let age = now - t.as_second();
-        if !(0..HOURS as i64 * 3600).contains(&age) {
+        if !(0..step * steps as i64).contains(&age) {
             continue;
         }
-        let hour = HOURS - 1 - (age / 3600) as usize;
+        let k = steps - 1 - (age / step) as usize;
         for (name, v) in values {
             let Ok(v) = v.trim().parse::<f64>() else {
                 continue;
@@ -50,18 +50,40 @@ pub fn run(args: Args) -> Result<ExitCode> {
             if !v.is_finite() {
                 continue;
             }
-            let s = facts.entry(name.clone()).or_insert_with(|| Series {
-                min: v,
-                max: v,
-                ..Series::default()
+            let (s, sum, count) = sums.entry(name.clone()).or_insert_with(|| {
+                (
+                    Series {
+                        last: v,
+                        min: v,
+                        max: v,
+                        means: Vec::new(),
+                    },
+                    vec![0.0; steps],
+                    vec![0; steps],
+                )
             });
             s.last = v;
             s.min = s.min.min(v);
             s.max = s.max.max(v);
-            s.sum[hour] += v;
-            s.count[hour] += 1;
+            sum[k] += v;
+            count[k] += 1;
         }
     }
+    sums.into_iter()
+        .map(|(name, (mut s, sum, count))| {
+            s.means = (0..steps)
+                .map(|k| (count[k] > 0).then(|| sum[k] / f64::from(count[k])))
+                .collect();
+            (name, s)
+        })
+        .collect()
+}
+
+pub fn run(args: Args) -> Result<ExitCode> {
+    super::known(&args.service)?;
+    let now = Timestamp::now().as_second();
+    let lines = service::journal(&args.service)?;
+    let facts = series(&lines, now, 3600, HOURS);
     if facts.is_empty() {
         println!("no numeric facts in the last 24 h");
         return Ok(ExitCode::SUCCESS);
@@ -97,20 +119,19 @@ pub fn run(args: Args) -> Result<ExitCode> {
 /// One bar per hour's mean, scaled from the lowest mean to the highest; a blank for an
 /// hour with no check.
 fn spark(s: &Series) -> String {
-    let means: Vec<Option<f64>> = (0..HOURS)
-        .map(|h| (s.count[h] > 0).then(|| s.sum[h] / f64::from(s.count[h])))
-        .collect();
-    let lo = means
+    let lo = s
+        .means
         .iter()
         .flatten()
         .copied()
         .fold(f64::INFINITY, f64::min);
-    let hi = means
+    let hi = s
+        .means
         .iter()
         .flatten()
         .copied()
         .fold(f64::NEG_INFINITY, f64::max);
-    means
+    s.means
         .iter()
         .map(|m| match m {
             None => ' ',

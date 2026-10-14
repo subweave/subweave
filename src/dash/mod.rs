@@ -2,11 +2,14 @@
 //! CLI: it reads `services/`, writes only `inbox/` (through `service::put`), and serves
 //! the React app built from `dash/` and embedded by `build.rs`.
 
+mod act;
 mod assets;
 mod auth;
 pub mod config;
 mod live;
+mod logs;
 mod read;
+mod vitals;
 
 use std::future::IntoFuture;
 use std::net::SocketAddr;
@@ -28,6 +31,7 @@ pub(crate) struct App {
     pub config: Config,
     pub sessions: auth::Sessions,
     pub live: live::Live,
+    pub vitals: vitals::Vitals,
 }
 
 /// `{error}` with a status.
@@ -81,16 +85,30 @@ pub async fn serve(config: Config) -> Result<()> {
         config,
         sessions: auth::Sessions::default(),
         live: live::Live::new(),
+        vitals: vitals::Vitals::default(),
     });
     tokio::spawn(live::tail(app.clone()));
+    tokio::spawn(vitals::sample(app.clone()));
     let api = Router::new()
         .route("/session", get(auth::session))
         .route("/login", post(auth::login))
         .route("/logout", post(auth::logout))
+        .route("/box", get(vitals::box_info))
+        .route("/vitals", get(vitals::get))
+        .route("/events", get(live::events))
         .route("/services", get(read::services))
         .route("/services/{s}", get(read::service))
         .route("/services/{s}/journal", get(read::journal))
-        .route("/events", get(live::events))
+        .route("/services/{s}/metrics", get(read::metrics))
+        .route("/services/{s}/logs", get(logs::list))
+        .route("/services/{s}/logs/{name}", get(logs::stream))
+        .route("/services/{s}/answer", post(act::answer))
+        .route("/services/{s}/do", post(act::do_action))
+        .route("/services/{s}/task", post(act::task))
+        .route("/services/{s}/tell", post(act::tell))
+        .route("/services/{s}/stop", post(act::stop))
+        .route("/services/{s}/start", post(act::start))
+        .route("/services/{s}/forget", post(act::forget))
         .fallback(any(|| async { ApiError::not_found("no such API route") }));
     let router = Router::new()
         .nest("/api", api)

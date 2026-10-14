@@ -27,6 +27,8 @@ use crate::service::{self as svc, Command, Kind, Line};
 
 use service::Ctl;
 
+pub(crate) use service::command_env;
+
 /// What every service task shares: the ask counter and where each ask was sent.
 pub(crate) struct Shared {
     pub host: String,
@@ -592,16 +594,30 @@ impl Out {
     }
 }
 
-/// Runs `script` in `bash -eo pipefail -c` with `env` added, killed after `limit`.
-pub(crate) async fn sh(script: &str, env: &BTreeMap<String, String>, limit: Duration) -> Out {
+/// `bash -eo pipefail -c <script>` with `env` added, stdin closed, in a process group
+/// of its own so that `kill_group` ends what it started too.
+pub(crate) fn bash(script: &str, env: &BTreeMap<String, String>) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("bash");
     cmd.args(["-eo", "pipefail", "-c", script])
         .envs(env)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .process_group(0);
+    cmd
+}
+
+/// Kills the process group a `bash` command leads.
+pub(crate) fn kill_group(pid: u32) {
+    if let Ok(pid) = libc::pid_t::try_from(pid) {
+        // SAFETY: kill has no memory preconditions; the group is the command's own.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    }
+}
+
+/// Runs `script` in `bash -eo pipefail -c` with `env` added, killed after `limit`.
+pub(crate) async fn sh(script: &str, env: &BTreeMap<String, String>, limit: Duration) -> Out {
+    let mut cmd = bash(script, env);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -622,8 +638,7 @@ pub(crate) async fn sh(script: &str, env: &BTreeMap<String, String>, limit: Dura
         Err(_) => {
             timed_out = true;
             if let Some(pid) = pid {
-                // SAFETY: kill has no memory preconditions; the group is the command's own.
-                unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                kill_group(pid);
             }
             let _ = child.kill().await;
             None

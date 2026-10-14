@@ -84,8 +84,7 @@ impl Drop for Follower {
         self.task.abort();
         let pid = self.pid.load(Ordering::Relaxed);
         if pid != 0 {
-            // SAFETY: kill has no memory preconditions; the group is the child's own.
-            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+            super::kill_group(pid);
         }
     }
 }
@@ -104,14 +103,9 @@ impl Follower {
         let (b, p, cmd) = (buf.clone(), pid.clone(), command.clone());
         let task = tokio::spawn(async move {
             loop {
-                let child = tokio::process::Command::new("bash")
-                    .args(["-eo", "pipefail", "-c", &cmd])
-                    .envs(&env)
-                    .stdin(Stdio::null())
+                let child = super::bash(&cmd, &env)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::null())
-                    .kill_on_drop(true)
-                    .process_group(0)
                     .spawn();
                 if let Ok(mut child) = child {
                     p.store(child.id().unwrap_or(0), Ordering::Relaxed);

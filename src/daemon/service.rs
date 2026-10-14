@@ -77,6 +77,39 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// What every command of a service runs with: its ARGs, slots and SECRETs as the
+/// environment, and the values to redact, as (name, value), longest value first.
+pub(crate) fn command_env(
+    name: &str,
+    spec: &Spec,
+) -> (BTreeMap<String, String>, Vec<(String, String)>) {
+    let secret_map: BTreeMap<String, String> = std::fs::read(paths::secrets(name))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let mut secrets: Vec<(String, String)> = secret_map
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    // The coder's shell can read the daemon's own files: its channel and provider keys
+    // are redacted like SECRETs, though they never reach a command's environment.
+    for c in channel::ls().unwrap_or_default() {
+        if let Some(s) = c.secret.filter(|s| !s.is_empty()) {
+            secrets.push((format!("channel {}", c.name), s));
+        }
+    }
+    for p in crate::model::provider::all().unwrap_or_default() {
+        if let Ok(Some(k)) = p.key().map(|k| k.filter(|k| !k.is_empty())) {
+            secrets.push((format!("{} key", p.name), k));
+        }
+    }
+    secrets.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
+    let mut env = spec.args.clone();
+    env.extend(secret_map);
+    (env, secrets)
+}
+
 impl Ctx {
     fn load(shared: Arc<Shared>, name: &str) -> Result<Ctx> {
         let spec = svc::spec(name)?;
@@ -92,30 +125,7 @@ impl Ctx {
                     .join("; ")
             )
         })?;
-        let secret_map: BTreeMap<String, String> = std::fs::read(paths::secrets(name))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
-        let mut secrets: Vec<(String, String)> = secret_map
-            .iter()
-            .filter(|(_, v)| !v.is_empty())
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        // The coder's shell can read the daemon's own files: its channel and provider keys
-        // are redacted like SECRETs, though they never reach a command's environment.
-        for c in channel::ls().unwrap_or_default() {
-            if let Some(s) = c.secret.filter(|s| !s.is_empty()) {
-                secrets.push((format!("channel {}", c.name), s));
-            }
-        }
-        for p in crate::model::provider::all().unwrap_or_default() {
-            if let Ok(Some(k)) = p.key().map(|k| k.filter(|k| !k.is_empty())) {
-                secrets.push((format!("{} key", p.name), k));
-            }
-        }
-        secrets.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
-        let mut env = spec.args.clone();
-        env.extend(secret_map);
+        let (env, secrets) = command_env(name, &spec);
         let mut journal = Journal::open(name, secrets.clone());
         let decider = match ModelRef::parse(&spec.decide).and_then(Decider::new) {
             Ok(d) => Some(d),
