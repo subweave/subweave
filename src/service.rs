@@ -49,10 +49,12 @@ pub enum Command {
         bundle: Bundle,
     },
     /// New ARGs, after the request check; `decide`/`code` replace the models when given.
+    /// `secrets`: SECRETs the new ARGs turn on, merged into `secrets.json`.
     Tell {
         service: String,
         request: String,
         args: BTreeMap<String, String>,
+        secrets: BTreeMap<String, String>,
         decide: Option<String>,
         code: Option<Vec<String>>,
     },

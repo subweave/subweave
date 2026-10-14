@@ -116,12 +116,13 @@ ACTION restart FOR running, draining, quiet WITHIN 2m
 
 # ── Disk ───────────────────────────────────────────────
 
-FACT disk  df --output=pcent /var/lib/telegraf | tail -1 | tr -dc 0-9
+FACT disk     df --output=pcent /var/lib/telegraf | tail -1 | tr -dc 0-9
+FACT junk_mb  du -scm /var/log/journal /var/cache/apt/archives | tail -1 | cut -f1
 
 GOAL room  AFTER installed  EVERY 10m  disk < 90
 
-ACTION trim FOR room WITHIN 5m
-  WHEN "the disk is full of logs or the apt cache"
+ACTION trim FOR room WITHIN 5m IF junk_mb > 300
+  WHEN "the systemd journal or the apt cache, not Telegraf's buffer, fills the disk"
   RUN  journalctl --vacuum-size=200M
   RUN  apt-get clean
 

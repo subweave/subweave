@@ -162,12 +162,13 @@ EOF
 
 # ── Disk ───────────────────────────────────────────────
 
-FACT disk  "percent used of the filesystem that holds /root/.cache, a number"
+FACT disk       "percent used of the filesystem that holds /root/.cache, a number"
+FACT others_gb  "the size in GB of the model directories in /root/.cache/huggingface/hub other than $model's, a number"
 
 GOAL room  AFTER installed  EVERY 10m  disk < 90
 
-ACTION free-disk FOR room WITHIN 15m
-  WHEN "the model cache holds models other than $model"
+ACTION free-disk FOR room WITHIN 15m IF others_gb > 1
+  WHEN "models other than $model, not $model itself, fill the disk"
   DO   "free space in /root/.cache/huggingface by removing models other than $model"
 
 SKILL hf-cache WHEN "the Hugging Face model cache and freeing disk" <<EOF
