@@ -1,0 +1,30 @@
+[package]
+name = "subweave"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Keeps one service running on one Linux box, as its Weavefile says"
+repository = "https://github.com/subweave/subweave"
+
+[lib]
+name = "subweave"
+path = "src/lib.rs"
+
+[[bin]]
+name = "subweave"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.6", features = ["derive"] }
+indexmap = { version = "2.14", features = ["serde"] }
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
