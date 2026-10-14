@@ -1,7 +1,8 @@
 #!/bin/sh
 # Builds site/ on this machine and publishes it, with install.sh, as subweave.com on the
-# Caddy proxy of steery.dev's box. Nothing builds there. A Caddy config that does not
-# validate is put back and never loaded.
+# Caddy proxy of steery.dev's box. Nothing builds there. The site file it replaces stays
+# beside it as subweave.com.caddy.bak-<time> (the proxy imports only *.caddy), and a
+# config that does not validate is put back and never loaded.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -17,11 +18,12 @@ rsync -a --delete site/dist/ "$host:$data/subweave.com/site/"
 scp -q deploy/subweave.com.caddy "$host:/tmp/subweave.com.caddy"
 ssh "$host" "set -e
   cd $data/sites
-  cp subweave.com.caddy /tmp/subweave.com.caddy.before 2>/dev/null || true
+  before=subweave.com.caddy.bak-\$(date -u +%Y%m%dT%H%M%S)
+  if [ -f subweave.com.caddy ] && ! cmp -s subweave.com.caddy /tmp/subweave.com.caddy; then cp -p subweave.com.caddy \$before; fi
   install -m 644 /tmp/subweave.com.caddy subweave.com.caddy
   if ! docker exec $proxy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/tmp/subweave-caddy.log 2>&1; then
     cat /tmp/subweave-caddy.log >&2
-    if [ -f /tmp/subweave.com.caddy.before ]; then install -m 644 /tmp/subweave.com.caddy.before subweave.com.caddy; else rm -f subweave.com.caddy; fi
+    if [ -f \$before ]; then install -m 644 \$before subweave.com.caddy; else rm -f subweave.com.caddy; fi
     echo 'the new Caddy config does not validate; the old one is back' >&2
     exit 1
   fi
