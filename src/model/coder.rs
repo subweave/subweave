@@ -136,10 +136,13 @@ impl Coder {
         &self.chain[i].model
     }
 
-    /// One model turn of a conversation. The model must call a tool.
+    /// One model turn of a conversation. The model must call a tool. `session` is sent to
+    /// OpenRouter as `session_id`: it pins one provider from the first request, so the
+    /// conversation's prompt cache holds.
     pub async fn send(
         &self,
         i: usize,
+        session: Option<&str>,
         system: &str,
         msgs: &[Msg],
         tools: &[Tool],
@@ -148,7 +151,7 @@ impl Coder {
         let (url, body) = match ep.provider.protocol {
             Protocol::OpenAi => (
                 ep.provider.url("chat/completions"),
-                openai_body(ep, system, msgs, tools),
+                openai_body(ep, session, system, msgs, tools),
             ),
             Protocol::Anthropic => (
                 ep.provider.url("messages"),
@@ -216,7 +219,13 @@ impl Coder {
     }
 }
 
-fn openai_body(ep: &Endpoint, system: &str, msgs: &[Msg], tools: &[Tool]) -> Value {
+fn openai_body(
+    ep: &Endpoint,
+    session: Option<&str>,
+    system: &str,
+    msgs: &[Msg],
+    tools: &[Tool],
+) -> Value {
     let mut messages = vec![json!({"role": "system", "content": system})];
     for m in msgs {
         match m {
@@ -260,6 +269,9 @@ fn openai_body(ep: &Endpoint, system: &str, msgs: &[Msg], tools: &[Tool]) -> Val
     });
     if ep.provider.name == provider::OPENROUTER {
         body["usage"] = json!({"include": true});
+        if let Some(s) = session {
+            body["session_id"] = json!(s);
+        }
     }
     body
 }

@@ -367,6 +367,12 @@ fn system_prompt(
     s
 }
 
+/// The coder's `session_id`: one per episode and chain model, so each model's provider
+/// stays the same for the conversation and its prompt cache holds.
+pub(crate) fn session_id(i: usize) -> Option<String> {
+    super::episode::current().map(|ep| format!("{ep}-{i}"))
+}
+
 async fn session(
     ctx: &Ctx,
     work: Work<'_>,
@@ -398,11 +404,12 @@ async fn session(
         let mut checks = 0;
         let mut idle = 0;
         let mut tally = Tally::default();
+        let sid = session_id(i);
         let end = loop {
             if commands >= MAX_COMMANDS {
                 break End::Failed(format!("{MAX_COMMANDS} commands without a pass"));
             }
-            let reply = match coder.send(i, &system, &msgs, &tools).await {
+            let reply = match coder.send(i, sid.as_deref(), &system, &msgs, &tools).await {
                 Ok(r) => r,
                 Err(e) => {
                     work.note(ctx, format!("{e:#}"));

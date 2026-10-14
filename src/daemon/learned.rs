@@ -358,8 +358,9 @@ async fn learn(
     }];
     let mut msgs = vec![Msg::User(user)];
     let mut last = String::new();
+    let sid = super::coder_task::session_id(0);
     for _ in 0..TRIES {
-        let reply = coder.send(0, &system, &msgs, &tools).await?;
+        let reply = coder.send(0, sid.as_deref(), &system, &msgs, &tools).await?;
         *cost += reply.cost_usd;
         tally.add(&reply);
         let call = reply.calls.iter().find(|c| c.name == "fact").cloned();
