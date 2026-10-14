@@ -1,0 +1,482 @@
+# The rules of `subweave review`. The engine compiles this file in; each rule's wording was
+# measured on typesafe/jev-1.13 against the six weaves and broken copies of them.
+#
+# A rule checks every element of one kind (`on`) in one of three ways:
+#   ask            a yes/no question to the decider; passes when the answer is `pass`
+#                  ("yes" or "no") at 0.5 or more.
+#   ask + choices  a choice question; passes when the choice `pass` gets 0.5 or more.
+#   code           a check in src/review/code.rs; a code check may read the decider's
+#                  answer to `ask` + `choices` (only `within` does).
+# weight: 3 serious, 2 normal, 1 minor. `unless` names a code check that passes the element
+# without asking. `when` names a probe that must answer yes at 0.5 or more for the rule to
+# apply at all. Questions name the fields of the element's state in backticks; the state
+# also holds `service`, the weave's ABOUT. `fields` sends only those fields of the element
+# (one field more can change an answer: a WHEN beside its action's name reads as a situation).
+
+[[probe]]
+id = "stateful"
+ask = "Does the service described in `about` keep data that people need for a long time and that cannot be fetched again from elsewhere, such as a database or saved game worlds? Data the service can download or rebuild, caches and short-lived buffers do not count."
+
+# ── Header ────────────────────────────────────────────────
+
+[[rule]]
+id = "about"
+area = "header"
+weight = 2
+on = "weave"
+code = "about"
+says = "ABOUT says what the service is"
+
+[[rule]]
+id = "about-plain"
+area = "header"
+weight = 1
+on = "weave"
+ask = "Does `about` say which software runs and what it provides, in plain words, without praise or marketing?"
+pass = "yes"
+says = "ABOUT names the software and what it provides"
+
+[[rule]]
+id = "needs"
+area = "header"
+weight = 2
+on = "weave"
+code = "needs"
+says = "NEEDS gives CPU, RAM and DISK"
+
+# ── ARGs ──────────────────────────────────────────────────
+
+[[rule]]
+id = "arg-what-form"
+area = "args"
+weight = 2
+on = "arg-value"
+ask = "Does `what` say what kind of value the setting takes, such as a number, a version, a URL, a name, a size or a duration?"
+pass = "yes"
+says = "an ARG's description says its kind of value"
+why = "The request check asks whether each value fits this description: LIMITS.md#6."
+
+[[rule]]
+id = "arg-what-example"
+area = "args"
+weight = 1
+on = "arg-value"
+ask = "Does `what` give an example value?"
+pass = "yes"
+says = "an ARG's description gives an example"
+
+[[rule]]
+id = "arg-default-fits"
+area = "args"
+weight = 3
+on = "arg-value"
+unless = "no-default"
+ask = "Is the value `default` a valid example of this: `what`?"
+pass = "yes"
+says = "an ARG's default fits its own description"
+
+[[rule]]
+id = "arg-default-safe"
+area = "args"
+weight = 2
+on = "arg-defaulted"
+ask = "A request did not mention `name`, so the service uses `default`: `meaning`. Which describes that choice?"
+choices = { safe = "a conservative choice: it keeps the data, spends no unexpected money, keeps access narrow and joins no network or account the person did not name", risky = "it could lose data, spend money, open the service to more people, or join a network or account the person did not name" }
+pass = "safe"
+says = "a default is safe for someone who did not choose it; else make the ARG MUST"
+
+[[rule]]
+id = "options-distinct"
+area = "args"
+weight = 2
+on = "arg-options"
+unless = "one-option"
+ask = "Could one ordinary request fit two of the `options` at once?"
+pass = "no"
+says = "an ARG's options do not overlap"
+
+[[rule]]
+id = "option-slot"
+area = "args"
+weight = 1
+on = "arg-options"
+code = "option-slot"
+says = "an option holds no <slot>; a value ARG reads better"
+why = "The decider picked the wrong option with a slot at 0.35 and 0.47: LIMITS.md#6."
+
+[[rule]]
+id = "arg-used"
+area = "args"
+weight = 2
+on = "arg"
+code = "arg-used"
+says = "every ARG and slot is read by a command, quoted text, an IF or a skill"
+
+# ── SECRETs ───────────────────────────────────────────────
+
+[[rule]]
+id = "secret-name"
+area = "secrets"
+weight = 1
+on = "secret"
+code = "secret-name"
+says = "a SECRET is named in capitals, as its program reads it"
+
+[[rule]]
+id = "secret-used"
+area = "secrets"
+weight = 2
+on = "secret"
+code = "secret-used"
+says = "every SECRET is named in a command, a task or a skill"
+
+[[rule]]
+id = "secret-argv"
+area = "secrets"
+weight = 2
+on = "secret-text"
+ask = "Do the commands in `text` put the value of the environment variable `secret` into a program's command-line arguments, where the process list shows it? Reading it from the environment, a file or stdin does not count."
+pass = "no"
+says = "a secret never appears in a command line"
+
+# ── FACTs ─────────────────────────────────────────────────
+
+[[rule]]
+id = "fact-number"
+area = "facts"
+weight = 2
+on = "fact-number"
+ask = "A command will print the value described in `what`. What will it print?"
+choices = { number = "one number", other = "a word, text, lines or several values" }
+pass = "number"
+says = "a quoted FACT compared with a number says it prints one number"
+
+[[rule]]
+id = "fact-exit"
+area = "facts"
+weight = 2
+on = "fact-exit"
+ask = "This fact is used as a condition: it holds when its command exits 0. Which describes `what`?"
+choices = { exit = "says when the command succeeds or exits 0, or names a condition that is true or false", other = "names a thing or a value, without saying when it holds" }
+pass = "exit"
+says = "a quoted FACT used as a condition says when it exits 0"
+
+[[rule]]
+id = "fact-reads"
+area = "facts"
+weight = 3
+on = "fact-quoted"
+ask = "Does `what` describe something to read from the box, rather than something to change on it?"
+pass = "yes"
+says = "a quoted FACT describes a reading, not a change"
+
+[[rule]]
+id = "fact-command-reads"
+area = "facts"
+weight = 3
+on = "fact-command"
+ask = "Does `command` change anything on the box: install, write, delete, restart, or refresh a cache?"
+pass = "no"
+says = "a FACT command only reads"
+why = "Facts run every few minutes: LIMITS.md#7."
+
+[[rule]]
+id = "follow-trusted"
+area = "facts"
+weight = 2
+on = "fact-follow"
+ask = "Whose words can the lines described in `source` contain?"
+choices = { service = "only messages the service and the system write about their own work, such as warnings and errors", outsiders = "also words chosen by outside people, such as chat messages, request paths, user agents or queries sent by an app" }
+pass = "service"
+says = "a FOLLOW fact reads only lines the service writes about itself"
+why = "Text on the box can steer the decider: LIMITS.md#3."
+
+[[rule]]
+id = "command-syntax"
+area = "facts"
+weight = 3
+on = "command"
+code = "bash-syntax"
+says = "every command passes `bash -n`"
+
+# ── GOALs ─────────────────────────────────────────────────
+
+[[rule]]
+id = "goal-has-action"
+area = "goals"
+weight = 3
+on = "goal"
+code = "goal-has-action"
+says = "every goal has an action that may fix it"
+
+[[rule]]
+id = "goal-since-action"
+area = "goals"
+weight = 2
+on = "goal"
+code = "goal-since-action"
+says = "a goal on SINCE(x) lists x among its actions"
+
+[[rule]]
+id = "goal-names-facts"
+area = "goals"
+weight = 2
+on = "goal-quoted"
+code = "goal-names-facts"
+says = "a quoted goal names the facts it reads in backticks"
+
+[[rule]]
+id = "goal-no-threshold"
+area = "goals"
+weight = 3
+on = "goal-quoted"
+ask = "Does `condition` compare a number with a limit, such as a size, a count, a percentage or an age?"
+pass = "no"
+says = "a threshold is code, not prose"
+why = "The decider does not compare numbers inside a sentence: LIMITS.md#1."
+
+# ── ACTIONs ───────────────────────────────────────────────
+
+[[rule]]
+id = "when-situation"
+area = "actions"
+weight = 3
+on = "action"
+fields = ["when"]
+ask = "Which describes `when`?"
+choices = { situation = "what is wrong or what happened, such as a crash, a full disk, a missing package or an old backup", steps = "what to do, such as restarting, deleting, installing or upgrading something" }
+pass = "situation"
+says = "WHEN says when the action is the fix, not what it does"
+why = "The decider picks an action by its WHEN alone: LIMITS.md#2."
+
+[[rule]]
+id = "whens-apart"
+area = "actions"
+weight = 2
+on = "action-pair"
+ask = "Is there a common situation in which both `a` and `b` apply?"
+pass = "no"
+says = "two actions for one goal have WHENs that do not overlap"
+
+[[rule]]
+id = "action-steps"
+area = "actions"
+weight = 3
+on = "action"
+code = "action-steps"
+says = "every action has a step"
+
+[[rule]]
+id = "within-long-enough"
+area = "actions"
+weight = 2
+on = "action"
+code = "within"
+ask = "How long does the work in `steps` take at most on a typical server for this service, including any wait for it to finish?"
+choices = { seconds = "under a minute", minutes = "one to 15 minutes", hour = "15 to 60 minutes", hours = "one to 12 hours", days = "more than 12 hours" }
+says = "WITHIN gives the action enough time"
+
+[[rule]]
+id = "risky-asks"
+area = "actions"
+weight = 3
+on = "action"
+unless = "asked-before"
+ask = "Could the work in `steps` delete or overwrite the service's live data, or keep the service down for much longer than a restart does?"
+pass = "no"
+says = "an action that can lose data or keep the service down has ASK BEFORE"
+
+[[rule]]
+id = "do-specific"
+area = "actions"
+weight = 2
+on = "do"
+ask = "Which describes `task` best?"
+choices = { specific = "names the thing to change or the result to reach, such as a package, a setting, a file, a backup or a goal", vague = "only says to fix, handle, set up, tune or improve the service, or to do something properly, without naming what" }
+pass = "specific"
+says = "a DO task names what to change"
+
+[[rule]]
+id = "run-repeatable"
+area = "actions"
+weight = 2
+on = "run"
+ask = "Is running `script` twice in a row as safe as running it once?"
+pass = "yes"
+says = "a RUN step is safe to run twice"
+why = "TRIES and learned steps run an action again."
+
+[[rule]]
+id = "run-unattended"
+area = "actions"
+weight = 2
+on = "run"
+ask = "Could `script` stop and wait for a person, such as at a prompt, a pager or an editor?"
+pass = "no"
+says = "a RUN step never waits for input"
+
+[[rule]]
+id = "literal-arg"
+area = "actions"
+weight = 2
+on = "command"
+code = "literal-arg"
+says = "a command reads an ARG as $name, not its default written out"
+
+[[rule]]
+id = "catch-all"
+area = "actions"
+weight = 2
+on = "weave"
+unless = "no-do"
+code = "catch-all"
+says = "one action without FOR takes what no other action fits"
+
+[[rule]]
+id = "catch-all-safe"
+area = "actions"
+weight = 2
+on = "action-catch-all"
+when = "stateful"
+ask = "Does `task` forbid losing or deleting the service's data?"
+pass = "yes"
+says = "the catch-all task forbids losing data"
+
+# ── Rules ─────────────────────────────────────────────────
+
+[[rule]]
+id = "rule-no-number"
+area = "rules"
+weight = 3
+on = "rule-quoted"
+ask = "Does `text` set a limit with a number, such as a minimum version, a maximum size, a count or a time limit?"
+pass = "no"
+says = "a rule on a number is NEVER IF or ASK IF, in code"
+why = "LIMITS.md#1."
+
+[[rule]]
+id = "rule-concrete"
+area = "rules"
+weight = 2
+on = "rule-quoted"
+ask = "The coder runs shell commands, each with a one-line purpose, and each is checked against the rule in `text`. Which describes the rule?"
+choices = { concrete = "names an action on the box that one command and its purpose can show, such as deleting a directory, opening a port, dropping a table or upgrading a named program", vague = "names a quality or an outcome that no single command shows, such as being careful, secure or fast" }
+pass = "concrete"
+says = "a quoted rule names something one command can do"
+why = "Quoted rules gate each coder command: LIMITS.md#5."
+
+# ── SKILLs ────────────────────────────────────────────────
+
+[[rule]]
+id = "skill-reached"
+area = "skills"
+weight = 2
+on = "skill"
+ask = "The coder gets this skill when the situation in `when` comes up in its job. On this `box`, for this `service`, which describes the skill?"
+choices = { reached = "the situation in `when` can come up in at least one job in `jobs`", unreached = "the situation in `when` cannot come up in any job in `jobs` on this box, so the coder never needs it" }
+pass = "reached"
+says = "a skill helps with at least one DO task"
+
+[[rule]]
+id = "skill-specific"
+area = "skills"
+weight = 2
+on = "skill"
+ask = "Does `body` give facts specific to this software, such as file paths, commands, settings or error messages, beyond general advice?"
+pass = "yes"
+says = "a skill gives facts specific to the software"
+
+[[rule]]
+id = "skill-warns"
+area = "skills"
+weight = 1
+on = "skill"
+ask = "Does `body` say what not to do, or what goes wrong, in this situation?"
+pass = "yes"
+says = "a skill says what not to do"
+
+# ── Coverage ──────────────────────────────────────────────
+
+[[rule]]
+id = "cov-installed"
+area = "coverage"
+weight = 3
+on = "weave"
+ask = "Is there a goal in `goals` that checks that the software is installed?"
+pass = "yes"
+says = "a goal checks that the software is installed"
+
+[[rule]]
+id = "cov-running"
+area = "coverage"
+weight = 3
+on = "weave"
+ask = "Is there a goal in `goals` that checks that the service runs and answers?"
+pass = "yes"
+says = "a goal checks that the service runs and answers"
+
+[[rule]]
+id = "cov-disk"
+area = "coverage"
+weight = 2
+on = "weave"
+ask = "Is there a goal in `goals` that checks that a disk has room?"
+pass = "yes"
+says = "a goal checks disk room"
+
+[[rule]]
+id = "cov-logs"
+area = "coverage"
+weight = 2
+on = "weave"
+ask = "Is there a goal in `goals` that reads new log lines for problems?"
+pass = "yes"
+says = "a goal reads the logs"
+
+[[rule]]
+id = "cov-updates"
+area = "coverage"
+weight = 2
+on = "weave"
+ask = "Is there a goal in `goals` that checks for pending updates or keeps the software current?"
+pass = "yes"
+says = "a goal keeps the software updated"
+
+[[rule]]
+id = "cov-exposure"
+area = "coverage"
+weight = 2
+on = "weave"
+ask = "Is there a goal or a rule in `goals` or `rules` that limits which networks can reach the service?"
+pass = "yes"
+says = "a goal or rule limits who can reach the service"
+
+[[rule]]
+id = "cov-backup"
+area = "coverage"
+weight = 3
+on = "weave"
+when = "stateful"
+ask = "Is there a goal in `goals` that checks that a recent backup exists?"
+pass = "yes"
+says = "a goal checks for a recent backup"
+
+[[rule]]
+id = "cov-drill"
+area = "coverage"
+weight = 2
+on = "weave"
+when = "stateful"
+ask = "Is there a goal in `goals` that checks that a backup can be restored?"
+pass = "yes"
+says = "a goal proves that backups restore"
+
+[[rule]]
+id = "cov-restore"
+area = "coverage"
+weight = 2
+on = "weave"
+when = "stateful"
+ask = "Is there an action in `actions` that restores the service's data from a backup?"
+pass = "yes"
+says = "an action restores from a backup"
