@@ -63,7 +63,7 @@ export function Requests({ n }: { n: number }) {
           <div className="check-why">
             <Code name="slot" label="The history ARG and the ASK IF rule of the ethereum weave" className="weave" />
             <p>
-              The decider fills <code>blocks = 1000</code>. Code compares it with 10064: a threshold is code, not prose.
+              The decider fills <code>blocks = 1000</code>. Code compares it with 10064: numbers are compared in code, not by the model.
             </p>
           </div>
         </div>

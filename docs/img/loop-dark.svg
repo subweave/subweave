@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="290" viewBox="0 0 880 290" role="img" aria-label="The Subweave loop: check the goals, the decider picks an action, the rules gate it, the steps run, the goal must hold within its time">
+<title>The Subweave loop: check the goals, the decider picks an action, the rules gate it, the steps run, the goal must hold within its time</title>
+<rect x="0.5" y="0.5" width="879" height="289" rx="12" fill="#0d0f12" stroke="#3a3f49"/>
+<defs><marker id="a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L8 4 L0 8 z" fill="#979ca7"/></marker></defs>
+<rect x="24.5" y="118.5" width="136" height="52" rx="5" fill="#0d0f12" stroke="#3a3f49" stroke-width="1.25"/>
+<rect x="24.5" y="118.5" width="136" height="52" rx="5" fill="#0d0f12" stroke="none" fill-opacity="0"/>
+<text x="92" y="140.5" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e8e9ec">check</text><text x="92" y="156.5" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#c4c7ce">the goals that are due</text>
+<rect x="198.5" y="118.5" width="136" height="52" rx="5" fill="#0d0f12" stroke="#b9a2ff" stroke-width="1.25"/>
+<rect x="198.5" y="118.5" width="136" height="52" rx="5" fill="#b9a2ff" fill-opacity="0.09" stroke="none"/>
+<text x="266" y="140.5" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#b9a2ff">decide</text><text x="266" y="156.5" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#b9a2ff">the decider picks</text>
+<path d="M161 144.5 H197" fill="none" stroke="#979ca7" stroke-width="1.25" marker-end="url(#a)"/>
+<rect x="372.5" y="118.5" width="136" height="52" rx="5" fill="#0d0f12" stroke="#3a3f49" stroke-width="1.25"/>
+<rect x="372.5" y="118.5" width="136" height="52" rx="5" fill="#0d0f12" stroke="none" fill-opacity="0"/>
+<text x="440" y="140.5" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e8e9ec">gate</text><text x="440" y="156.5" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#c4c7ce">the rules, in code</text>
+<path d="M335 144.5 H371" fill="none" stroke="#979ca7" stroke-width="1.25" marker-end="url(#a)"/>
+<rect x="546.5" y="118.5" width="136" height="52" rx="5" fill="#0d0f12" stroke="#3a3f49" stroke-width="1.25"/>
+<rect x="546.5" y="118.5" width="136" height="52" rx="5" fill="#0d0f12" stroke="none" fill-opacity="0"/>
+<text x="614" y="140.5" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e8e9ec">act</text><text x="614" y="156.5" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#c4c7ce">the steps run</text>
+<path d="M509 144.5 H545" fill="none" stroke="#979ca7" stroke-width="1.25" marker-end="url(#a)"/>
+<rect x="720.5" y="118.5" width="136" height="52" rx="5" fill="#0d0f12" stroke="#3a3f49" stroke-width="1.25"/>
+<rect x="720.5" y="118.5" width="136" height="52" rx="5" fill="#0d0f12" stroke="none" fill-opacity="0"/>
+<text x="788" y="140.5" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e8e9ec">hold</text><text x="788" y="156.5" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#c4c7ce">within WITHIN?</text>
+<path d="M683 144.5 H719" fill="none" stroke="#979ca7" stroke-width="1.25" marker-end="url(#a)"/>
+<rect x="192.5" y="30.5" width="148" height="44" rx="22" fill="#0d0f12" stroke="#3fd39c" stroke-width="1.25"/>
+<rect x="192.5" y="30.5" width="148" height="44" rx="22" fill="#3fd39c" fill-opacity="0.09" stroke="none"/>
+<text x="266" y="48.5" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#3fd39c">under 0.5, or steered:</text><text x="266" y="64.5" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#3fd39c">ask the person</text>
+<path d="M266.5 118 V76" fill="none" stroke="#979ca7" stroke-width="1.25" marker-end="url(#a)"/>
+<rect x="372.5" y="38.5" width="136" height="30" rx="15" fill="#0d0f12" stroke="#3fd39c" stroke-width="1.25"/>
+<rect x="372.5" y="38.5" width="136" height="30" rx="15" fill="#3fd39c" fill-opacity="0.09" stroke="none"/>
+<text x="440" y="57.5" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#3fd39c">ASK: ask the person</text>
+<path d="M440.5 118 V70" fill="none" stroke="#979ca7" stroke-width="1.25" marker-end="url(#a)"/>
+<rect x="372.5" y="204.5" width="136" height="30" rx="5" fill="#0d0f12" stroke="#3a3f49" stroke-width="1.25"/>
+<rect x="372.5" y="204.5" width="136" height="30" rx="5" fill="#0d0f12" stroke="none" fill-opacity="0"/>
+<text x="440" y="223.5" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#c4c7ce">NEVER: pick again</text>
+<path d="M440.5 171 V202" fill="none" stroke="#979ca7" stroke-width="1.25" marker-end="url(#a)"/>
+<text x="614.5" y="196" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" fill="#979ca7">learned steps first,</text>
+<text x="614.5" y="212" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" fill="#979ca7">else RUN, DO, ADD</text>
+<rect x="720.5" y="38.5" width="136" height="30" rx="5" fill="#0d0f12" stroke="#3a3f49" stroke-width="1.25"/>
+<rect x="720.5" y="38.5" width="136" height="30" rx="5" fill="#0d0f12" stroke="none" fill-opacity="0"/>
+<text x="788" y="57.5" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#c4c7ce">yes: learn, tell</text>
+<path d="M788.5 118 V70" fill="none" stroke="#979ca7" stroke-width="1.25" marker-end="url(#a)"/>
+<rect x="720.5" y="204.5" width="136" height="30" rx="5" fill="#0d0f12" stroke="#b9a2ff" stroke-width="1.25"/>
+<rect x="720.5" y="204.5" width="136" height="30" rx="5" fill="#b9a2ff" fill-opacity="0.09" stroke="none"/>
+<text x="788" y="223.5" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#b9a2ff">no, TRIES left: pick again</text>
+<path d="M788.5 171 V202" fill="none" stroke="#979ca7" stroke-width="1.25" marker-end="url(#a)"/>
+<rect x="720.5" y="244.5" width="136" height="30" rx="15" fill="#0d0f12" stroke="#3fd39c" stroke-width="1.25"/>
+<rect x="720.5" y="244.5" width="136" height="30" rx="15" fill="#3fd39c" fill-opacity="0.09" stroke="none"/>
+<text x="788" y="263.5" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#3fd39c">TRIES used: ask</text>
+<path d="M788.5 38 V16 H92.5 V117" fill="none" stroke="#979ca7" stroke-width="1.25" stroke-dasharray="4 3" marker-end="url(#a)"/>
+<text x="179.5" y="12" text-anchor="middle" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="10.5" fill="#979ca7">next tick</text>
+<rect x="24.5" y="250.5" width="14" height="10" rx="3" fill="#0d0f12" fill-opacity="1" stroke="#3a3f49" stroke-width="1.25"/>
+<text x="46" y="260" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#979ca7">code</text>
+<rect x="120.5" y="250.5" width="14" height="10" rx="3" fill="#b9a2ff" fill-opacity="0.12" stroke="#b9a2ff" stroke-width="1.25"/>
+<text x="142" y="260" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#979ca7">model</text>
+<rect x="216.5" y="250.5" width="14" height="10" rx="5" fill="#3fd39c" fill-opacity="0.12" stroke="#3fd39c" stroke-width="1.25"/>
+<text x="238" y="260" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#979ca7">the person</text>
+</svg>

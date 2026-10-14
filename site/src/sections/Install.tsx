@@ -15,8 +15,7 @@ export function Install({ n }: { n: number }) {
             github.com/subweave/subweave
           </a>
           <p>
-            Open source, MIT. The format: <a href={`${REPO}/blob/main/WEAVEFILE.md`}>WEAVEFILE.md</a>. What it does
-            badly: <a href={`${REPO}/blob/main/LIMITS.md`}>LIMITS.md</a>.
+            Open source, MIT. The format: <a href={`${REPO}/blob/main/WEAVEFILE.md`}>WEAVEFILE.md</a>.
           </p>
         </div>
       </div>

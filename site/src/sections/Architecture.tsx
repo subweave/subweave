@@ -154,9 +154,95 @@ function Diagram({ layout, className }: { layout: Layout; className: string }) {
   );
 }
 
+function Chips({ items, note }: { items: string[]; note?: string }) {
+  return (
+    <div className="why-chips">
+      {items.map((c) => (
+        <span key={c} className="why-chip">
+          {c}
+        </span>
+      ))}
+      {note && <span className="why-note">{note}</span>}
+    </div>
+  );
+}
+
+// A sysadmin's map: watch, try, then call someone.
+function MapTree() {
+  return (
+    <svg className="why-map" viewBox="0 0 300 92" aria-hidden="true">
+      <path className="why-map-edge" d="M14 20 V46 H34 M14 46 V72 H58" />
+      <circle className="why-map-dot is-code" cx="14" cy="20" r="5" />
+      <text x="28" y="24">watch this</text>
+      <circle className="why-map-dot is-model" cx="38" cy="46" r="5" />
+      <text x="52" y="50">if it breaks, try that</text>
+      <circle className="why-map-dot is-person" cx="62" cy="72" r="5" />
+      <text x="76" y="76">if that fails, call someone</text>
+    </svg>
+  );
+}
+
+const COSTS: [string, string, string, number][] = [
+  ["checks", "code, free", "code", 4],
+  ["picks", "Jev, about $0.00004", "model", 22],
+  ["new trouble", "coder", "coder", 100],
+];
+
+function Costs() {
+  return (
+    <ul className="why-costs">
+      {COSTS.map(([what, who, tone, w]) => (
+        <li key={what} className={`why-cost is-${tone}`}>
+          <span className="why-cost-what">{what}</span>
+          <span className="why-cost-arrow" aria-hidden="true">
+            →
+          </span>
+          <span className="why-cost-who">{who}</span>
+          <span className="why-bar" aria-hidden="true">
+            <span style={{ width: `${w}%` }} />
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+const WHY: { title: string; body: string; visual: ReactNode }[] = [
+  {
+    title: "Skills are too loose.",
+    body: "A skill file is a pile of tips. It doesn't say what to watch, what to do when something breaks, or when to stop and ask you.",
+    visual: <Chips items={["tip", "tip", "tip", "tip"]} note="what to watch? when to ask?" />,
+  },
+  {
+    title: "Agents are heavy.",
+    body: "A coding agent wakes a big model for every step. Subweave checks with plain code, picks the next step with a tiny decision model, and calls the coder only when something new breaks. A fix that worked is saved and replayed with no model at all.",
+    visual: <Costs />,
+  },
+  {
+    title: "DevOps know-how is a map.",
+    body: "Ask a good sysadmin how they run Postgres and you get a map: watch this, if it breaks try that, if that fails call someone. That map is the Weavefile. Skills are the know-how each step needs.",
+    visual: <MapTree />,
+  },
+  {
+    title: "Write the boring parts once.",
+    body: "Every service needs settings, secrets, alerts, a way to ask you and a log of what happened. Subweave does those for every weave, so a Weavefile holds only what's special about your service.",
+    visual: <Chips items={["ARGs", "secrets", "channels", "asks", "journal"]} note="built in" />,
+  },
+];
+
 export function Architecture({ n }: { n: number }) {
   return (
-    <Section id="architecture" n={n} kicker="Architecture" title="One daemon, two models, and you.">
+    <Section id="architecture" n={n} kicker="Why Subweave" title="Why not just hand an agent a skill file?">
+      <ul className="why-grid">
+        {WHY.map((w) => (
+          <li key={w.title} className="why-card">
+            <div className="why-visual">{w.visual}</div>
+            <h3>{w.title}</h3>
+            <p>{w.body}</p>
+          </li>
+        ))}
+      </ul>
+      <h3 className="arch-heading">How it fits together</h3>
       <div className="arch-grid">
         <figure className="arch-figure">
           <Diagram layout={DESKTOP} className="arch-wide" />
