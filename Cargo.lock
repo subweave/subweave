@@ -1633,6 +1633,8 @@ dependencies = [
  "clap",
  "futures-util",
  "hex",
+ "hyper",
+ "hyper-util",
  "indexmap",
  "jiff",
  "lettre",
@@ -1646,6 +1648,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tower",
  "uuid",
 ]
 

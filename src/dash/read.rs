@@ -3,11 +3,11 @@
 use std::collections::BTreeSet;
 
 use axum::Json;
-use axum::extract::{Path, Query};
+use axum::extract::Query;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::ApiError;
+use super::{ApiError, Svc};
 use crate::cli::log::kind_str;
 use crate::cli::stats;
 use crate::service::{self, Line, Spec, Status};
@@ -60,7 +60,7 @@ pub(crate) async fn services() -> Result<Json<Value>, ApiError> {
     Ok(Json(Value::Array(out)))
 }
 
-pub(crate) async fn service(Path(s): Path<String>) -> Result<Json<Value>, ApiError> {
+pub(crate) async fn service(Svc(s): Svc) -> Result<Json<Value>, ApiError> {
     let spec = spec(&s)?;
     let status = service::status(&s).ok().flatten();
     let weavefile = std::fs::read_to_string(paths::weavefile(&s)).ok();
@@ -92,7 +92,7 @@ pub(crate) struct JournalQuery {
 }
 
 pub(crate) async fn journal(
-    Path(s): Path<String>,
+    Svc(s): Svc,
     Query(q): Query<JournalQuery>,
 ) -> Result<Json<Value>, ApiError> {
     spec(&s)?;
@@ -141,7 +141,7 @@ pub(crate) struct Range {
 
 /// Numeric fact values from `check` lines, the mean of each step, as `stats` reads them.
 pub(crate) async fn metrics(
-    Path(s): Path<String>,
+    Svc(s): Svc,
     Query(q): Query<Range>,
 ) -> Result<Json<Value>, ApiError> {
     spec(&s)?;

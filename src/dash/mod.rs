@@ -11,18 +11,30 @@ mod logs;
 mod read;
 mod vitals;
 
-use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::extract::{FromRequest, Request};
+use axum::extract::{ConnectInfo, FromRequest, FromRequestParts, RawPathParams, Request};
 use axum::http::StatusCode;
+use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router, middleware};
+use hyper_util::rt::{TokioIo, TokioTimer};
 use serde::de::DeserializeOwned;
 use serde_json::json;
+use tokio::sync::Semaphore;
+use tower::ServiceExt;
+
+use crate::service;
+
+/// A client must send its request headers, and a JSON body, within these.
+const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+const BODY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Connections open at once; the next waits in the kernel's queue.
+const CONNECTIONS: usize = 256;
 
 pub use config::Config;
 
@@ -70,15 +82,45 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for Body<T> {
     type Rejection = ApiError;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, ApiError> {
-        match Json::<T>::from_request(req, state).await {
-            Ok(Json(v)) => Ok(Body(v)),
-            Err(e) => Err(ApiError::bad(e.body_text())),
+        match tokio::time::timeout(BODY_TIMEOUT, Json::<T>::from_request(req, state)).await {
+            Ok(Ok(Json(v))) => Ok(Body(v)),
+            Ok(Err(e)) => Err(ApiError::bad(e.body_text())),
+            Err(_) => Err(ApiError(
+                StatusCode::REQUEST_TIMEOUT,
+                "the request body took too long".into(),
+            )),
         }
+    }
+}
+
+/// The `{s}` of a path: a service the daemon keeps. Every route reads it this way, so no
+/// path is built from a name that is not one.
+pub(crate) struct Svc(pub String);
+
+impl<S: Send + Sync> FromRequestParts<S> for Svc {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, ApiError> {
+        let params = RawPathParams::from_request_parts(parts, state)
+            .await
+            .map_err(|e| ApiError::bad(e.body_text()))?;
+        let s = params
+            .iter()
+            .find(|(k, _)| *k == "s")
+            .map(|(_, v)| v.to_string())
+            .unwrap_or_default();
+        let known = crate::daemon::valid_name(&s)
+            && service::names().map_err(ApiError::internal)?.contains(&s);
+        if !known {
+            return Err(ApiError::not_found(format!("no service {s} here")));
+        }
+        Ok(Svc(s))
     }
 }
 
 /// Runs the dashboard in the foreground until SIGINT or SIGTERM.
 pub async fn serve(config: Config) -> Result<()> {
+    config.need_password()?;
     let ip = config.addr()?;
     let port = config.port;
     let app = Arc::new(App {
@@ -125,14 +167,38 @@ pub async fn serve(config: Config) -> Result<()> {
     );
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("listening for SIGTERM")?;
+    let conns = Arc::new(Semaphore::new(CONNECTIONS));
     // Not a graceful shutdown: open event streams never end on their own.
-    let server = axum::serve(
-        listener,
-        router.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .into_future();
+    let accept = async {
+        loop {
+            let Ok(permit) = conns.clone().acquire_owned().await else {
+                return;
+            };
+            let (stream, peer) = match listener.accept().await {
+                Ok(c) => c,
+                Err(e) => {
+                    // Out of file descriptors, most likely: let some close.
+                    eprintln!("accept: {e}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+            let router = router.clone();
+            tokio::spawn(async move {
+                let svc = hyper::service::service_fn(move |mut req: Request<hyper::body::Incoming>| {
+                    req.extensions_mut().insert(ConnectInfo(peer));
+                    router.clone().oneshot(req)
+                });
+                let mut http = hyper::server::conn::http1::Builder::new();
+                http.timer(TokioTimer::new())
+                    .header_read_timeout(HEADER_TIMEOUT);
+                let _ = http.serve_connection(TokioIo::new(stream), svc).await;
+                drop(permit);
+            });
+        }
+    };
     tokio::select! {
-        r = server => r.context("serving the dashboard"),
+        () = accept => Ok(()),
         _ = tokio::signal::ctrl_c() => Ok(()),
         _ = term.recv() => Ok(()),
     }

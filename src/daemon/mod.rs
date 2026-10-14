@@ -444,7 +444,7 @@ fn answers_action(service: &str, word: &str) -> Option<String> {
     w.action(word).map(|a| a.name.clone())
 }
 
-fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('.')
         && name

@@ -1,12 +1,15 @@
 //! Log streams: each FOLLOW fact (its recent values from `check` lines, then the live
 //! lines of its command, run here with the service's environment and redaction) and the
-//! box's systemd journal. A stream's process ends when its client leaves.
+//! box's systemd journal. A stream's process ends when its client leaves; a session
+//! holds at most 8.
 
 use std::convert::Infallible;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, Query};
+use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
@@ -14,8 +17,8 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::sync::mpsc;
 
-use super::ApiError;
 use super::read::spec;
+use super::{ApiError, App, Svc, auth};
 use crate::daemon::{bash, command_env, kill_group, now, redact};
 use crate::service::{self, Kind};
 use crate::weave::{FactSource, Weave};
@@ -30,7 +33,7 @@ fn weave_of(s: &str) -> Result<Weave, ApiError> {
         .map_err(|_| ApiError::conflict(format!("the Weavefile of {s} does not parse")))
 }
 
-pub(crate) async fn list(Path(s): Path<String>) -> Result<Json<Value>, ApiError> {
+pub(crate) async fn list(Svc(s): Svc) -> Result<Json<Value>, ApiError> {
     spec(&s)?;
     let w = weave_of(&s)?;
     let mut out: Vec<Value> = w
@@ -73,17 +76,6 @@ fn line(t: &str, text: &str, level: &str) -> Event {
     Event::default()
         .event("line")
         .data(json!({"t": t, "text": text, "level": level}).to_string())
-}
-
-/// Kills a stream's process group when the client leaves.
-struct Group(Option<u32>);
-
-impl Drop for Group {
-    fn drop(&mut self) {
-        if let Some(pid) = self.0 {
-            kill_group(pid);
-        }
-    }
 }
 
 /// Sends each line of a pipe, redacted, with `parse` making it an event.
@@ -157,12 +149,39 @@ fn valid_priority(p: &str) -> bool {
     )
 }
 
+#[derive(Deserialize)]
+pub(crate) struct LogName {
+    name: String,
+}
+
+/// Every value a box journal line could leak: each service's SECRETs, and the channel
+/// and provider keys. Longest first.
+fn box_secrets() -> Vec<(String, String)> {
+    let mut all: Vec<(String, String)> = Vec::new();
+    for name in service::names().unwrap_or_default() {
+        if let Ok(spec) = service::spec(&name) {
+            all.extend(command_env(&name, &spec).1);
+        }
+    }
+    all.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.cmp(b)));
+    all.dedup();
+    all
+}
+
 pub(crate) async fn stream(
-    Path((s, name)): Path<(String, String)>,
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Svc(s): Svc,
+    Path(LogName { name }): Path<LogName>,
     Query(q): Query<BoxQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let spec = spec(&s)?;
-    let (env, secrets) = command_env(&s, &spec);
+    let slot = auth::stream_slot(&app, &headers)?;
+    let (env, secrets) = if name == BOX {
+        (Default::default(), box_secrets())
+    } else {
+        command_env(&s, &spec)
+    };
     let (tx, rx) = mpsc::channel::<Event>(256);
     let mut backlog: Vec<Event> = Vec::new();
     let child = if name == BOX {
@@ -236,7 +255,7 @@ pub(crate) async fn stream(
             return Ok(Sse::new(s).keep_alive(KeepAlive::default()));
         }
     };
-    let group = Group(child.id());
+    let pid = child.id();
     let plain = |l: &str| Some((now(), l.to_string(), level_of(l)));
     let out = if journal {
         pump(child.stdout.take(), tx.clone(), secrets.clone(), journal_line)
@@ -244,12 +263,28 @@ pub(crate) async fn stream(
         pump(child.stdout.take(), tx.clone(), secrets.clone(), plain)
     };
     let err = pump(child.stderr.take(), tx.clone(), secrets, plain);
-    // The child's end, said after the last of its lines.
+    // Only this task reaps the child, and it kills the group first when the client
+    // leaves: a group is never killed after its leader was reaped and its pid reused.
     tokio::spawn(async move {
-        for p in [out, err].into_iter().flatten() {
-            let _ = p.await;
+        let status = tokio::select! {
+            s = child.wait() => s,
+            () = tx.closed() => {
+                if let Some(pid) = pid {
+                    kill_group(pid);
+                }
+                child.wait().await
+            }
+        };
+        let drained = async {
+            for p in [out, err].into_iter().flatten() {
+                let _ = p.await;
+            }
+        };
+        // The end is said after the last of the child's lines.
+        tokio::select! {
+            () = drained => {}
+            () = tx.closed() => return,
         }
-        let status = child.wait().await;
         let text = match status {
             Ok(s) => format!("the command ended: {s}"),
             Err(e) => format!("the command ended: {e}"),
@@ -258,9 +293,9 @@ pub(crate) async fn stream(
             .send(Event::default().event("end").data(json!({"text": text}).to_string()))
             .await;
     });
-    let live = stream::unfold((rx, group), |(mut rx, group)| async move {
+    let live = stream::unfold((rx, slot), |(mut rx, slot)| async move {
         let ev = rx.recv().await?;
-        Some((ev, (rx, group)))
+        Some((ev, (rx, slot)))
     });
     let all = stream::iter(backlog).chain(live).map(Ok).right_stream();
     Ok(Sse::new(all).keep_alive(KeepAlive::default()))

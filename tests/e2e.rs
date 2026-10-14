@@ -160,6 +160,8 @@ async fn systemone(State(m): State<Mock>, headers: HeaderMap, body: String) -> a
             }
             // A learned fact command: does it change the box?
             "changes" => noul(0.03),
+            // Does it hide its read's failure behind a fallback value?
+            "hides" => noul(0.03),
             // A learned fact's printed value: `served` is 0 or 1, never an HTTP status.
             "fits" => {
                 let printed = text(&state["printed"]);
@@ -562,6 +564,12 @@ async fn sse_until(b: &Box_, events: &mut reqwest::Response, got: &mut String, w
 async fn dashboard(b: &mut Box_) {
     use tokio::io::AsyncWriteExt;
     let port = free_port();
+    let o = b.sw(&["dash"]).await;
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        !o.status.success() && err.contains("set one first: subweave dash --password"),
+        "a dashboard with no password does not start: {err}"
+    );
     let mut set = b.command();
     set.args(["dash", "--port", &port.to_string(), "--password"])
         .stdin(Stdio::piped())
@@ -599,7 +607,14 @@ async fn dashboard(b: &mut Box_) {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(session, Some(json!({"auth": "password", "ok": false})));
+    assert_eq!(session, Some(json!({"ok": false})));
+    let r = http
+        .get(api("/session"))
+        .header("host", "rebound.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 421, "a host name the dashboard does not answer to");
     let r = http.get(api("/services")).send().await.unwrap();
     assert_eq!(r.status(), 401, "no session, no services");
     let r = http
@@ -1195,6 +1210,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
             .find(|h| h["title"] == format!("#{n} withdrawn"))
     })
     .await;
+    b.holds(&["installed", "running", "rotated"], 15).await;
 
     // 7. ps, log, learned.
     phase("7 ps, log, learned");

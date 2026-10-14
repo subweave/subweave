@@ -1,4 +1,5 @@
-//! `config()/dash.json`: where the dashboard listens and its password's argon2id hash.
+//! `config()/dash.json`: where the dashboard listens, the host names it answers to, and
+//! its password's argon2id hash.
 
 use std::net::IpAddr;
 
@@ -11,8 +12,12 @@ use crate::paths;
 pub struct Config {
     pub bind: String,
     pub port: u16,
-    /// An argon2id PHC string; `None`: no login, loopback only.
+    /// An argon2id PHC string. The dashboard does not start without one.
     pub password: Option<String>,
+    /// Names the `Host` header may carry besides the bind address, loopback names and
+    /// the box's own IP addresses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
 }
 
 impl Default for Config {
@@ -21,6 +26,7 @@ impl Default for Config {
             bind: "127.0.0.1".into(),
             port: 7400,
             password: None,
+            hosts: Vec::new(),
         }
     }
 }
@@ -41,19 +47,18 @@ impl Config {
         crate::channel::write_private(&paths::dash(), &bytes)
     }
 
-    /// The bind address; one that is not loopback needs a password: the dashboard can
-    /// run commands as root.
     pub fn addr(&self) -> Result<IpAddr> {
-        let ip: IpAddr = self
-            .bind
+        self.bind
             .parse()
-            .with_context(|| format!("{:?} is no IP address", self.bind))?;
-        if !ip.is_loopback() && self.password.is_none() {
-            bail!(
-                "a dashboard on {ip} needs a password: subweave dash --password. It can run commands as root."
-            );
+            .with_context(|| format!("{:?} is no IP address", self.bind))
+    }
+
+    /// The password hash, or why the dashboard cannot start: it can run commands as root.
+    pub fn need_password(&self) -> Result<&str> {
+        match self.password.as_deref() {
+            Some(p) => Ok(p),
+            None => bail!("the dashboard has no password: set one first: subweave dash --password"),
         }
-        Ok(ip)
     }
 }
 

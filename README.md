@@ -61,7 +61,7 @@ Each weave's README says what it cannot do. [LIMITS.md](LIMITS.md) says what Sub
 
 ## Dashboard
 
-`subweave dash` serves a web dashboard for a box: goals, live activity, metrics, logs, learned commands and the weave. From it you answer asks, run an action, give the coder a task in words (`subweave task` on the CLI) and change settings in words. It listens on 127.0.0.1:7400 with no password; `subweave dash --bind 0.0.0.0 --password` opens it to the network behind a login, and `subweave dash --install` makes it a systemd unit. See [Dashboard](WEAVEFILE.md#dashboard).
+`subweave dash` serves a web dashboard for a box: goals, live activity, metrics, logs, learned commands and the weave. From it you answer asks, run an action, give the coder a task in words (`subweave task` on the CLI) and change settings in words. It always needs a password: set one with `subweave dash --password`. It listens on 127.0.0.1:7400; `--bind 0.0.0.0` opens it to the network, and `subweave dash --install` makes it a systemd unit. See [Dashboard](WEAVEFILE.md#dashboard).
 
 ## For weave authors
 

@@ -5,13 +5,13 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
 use axum::Json;
-use axum::extract::{ConnectInfo, Path};
+use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::read::spec;
-use super::{ApiError, Body, auth};
+use super::{ApiError, Body, Svc, auth};
 use crate::cli::{act, inbox, learned, tell};
 use crate::plan::Level;
 use crate::service::{self, Command, Spec};
@@ -39,7 +39,7 @@ pub(crate) struct Answer {
 }
 
 pub(crate) async fn answer(
-    Path(s): Path<String>,
+    Svc(s): Svc,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Body(b): Body<Answer>,
@@ -63,7 +63,7 @@ pub(crate) struct Do {
 }
 
 pub(crate) async fn do_action(
-    Path(s): Path<String>,
+    Svc(s): Svc,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Body(b): Body<Do>,
@@ -83,7 +83,7 @@ pub(crate) struct Task {
 }
 
 pub(crate) async fn task(
-    Path(s): Path<String>,
+    Svc(s): Svc,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Body(b): Body<Task>,
@@ -110,7 +110,7 @@ pub(crate) struct Tell {
 /// The `tell` check; with `apply` and nothing in the way, the change goes to the daemon.
 /// A change that turns on a SECRET the daemon does not hold needs a terminal to type it.
 pub(crate) async fn tell(
-    Path(s): Path<String>,
+    Svc(s): Svc,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Body(b): Body<Tell>,
@@ -157,7 +157,7 @@ pub(crate) async fn tell(
 }
 
 pub(crate) async fn stop(
-    Path(s): Path<String>,
+    Svc(s): Svc,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Accepted {
@@ -171,7 +171,7 @@ pub(crate) async fn stop(
 }
 
 pub(crate) async fn start(
-    Path(s): Path<String>,
+    Svc(s): Svc,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Accepted {
@@ -190,7 +190,7 @@ pub(crate) struct Forget {
 }
 
 pub(crate) async fn forget(
-    Path(s): Path<String>,
+    Svc(s): Svc,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Body(b): Body<Forget>,

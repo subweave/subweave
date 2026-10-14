@@ -655,20 +655,23 @@ On the person's computer, `~/.config/subweave/boxes.json` maps each service to i
 It is a client of the daemon's files, like the CLI: it reads `services/` and writes `inbox/`. It runs as its own systemd unit, `subweave-dash.service`.
 
 ```
-subweave dash --install                                  # on 127.0.0.1:7400, no password
+subweave dash --password --on root@host                  # reads the password from stdin
+subweave dash --install --on root@host                   # on 127.0.0.1:7400
 ssh -L 7400:127.0.0.1:7400 root@host                     # then open http://127.0.0.1:7400
-subweave dash --bind 0.0.0.0 --password --on root@host   # reads the password from stdin
+subweave dash --bind 0.0.0.0 --host dash.acme.dev --on root@host
 ```
 
 | Setting | Default | |
 |---|---|---|
-| `--bind <addr>` | `127.0.0.1` | an address that is not loopback needs a password |
+| `--password` | none | one line from stdin, kept as an argon2id hash; the dashboard does not start without it |
+| `--bind <addr>` | `127.0.0.1` | |
 | `--port <n>` | `7400` | |
-| `--password`, `--no-password` | no password | one line from stdin, kept as an argon2id hash |
+| `--host <name>` | none | a host name it answers to besides its address, loopback and the box's IPs |
 
 - With flags, `dash` saves them, restarts the unit when it is installed, and exits.
-- With no password there is no login, and the dashboard listens on loopback only.
-- With a password, the browser logs in once a week. Ten wrong passwords from one address lock it out for 10 minutes. A restart logs everyone out.
+- The browser logs in once a week. Ten wrong passwords from one address, counted before each check, lock it out for 10 minutes. A restart logs everyone out.
+- A request whose `Host` the dashboard does not answer to gets 421: a page elsewhere cannot reach it through DNS rebinding.
+- A client must send its headers and its body within 10 s. At most 256 connections, and 8 log streams per login.
 - The dashboard can run commands as root through the coder. Put it behind HTTPS (a proxy that sends `X-Forwarded-Proto: https`) before it faces the internet.
 - Lines it causes carry `by: "dash@<ip>"`.
 - On Linux it samples the box's CPU, memory, load, disks and network every 10 s.

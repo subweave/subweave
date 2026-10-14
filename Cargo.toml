@@ -22,6 +22,8 @@ base64 = "0.22"
 clap = { version = "4.6", features = ["derive"] }
 futures-util = { version = "0.3", default-features = false }
 hex = "0.4"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 indexmap = { version = "2.14", features = ["serde"] }
 jiff = "0.2"
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1-rustls-tls"] }
@@ -34,6 +36,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse", "preserve_order"] }
+tower = { version = "0.5", features = ["util"] }
 uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]

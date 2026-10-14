@@ -17,11 +17,11 @@ pub struct Args {
     #[arg(long)]
     port: Option<u16>,
     /// Set the password, one line read from stdin; saved, then the command exits
-    #[arg(long, conflicts_with = "no_password")]
-    password: bool,
-    /// Remove the password: no login, and loopback only
     #[arg(long)]
-    no_password: bool,
+    password: bool,
+    /// Answer to this host name too, like dash.acme.dev (repeat for more); saved
+    #[arg(long, value_name = "NAME")]
+    host: Vec<String>,
     /// Install a systemd service that runs the dashboard, and start it (Linux, root)
     #[arg(long)]
     install: bool,
@@ -31,7 +31,7 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<ExitCode> {
-    let set = args.bind.is_some() || args.port.is_some() || args.password || args.no_password;
+    let set = args.bind.is_some() || args.port.is_some() || args.password || !args.host.is_empty();
     if !set && !args.install {
         dash::serve(Config::load()?).await?;
         return Ok(ExitCode::SUCCESS);
@@ -44,8 +44,14 @@ pub async fn run(args: Args) -> Result<ExitCode> {
         if let Some(p) = args.port {
             cfg.port = p;
         }
-        if args.no_password {
-            cfg.password = None;
+        for h in args.host {
+            let h = h.trim().trim_end_matches('.').to_ascii_lowercase();
+            if h.is_empty() || h.contains(['/', ' ', ':']) {
+                bail!("{h:?} is no host name");
+            }
+            if !cfg.hosts.contains(&h) {
+                cfg.hosts.push(h);
+            }
         }
         if args.password {
             let pw = term::secret("dashboard password")?;
@@ -64,16 +70,20 @@ pub async fn run(args: Args) -> Result<ExitCode> {
             if cfg.password.is_some() {
                 "password set"
             } else {
-                "no password"
+                "no password yet: subweave dash --password"
             }
         );
-        if !args.install && std::path::Path::new(&daemon::unit(UNIT)).exists() {
+        if !args.install
+            && cfg.password.is_some()
+            && std::path::Path::new(&daemon::unit(UNIT)).exists()
+        {
             daemon::systemctl(&["restart", UNIT])?;
             println!("restarted {UNIT}");
         }
     }
     if args.install {
         cfg.addr()?;
+        cfg.need_password()?;
         let unit = daemon::install(UNIT, "Subweave dashboard", "dash")?;
         if set {
             daemon::systemctl(&["restart", UNIT])?;
