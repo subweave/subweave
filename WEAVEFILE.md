@@ -279,6 +279,8 @@ ASK   IF blocks < 10064
 
 - A quoted rule checks what the person asked and what the coder writes. The author's own text passes the code rules only: an action the decider picks, a `RUN` step, a recipe, a learned step.
 - A rule that turns on a number is code: `NEVER IF version < 14`, not `NEVER "versions before 14"`.
+- Every box also has the daemon's own rule, `NEVER "cut off SSH access to this box, or risk it: a firewall change that does not allow SSH in the same command, stopping sshd, or taking the network down"`. The person and `--on` reach the box over SSH.
+- Name the service in a rule about the network: `"let PostgreSQL accept connections from the internet"`. SSH is also a connection from the internet, so the wider rule refuses the command that keeps SSH open ([LIMITS.md](LIMITS.md#5-gating-shell-commands-depends-on-their-stated-purpose)).
 - After a refusal, the loop picks again or asks the person.
 - The person answers `yes`, `no`, `always` or `never`. The daemon keeps `always` and `never` in the journal for that rule and action, and does not ask again.
 

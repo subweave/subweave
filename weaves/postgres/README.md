@@ -32,9 +32,10 @@ installed
 │     ├─ current
 │     └─ quiet
 └─ room
+reachable
 ```
 
-One `RUN` step in the file, `systemctl restart`. Every other step is a `DO` task that the box learns once, and 16 of the 18 facts are quoted.
+Two `RUN` steps in the file: `systemctl restart`, and `ufw allow 22/tcp` when ufw is on without SSH. Every other step is a `DO` task that the box learns once, and 16 of the 19 facts are quoted.
 
 ## What happens when
 

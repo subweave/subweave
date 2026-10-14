@@ -30,7 +30,7 @@ SECRET AWS_SECRET_ACCESS_KEY "the secret key for the backup bucket"   IF bucket
 NEVER IF version < 14
 NEVER IF version < major
 NEVER "drop or truncate a database, or delete table rows"
-NEVER "accept connections from the internet"
+NEVER "let PostgreSQL accept connections from the internet"
 NEVER "turn off WAL archiving while a bucket is set"
 NEVER "delete files in pg_wal by hand"
 ASK   BEFORE restore
@@ -65,10 +65,18 @@ EOF
 
 FACT listen    "the value of listen_addresses"
 FACT hba       "the lines of the cluster's pg_hba.conf that are not comments or blank"
-FACT firewall  "the active ufw rules for port 5432, or 'inactive'"
+FACT firewall  "ufw's status, active or inactive, then its rules for port 5432"
+# Exits 0 when ufw is off or allows SSH, so the daemon opens SSH again after a lockout.
+FACT ssh_open  { ufw status 2>/dev/null || true; } \
+                | awk '/^Status: active/ {a = 1} /^(22(\/tcp)?|OpenSSH) +(ALLOW|LIMIT)/ {s = 1} END {exit a && !s}'
 
 GOAL configured  AFTER installed  EVERY 1h \
      "`listen`, `hba` and `firewall` allow connections exactly as access '$access' asks, and no wider"
+GOAL reachable  ssh_open
+
+ACTION open-ssh FOR reachable WITHIN 2m
+  WHEN "ufw is active and does not allow SSH"
+  RUN  ufw allow 22/tcp
 
 ACTION configure FOR configured WITHIN 10m
   WHEN "a connection, TLS, memory or role setting differs from what the ARGs and this box's size ask"

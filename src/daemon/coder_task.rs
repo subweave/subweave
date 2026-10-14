@@ -25,6 +25,12 @@ const MAX_COMMANDS: usize = 40;
 const MAX_CHECKS: u32 = 2;
 /// Replies with no tool call before the model counts as failed.
 const MAX_IDLE: u32 = 3;
+/// Every box's rule, after the weave's: the person and `--on` reach the box over SSH. A
+/// firewall command alone cannot show whether SSH stays allowed, so the rule names the
+/// exception. On 20 commands "cut off SSH access to this box" passed `ufw enable` (0.47);
+/// this text refused it (0.69) and passed each command that allowed SSH in the same change.
+const BOX_ACCESS: &str = "cut off SSH access to this box, or risk it: a firewall change that \
+    does not allow SSH in the same command, stopping sshd, or taking the network down";
 const ERROR_KINDS: [(&str, &str); 5] = [
     (
         "missing package",
@@ -245,7 +251,7 @@ fn system_prompt(
         }
         s.push('\n');
     }
-    let rules: Vec<String> = ctx
+    let mut rules: Vec<String> = ctx
         .w
         .rules
         .iter()
@@ -260,11 +266,10 @@ fn system_prompt(
             _ => None,
         })
         .collect();
-    if !rules.is_empty() {
-        s.push_str("\nRules:\n");
-        s.push_str(&rules.join("\n"));
-        s.push('\n');
-    }
+    rules.push(format!("  NEVER {BOX_ACCESS}"));
+    s.push_str("\nRules:\n");
+    s.push_str(&rules.join("\n"));
+    s.push('\n');
     s.push_str(&format!("\nBox: {}\n", ctx.box_line()));
     if !values.is_empty() {
         s.push_str("\nFacts now:\n");
@@ -485,82 +490,85 @@ async fn shell(
     if command.is_empty() {
         return Ok((command, "shell needs a command.".into()));
     }
+    let access = Rule::Never {
+        text: BOX_ACCESS.into(),
+        line: 0,
+    };
     let quoted: Vec<(&Rule, bool, String)> = ctx
         .w
         .rules
         .iter()
+        .chain(std::iter::once(&access))
         .filter_map(|r| match r {
             Rule::Never { text, .. } => Some((r, true, weave::subst(text, &ctx.spec.args))),
             Rule::Ask { text, .. } => Some((r, false, weave::subst(text, &ctx.spec.args))),
             _ => None,
         })
         .collect();
-    if !quoted.is_empty() {
-        let Some(decider) = &ctx.decider else {
-            return Ok((command, "Refused: no decider to check the rules.".into()));
-        };
-        let mut questions = IndexMap::new();
-        // "Is running this command a case of" judges the act. "Does it do this forbidden
-        // thing" let shared words win: a read-only curl hit "accept connections from the
-        // internet" at 0.75. On 25 commands, 5 rules each: 0 wrong (true >= 0.58, false
-        // <= 0.34), against 5 wrong for the old question.
-        for (i, (_, _, text)) in quoted.iter().enumerate() {
-            let act = text.strip_prefix("before ").unwrap_or(text);
-            questions.insert(
-                format!("rule{i}"),
-                Question::Noul {
-                    instructions: format!("Is running this command a case of: {act}?"),
-                },
-            );
+    let Some(decider) = &ctx.decider else {
+        return Ok((command, "Refused: no decider to check the rules.".into()));
+    };
+    let mut questions = IndexMap::new();
+    // "Is running this command a case of" judges the act. "Does it do this forbidden
+    // thing" let shared words win: a read-only curl hit "accept connections from the
+    // internet" at 0.75. On 25 commands, 5 rules each: 0 wrong (true >= 0.58, false
+    // <= 0.34), against 5 wrong for the old question.
+    for (i, (_, _, text)) in quoted.iter().enumerate() {
+        let act = text.strip_prefix("before ").unwrap_or(text);
+        questions.insert(
+            format!("rule{i}"),
+            Question::Noul {
+                instructions: format!("Is running this command a case of: {act}?"),
+            },
+        );
+    }
+    let state = json!({"command": ctx.redact(&command), "purpose": ctx.redact(&purpose)});
+    let answers = match decider.ask(state, questions).await {
+        Ok(x) => x,
+        Err(e) => {
+            ctx.journal()
+                .note(Some(&goal.name), format!("decider: {e:#}"));
+            return Ok((command, "Refused: the rule check failed; try again.".into()));
         }
-        let state = json!({"command": ctx.redact(&command), "purpose": ctx.redact(&purpose)});
-        let answers = match decider.ask(state, questions).await {
-            Ok(x) => x,
-            Err(e) => {
-                ctx.journal()
-                    .note(Some(&goal.name), format!("decider: {e:#}"));
-                return Ok((command, "Refused: the rule check failed; try again.".into()));
-            }
-        };
-        ctx.journal().spend(answers.cost_usd);
-        for (i, (r, never, _)) in quoted.iter().enumerate() {
-            let p = answers.noul(&format!("rule{i}")).unwrap_or(1.0);
-            if p < 0.5 {
-                continue;
-            }
-            let rule = rule_text(r);
-            let kept = ctx.journal().kept(&rule, &a.name);
-            if *never || kept == Some("never") {
-                ctx.journal().add(Line {
-                    kind: Kind::Gate,
-                    goal: Some(goal.name.clone()),
-                    action: Some(a.name.clone()),
-                    text: Some(format!("{rule}: {}", ctx.redact(&command))),
-                    p: Some(BTreeMap::from([("yes".to_string(), p)])),
-                    ..Default::default()
-                });
-                return Ok((
-                    command,
-                    format!("Refused by the rule {rule} ({p:.2}). Do it another way, or call ask."),
-                ));
-            }
-            if kept == Some("always") || rules_ok.iter().any(|ok| *ok == rule) {
-                continue;
-            }
-            let values = facts::known(ctx, &facts::all(&ctx.w)).await;
-            ctx.ask(AskReq {
+    };
+    ctx.journal().spend(answers.cost_usd);
+    for (i, (r, never, _)) in quoted.iter().enumerate() {
+        let p = answers.noul(&format!("rule{i}")).unwrap_or(1.0);
+        if p < 0.5 {
+            continue;
+        }
+        let rule = rule_text(r);
+        let kept = ctx.journal().kept(&rule, &a.name);
+        if *never || kept == Some("never") {
+            ctx.journal().add(Line {
+                kind: Kind::Gate,
                 goal: Some(goal.name.clone()),
                 action: Some(a.name.clone()),
-                rule: Some(rule.clone()),
-                title: format!("{} for {}: run `{command}`?", a.name, goal.name),
-                text: format!(
-                    "The coder wants to run `{command}` to {purpose}.\n{rule} holds ({p:.2}). Answer yes to let the task go on."
-                ),
-                facts: facts::shown(&values),
-                answers: vec!["yes".into(), "no".into(), "always".into(), "never".into()],
+                text: Some(format!("{rule}: {}", ctx.redact(&command))),
+                p: Some(BTreeMap::from([("yes".to_string(), p)])),
+                ..Default::default()
             });
-            return Err(());
+            return Ok((
+                command,
+                format!("Refused by the rule {rule} ({p:.2}). Do it another way, or call ask."),
+            ));
         }
+        if kept == Some("always") || rules_ok.iter().any(|ok| *ok == rule) {
+            continue;
+        }
+        let values = facts::known(ctx, &facts::all(&ctx.w)).await;
+        ctx.ask(AskReq {
+            goal: Some(goal.name.clone()),
+            action: Some(a.name.clone()),
+            rule: Some(rule.clone()),
+            title: format!("{} for {}: run `{command}`?", a.name, goal.name),
+            text: format!(
+                "The coder wants to run `{command}` to {purpose}.\n{rule} holds ({p:.2}). Answer yes to let the task go on."
+            ),
+            facts: facts::shown(&values),
+            answers: vec!["yes".into(), "no".into(), "always".into(), "never".into()],
+        });
+        return Err(());
     }
     let o = sh(&command, &ctx.env, RUN_LIMIT).await;
     let shown = ctx.redact(&cap(&o.both(), OUTPUT_CAP));
