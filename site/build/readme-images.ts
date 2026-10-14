@@ -1,10 +1,10 @@
-// Writes docs/img/{hero,loop,graph,plan}-{light,dark}.svg for the README, from the
+// Writes docs/img/{hero,loop}-{light,dark}.svg for the README, from the
 // same files the site reads. Run: npm run readme-images
 import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { readContent } from "./content.ts";
 import { COMMAND, heroFindings } from "../src/weave/example.ts";
-import { goalRows, offGoals, type Row } from "../src/weave/parse.ts";
+import { goalRows, type Row } from "../src/weave/parse.ts";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 const out = `${root}docs/img`;
@@ -42,7 +42,7 @@ const DARK: Palette = {
 const MONO = "'IBM Plex Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace";
 const SANS = "'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif";
 
-const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 function svg(p: Palette, height: number, title: string, body: string): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" role="img" aria-label="${esc(title)}">
@@ -64,10 +64,8 @@ function bar(p: Palette, label: string): string {
 <line x1="1" x2="${W - 1}" y1="36.5" y2="36.5" stroke="${p.rule}"/>`;
 }
 
-type Node = "held" | "on" | "branch";
-
-// The goal tree, drawn as `subweave plan` draws it.
-function tree(p: Palette, rows: Row[], x0: number, y0: number, h: number, state: (name: string) => Node): string {
+// The goal tree, drawn as `subweave plan` draws it, every goal held.
+function tree(p: Palette, rows: Row[], x0: number, y0: number, h: number): string {
   const step = 18;
   const r = 5;
   const parts: string[] = [];
@@ -84,15 +82,8 @@ function tree(p: Palette, rows: Row[], x0: number, y0: number, h: number, state:
       parts.push(`<path d="M${px} ${top} V${row.last ? mid : top + h} M${px} ${mid} H${cx - r}" fill="none" stroke="${p.rule2}"/>`);
     }
     if (row.kids) parts.push(`<line x1="${cx}" x2="${cx}" y1="${mid + r}" y2="${top + h}" stroke="${p.rule2}"/>`);
-    const s = state(row.goal.name);
-    const node =
-      s === "held"
-        ? `fill="${p.accent}" stroke="${p.accent}"`
-        : s === "on"
-          ? `fill="${p.ink}" stroke="${p.ink}"`
-          : `fill="${p.bg}" stroke="${p.accent}" stroke-dasharray="2 2"`;
-    parts.push(`<circle cx="${cx}" cy="${mid}" r="${r}" ${node} stroke-width="1.5"/>`);
-    parts.push(line(cx + r + 8, mid + 4.5, 13, [[s === "branch" ? p.ink2 : p.ink, row.goal.name]]));
+    parts.push(`<circle cx="${cx}" cy="${mid}" r="${r}" fill="${p.accent}" stroke="${p.accent}" stroke-width="1.5"/>`);
+    parts.push(line(cx + r + 8, mid + 4.5, 13, [[p.ink, row.goal.name]]));
   });
   return parts.join("\n");
 }
@@ -101,6 +92,7 @@ function hero(p: Palette): string {
   const eth = content.weaves.find((w) => w.name === "ethereum")!;
   const { findings, ask } = heroFindings(eth);
   const rows = goalRows(eth.goals);
+  const height = 290 + rows.length * 24 + 20;
   const parts = [bar(p, "terminal")];
   parts.push(line(24, 68, 13, [[p.muted, "$ "], [p.ink, COMMAND]]));
   findings.forEach(([level, subject, text], i) => {
@@ -114,19 +106,19 @@ function hero(p: Palette): string {
   });
   parts.push(line(24, 224, 12, [[p.ink2, "1 question: run asks the person first."]]));
   parts.push(`<line x1="1" x2="${W - 1}" y1="246.5" y2="246.5" stroke="${p.rule}"/>`);
-  parts.push(`<line x1="440.5" x2="440.5" y1="247" y2="${547}" stroke="${p.rule}"/>`);
+  parts.push(`<line x1="440.5" x2="440.5" y1="247" y2="${height - 1}" stroke="${p.rule}"/>`);
   parts.push(line(24, 278, 12, [[p.accent, `asked #1 on steery: ASK IF ${ask}`]]));
   parts.push(line(24, 300, 12, [[p.ink, "#1 yes, signed on the person's device"]]));
   parts.push(line(24, 332, 12, [[p.muted, "the daemon takes the service, and"]]));
   parts.push(line(24, 352, 12, [[p.muted, "the goals turn to held one by one"]]));
   parts.push(line(464, 278, 12, [[p.muted, "goals"]]));
-  parts.push(tree(p, rows, 464, 290, 24, () => "held"));
+  parts.push(tree(p, rows, 464, 290, 24));
   rows.forEach((_, i) => {
     parts.push(
       `<text x="${W - 24}" y="${290 + i * 24 + 16}" text-anchor="end" font-family="${MONO}" font-size="10.5" letter-spacing="0.6" fill="${p.accent}">HELD</text>`,
     );
   });
-  return svg(p, 548, `${COMMAND}: the request check, an ask answered on Steery, then every goal of the ethereum weave held`, parts.join("\n"));
+  return svg(p, height, `${COMMAND}: the request check, an ask answered on Steery, then every goal of the ethereum weave held`, parts.join("\n"));
 }
 
 function box(p: Palette, x: number, y: number, w: number, h: number, tone: "code" | "model" | "person", lines: [string, boolean?][]): string {
@@ -188,7 +180,7 @@ function loop(p: Palette): string {
   // hold: yes above, no below
   parts.push(box(p, x(4), 38, w, 30, "code", [["yes: learn, tell"]]));
   parts.push(arrow(p, `M${cx(4)} ${y} V${70}`));
-  parts.push(box(p, x(4), 204, w, 30, "model", [["no, TRIES left: pick again"]]));
+  parts.push(box(p, x(4), 204, w, 30, "model", [["no: pick again"]]));
   parts.push(arrow(p, `M${cx(4)} ${y + h + 1} V${202}`));
   parts.push(box(p, x(4), 244, w, 30, "person", [["TRIES used: ask"]]));
   // the next tick
@@ -215,71 +207,8 @@ function loop(p: Palette): string {
   );
 }
 
-function graph(p: Palette): string {
-  const pg = content.weaves.find((w) => w.name === "postgres")!;
-  const rows = goalRows(pg.goals);
-  const branch = offGoals(pg.goals, {});
-  const top = 60;
-  const h = 28;
-  const parts = [
-    line(24, 34, 13, [[p.ink, "postgres", "500"], [p.muted, "  goals, each under its first AFTER"]]),
-    `<line x1="24" x2="${W - 24}" y1="${top - 0.5}" y2="${top - 0.5}" stroke="${p.ink}"/>`,
-  ];
-  rows.forEach((row, i) => {
-    const y = top + (i + 1) * h - 0.5;
-    parts.push(`<line x1="24" x2="${W - 24}" y1="${y}" y2="${y}" stroke="${p.rule}"/>`);
-    const g = row.goal;
-    const mid = top + i * h + h / 2 + 4.5;
-    const cond = g.quoted ? `"${g.cond.length > 44 ? `${g.cond.slice(0, 43)}…` : g.cond}"` : g.cond;
-    parts.push(line(300, mid, 12, [[g.quoted ? p.model : p.ink2, cond]]));
-    if (g.every) parts.push(line(668, mid, 11, [[p.muted, `EVERY ${g.every}`]]));
-    if (g.when) {
-      const chipX = 24 + 7 + row.depth * 18 + 5 + 8 + g.name.length * 7.8 + 12;
-      parts.push(
-        `<rect x="${chipX + 0.5}" y="${mid - 13.5}" width="${(g.when.length + 3) * 6.6 + 10}" height="18" rx="4" fill="none" stroke="${p.accent}"/>`,
-        line(chipX + 5, mid - 0.5, 11, [[p.accent, `IF ${g.when}`]]),
-      );
-    }
-    if (branch.has(g.name))
-      parts.push(`<text x="${W - 24}" y="${mid}" text-anchor="end" font-family="${MONO}" font-size="10.5" letter-spacing="0.6" fill="${p.muted}">OFF WITH NO BUCKET</text>`);
-  });
-  parts.push(tree(p, rows, 24, top, h, (n) => (branch.has(n) ? "branch" : "on")));
-  const height = top + rows.length * h + 28;
-  return svg(p, height, "The postgres weave's goal graph; archiving, backed and drilled are off when the request gives no bucket", parts.join("\n"));
-}
-
-function plan(p: Palette): string {
-  const lines = content.plans[0].split("\n");
-  const parts = [bar(p, "terminal")];
-  lines.forEach((text, i) => {
-    const y = 68 + i * 22;
-    if (i === 0) {
-      parts.push(line(24, y, 12.5, [[p.muted, "$ "], [p.ink, text.slice(2)]]));
-      return;
-    }
-    const m = /^(error|ask|warning|info)(\s+)(\S+)(\s+)(.*?)(\s{2,}\d\.\d\d)?$/.exec(text);
-    if (!m) {
-      parts.push(line(24, y, 12.5, [[p.ink, text, text.includes("error") ? "600" : undefined]]));
-      return;
-    }
-    const error = m[1] === "error";
-    if (error) parts.push(`<rect x="12" y="${y - 13}" width="3" height="18" rx="1.5" fill="${p.ink}"/>`);
-    parts.push(
-      line(24, y, 12.5, [
-        [error ? p.ink : p.muted, m[1], error ? "600" : undefined],
-        [p.muted, m[2]],
-        [p.ink, m[3], "500"],
-        [p.muted, m[4]],
-        [p.ink2, m[5]],
-        [p.muted, m[6] ?? ""],
-      ]),
-    );
-  });
-  return svg(p, 68 + lines.length * 22 + 6, lines[0].slice(2), parts.join("\n"));
-}
-
 mkdirSync(out, { recursive: true });
-const images: Record<string, (p: Palette) => string> = { hero, loop, graph, plan };
+const images: Record<string, (p: Palette) => string> = { hero, loop };
 for (const [name, draw] of Object.entries(images)) {
   writeFileSync(`${out}/${name}-light.svg`, draw(LIGHT));
   writeFileSync(`${out}/${name}-dark.svg`, draw(DARK));

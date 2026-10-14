@@ -4,7 +4,7 @@ A Weavefile says what must stay true on a Linux box. The Subweave daemon keeps i
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/hero-dark.svg">
-  <img alt="A shortened postgres Weavefile beside its goals: running, archiving after running, backed after archiving" src="docs/img/hero-light.svg">
+  <img alt="subweave run ethereum with a request in words: the request check, an ask answered on Steery, then every goal of the ethereum weave held" src="docs/img/hero-light.svg">
 </picture>
 
 ```
