@@ -631,7 +631,7 @@ cargo install --locked --git https://github.com/subweave/subweave   # macOS: CLI
 - `tell` takes `--decide` and `--code` too, with or without a request.
 - The CLI remembers which box runs each service, so later commands take the name alone.
 - A weave is a local directory, or a name with an optional tag, as in Docker.
-  - `postgres:0.5` is `examples/postgres` in github.com/subweave/subweave at the git tag `postgres-0.5`.
+  - `postgres:0.5` is `postgres/` in [github.com/subweave/library](https://github.com/subweave/library) at the git tag `postgres-0.5`.
   - With no tag, the default branch.
 
 ```

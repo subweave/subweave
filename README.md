@@ -50,12 +50,14 @@ $ subweave plan postgres "postgres 18, private network, backups to acme-pg, keep
 
 | Weave | For | Box | Shows |
 |---|---|---|---|
-| [postgres](examples/postgres) | a 6-person SaaS team with no DBA | Hetzner VM, object storage | the reference: skills, restore drills, a major upgrade by sentence |
-| [ethereum](examples/ethereum) | a wallet startup leaving hosted RPC | dedicated server, 2 TB | a `MUST` network, thresholds as code, gated coder commands |
-| [vllm](examples/vllm) | a team serving its own open model | rented GPU | a `MUST` model, faults the box cannot fix |
-| [store-edge](examples/store-edge) | a 300-shop retail chain | fanless PC on DSL | no coder, works offline, a heartbeat |
-| [valkey](examples/valkey) | an agency with 40 client boxes | small VMs | a `MUST` role, one inbox for every box |
-| [minecraft](examples/minecraft) | a teacher with a coding club | one VPS | untrusted text, update and rollback |
+| [postgres](https://github.com/subweave/library/tree/main/postgres) | a 6-person SaaS team with no DBA | Hetzner VM, object storage | the reference: skills, restore drills, a major upgrade by sentence |
+| [ethereum](https://github.com/subweave/library/tree/main/ethereum) | a wallet startup leaving hosted RPC | dedicated server, 2 TB | a `MUST` network, thresholds as code, gated coder commands |
+| [vllm](https://github.com/subweave/library/tree/main/vllm) | a team serving its own open model | rented GPU | a `MUST` model, faults the box cannot fix |
+| [store-edge](https://github.com/subweave/library/tree/main/store-edge) | a 300-shop retail chain | fanless PC on DSL | no coder, works offline, a heartbeat |
+| [valkey](https://github.com/subweave/library/tree/main/valkey) | an agency with 40 client boxes | small VMs | a `MUST` role, one inbox for every box |
+| [minecraft](https://github.com/subweave/library/tree/main/minecraft) | a teacher with a coding club | one VPS | untrusted text, update and rollback |
+
+The weaves live in [subweave/library](https://github.com/subweave/library); `examples/` is its submodule (`git clone --recursive`).
 
 Each weave's README says what it cannot do. [LIMITS.md](LIMITS.md) says what Subweave does badly, with the decider calls that show it in [evidence/](evidence).
 
