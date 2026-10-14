@@ -419,6 +419,8 @@ A `DO` task, when no learned steps or recipe made the goal hold:
 5. The coder says `done`, with the commands that made the fix and one line on the cause. The daemon checks the task's goal again with fresh facts; when it holds, the task passed.
 6. After two failed checks, the `THEN` model takes over. After 40 commands without a pass, the task failed.
 
+The coder reads at most 8 KB of a command's output: the head and the tail. The whole output, with SECRETs redacted, is kept in `/var/lib/subweave/services/<service>/output/<episode>-<n>.txt`, mode 600, the newest 200 files per service. A cut output names its file, so the coder can read the rest with `sed -n` or `tail`. When a conversation's messages pass 48 KB, every command result but the newest 4 becomes its first line (`exit 0`) and its file name.
+
 A person's task, from `subweave task <service> "<what to do>"` or the dashboard, is a `DO` task with no goal. It waits for the repair slot: one repair or task at a time. The coder gets the person's words as the task, with the ARGs, the rules, the facts and the skills. The same gates hold: every `NEVER` and `ASK`, and the box's own rule never to cut off SSH. `done` ends it, with the coder's summary. An `ask`, from a rule or from the coder, waits for the person; `yes` runs the task again with that rule passed, `no` ends it.
 
 ## Models

@@ -2,7 +2,7 @@
 //! still fails the coder works on it with `shell`, `done` and `ask`. A person's task is
 //! a DO task with no goal: `done` ends it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::PathBuf;
@@ -32,6 +32,13 @@ const MAX_COMMANDS: usize = 40;
 const MAX_CHECKS: u32 = 2;
 /// Replies with no tool call before the model counts as failed.
 const MAX_IDLE: u32 = 3;
+/// Message text past which old tool results are masked. On the box journal (2026-10-14)
+/// the messages of the last request were about 1.7k tokens in each session that passed
+/// and 5.4k in the longest flash session that made progress, against 25k and 45k in the
+/// two that wandered. 48 KiB, about 12k tokens, masks no session that passed.
+const MASK_AT: usize = 48 * 1024;
+/// Tool results that masking leaves whole, the newest.
+const MASK_KEEP: usize = 4;
 /// Every box's rule, after the weave's: the person and `--on` reach the box over SSH. A
 /// firewall command alone cannot show whether SSH stays allowed, so the rule names the
 /// exception. On 20 commands "cut off SSH access to this box" passed `ufw enable` (0.47);
@@ -411,6 +418,7 @@ async fn session(
         let mut idle = 0;
         let mut tally = Tally::default();
         let sid = session_id(i);
+        let mut files: HashMap<String, PathBuf> = HashMap::new();
         let end = loop {
             if commands >= MAX_COMMANDS {
                 break End::Failed(format!("{MAX_COMMANDS} commands without a pass"));
@@ -448,9 +456,12 @@ async fn session(
                     "shell" => {
                         commands += 1;
                         match shell(ctx, work, &c.input, rules_ok, &mut ok_cmds).await {
-                            Ok((cmd, out)) => {
-                                history.push(cmd);
-                                out
+                            Ok(ran) => {
+                                if let Some(f) = &ran.file {
+                                    files.insert(c.id.clone(), f.clone());
+                                }
+                                history.push(ran.command);
+                                ran.result
                             }
                             Err(()) => {
                                 end = Some(End::Asked);
@@ -531,6 +542,7 @@ async fn session(
                 break e;
             }
             msgs.push(Msg::Results(results));
+            mask(&mut msgs, &files);
         };
         ctx.journal().add(Line {
             kind: Kind::Note,
@@ -556,6 +568,46 @@ async fn session(
         "{}: every coder model failed the task",
         work.action
     ))
+}
+
+/// The text of a conversation's messages, in bytes.
+fn size(msgs: &[Msg]) -> usize {
+    msgs.iter()
+        .map(|m| match m {
+            Msg::User(t) => t.len(),
+            Msg::Assistant { text, calls } => {
+                text.len()
+                    + calls
+                        .iter()
+                        .map(|c| c.name.len() + c.input.to_string().len())
+                        .sum::<usize>()
+            }
+            Msg::Results(rs) => rs.iter().map(|(_, r)| r.len()).sum(),
+        })
+        .sum()
+}
+
+/// Past `MASK_AT`, every tool result but the newest `MASK_KEEP` becomes its first line and
+/// the file of its output. All at once: the provider's cached prefix breaks only once each
+/// time the conversation grows past the budget again.
+fn mask(msgs: &mut [Msg], files: &HashMap<String, PathBuf>) {
+    if size(msgs) <= MASK_AT {
+        return;
+    }
+    let results = msgs.iter_mut().rev().filter_map(|m| match m {
+        Msg::Results(rs) => Some(rs),
+        _ => None,
+    });
+    for (id, content) in results.flat_map(|rs| rs.iter_mut().rev()).skip(MASK_KEEP) {
+        let first = content.lines().next().unwrap_or_default();
+        let stub = match files.get(id.as_str()) {
+            Some(f) => format!("{first} [output hidden; it is in {}]", f.display()),
+            None => format!("{first} [hidden]"),
+        };
+        if stub.len() < content.len() {
+            *content = stub;
+        }
+    }
 }
 
 /// The commands `done` names, each as it ran: the coder often names a part of a chained
@@ -586,24 +638,52 @@ fn kept_commands(input: &Value, ok_cmds: &[String]) -> Vec<String> {
     kept
 }
 
-/// One coder command: gated by the quoted rules, run, journaled. `Ok((command, what the
-/// coder reads))`, or `Err(())` when an ask was raised and the session ends.
+/// One `shell` call: what the coder sent, what it read back, and the file that keeps the
+/// whole output of a command that ran.
+struct Ran {
+    command: String,
+    purpose: String,
+    result: String,
+    file: Option<PathBuf>,
+}
+
+/// One coder command: gated by the quoted rules, run, journaled. `Err(())` when an ask
+/// was raised and the session ends.
 async fn shell(
     ctx: &Ctx,
     work: Work<'_>,
     input: &Value,
     rules_ok: &[String],
     ok_cmds: &mut Vec<String>,
-) -> Result<(String, String), ()> {
+) -> Result<Ran, ()> {
     let command = input["command"]
         .as_str()
         .unwrap_or_default()
         .trim()
         .to_string();
     let purpose = input["purpose"].as_str().unwrap_or_default().to_string();
-    if command.is_empty() {
-        return Ok((command, "shell needs a command.".into()));
-    }
+    let (result, file) = if command.is_empty() {
+        ("shell needs a command.".to_string(), None)
+    } else {
+        gate_and_run(ctx, work, &command, &purpose, rules_ok, ok_cmds).await?
+    };
+    Ok(Ran {
+        command,
+        purpose,
+        result,
+        file,
+    })
+}
+
+/// What the coder reads of a command, and the file of its whole output.
+async fn gate_and_run(
+    ctx: &Ctx,
+    work: Work<'_>,
+    command: &str,
+    purpose: &str,
+    rules_ok: &[String],
+    ok_cmds: &mut Vec<String>,
+) -> Result<(String, Option<PathBuf>), ()> {
     let access = Rule::Never {
         text: BOX_ACCESS.into(),
         line: 0,
@@ -620,7 +700,7 @@ async fn shell(
         })
         .collect();
     let Some(decider) = &ctx.decider else {
-        return Ok((command, "Refused: no decider to check the rules.".into()));
+        return Ok(("Refused: no decider to check the rules.".into(), None));
     };
     let mut questions = IndexMap::new();
     // "Is running this command a case of" judges the act. "Does it do this forbidden
@@ -636,12 +716,12 @@ async fn shell(
             },
         );
     }
-    let state = json!({"command": ctx.redact(&command), "purpose": ctx.redact(&purpose)});
+    let state = json!({"command": ctx.redact(command), "purpose": ctx.redact(purpose)});
     let answers = match decider.ask(state, questions).await {
         Ok(x) => x,
         Err(e) => {
             work.note(ctx, format!("decider: {e:#}"));
-            return Ok((command, "Refused: the rule check failed; try again.".into()));
+            return Ok(("Refused: the rule check failed; try again.".into(), None));
         }
     };
     ctx.journal().spend(answers.cost_usd);
@@ -657,13 +737,13 @@ async fn shell(
                 kind: Kind::Gate,
                 goal: work.goal_name(),
                 action: Some(work.action.to_string()),
-                text: Some(format!("{rule}: {}", ctx.redact(&command))),
+                text: Some(format!("{rule}: {}", ctx.redact(command))),
                 p: Some(BTreeMap::from([("yes".to_string(), p)])),
                 ..Default::default()
             });
             return Ok((
-                command,
                 format!("Refused by the rule {rule} ({p:.2}). Do it another way, or call ask."),
+                None,
             ));
         }
         if kept == Some("always") || rules_ok.iter().any(|ok| *ok == rule) {
@@ -693,7 +773,7 @@ async fn shell(
         });
         return Err(());
     }
-    let o = sh(&command, &ctx.env, RUN_LIMIT).await;
+    let o = sh(command, &ctx.env, RUN_LIMIT).await;
     let all = ctx.redact(&o.both());
     let file = save_output(ctx, &all);
     let shown = cap_to(&all, OUTPUT_CAP, file.as_deref());
@@ -701,22 +781,22 @@ async fn shell(
         kind: Kind::Command,
         goal: work.goal_name(),
         action: Some(work.action.to_string()),
-        text: Some(command.clone()),
+        text: Some(command.to_string()),
         ok: Some(o.ok()),
         output: command_output(ctx, &o),
         ..Default::default()
     });
     if o.ok() {
-        ok_cmds.push(command.clone());
-        return Ok((command, format!("exit 0\n{shown}")));
+        ok_cmds.push(command.to_string());
+        return Ok((format!("exit 0\n{shown}"), file));
     }
     let code = o.code.map_or("killed".to_string(), |c| format!("exit {c}"));
-    let kind = classify(ctx, &command, &shown).await;
+    let kind = classify(ctx, command, &shown).await;
     let line = match kind {
         Some(k) => format!("{code}; the error looks like: {k}\n{shown}"),
         None => format!("{code}\n{shown}"),
     };
-    Ok((command, line))
+    Ok((line, file))
 }
 
 /// Keeps a coder command's whole output, redacted, as `output/<episode>-<n>.txt` with mode
