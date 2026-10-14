@@ -140,11 +140,12 @@ impl Journal {
             .any(|l| l.action.as_deref() == Some(TASK))
     }
 
-    /// The open asks the loop raised for `goal`: not a person's task's.
+    /// The open asks for `goal` the loop raised on its own: none a person's job raised,
+    /// which carry `by`.
     pub fn open_for(&self, goal: &str) -> Vec<u64> {
         svc::open_asks(&self.lines)
             .iter()
-            .filter(|l| l.goal.as_deref() == Some(goal) && l.action.as_deref() != Some(TASK))
+            .filter(|l| l.goal.as_deref() == Some(goal) && l.by.is_none())
             .filter_map(|l| l.n)
             .collect()
     }

@@ -1211,6 +1211,23 @@ async fn daemon_and_cli_keep_a_toy_service() {
     })
     .await;
     b.holds(&["installed", "running", "rotated"], 15).await;
+    // An ask a person caused stays until a person answers, though its goal holds.
+    b.ok(&["do", "toy", "rotate"]).await;
+    let (n, _) = b
+        .until("the ask for a rotate run by hand", 20, || b.open_ask("rotated"))
+        .await;
+    let ask = b.lines("ask", |l| l["n"] == n);
+    assert!(
+        ask[0]["by"].as_str().is_some_and(|by| by.starts_with("cli:")),
+        "{}",
+        ask[0]
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        b.lines("answer", |l| l["n"] == n).is_empty(),
+        "a person's ask is not withdrawn"
+    );
+    b.ok(&["answer", &n.to_string(), "no"]).await;
 
     // 7. ps, log, learned.
     phase("7 ps, log, learned");

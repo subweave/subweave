@@ -64,9 +64,12 @@ pub(crate) async fn service(Svc(s): Svc) -> Result<Json<Value>, ApiError> {
     let spec = spec(&s)?;
     let status = service::status(&s).ok().flatten();
     let weavefile = std::fs::read_to_string(paths::weavefile(&s)).ok();
-    let weave = weavefile
-        .as_deref()
-        .and_then(|text| weave::parse(&s, text).ok());
+    // The parsed weave as the box reads it: `$name` replaced. `weavefile` stays raw.
+    let weave = weavefile.as_deref().and_then(|text| {
+        let mut w = weave::parse(&s, text).ok()?;
+        w.substitute(&spec.args);
+        Some(w)
+    });
     let readme = std::fs::read_to_string(paths::readme(&s)).ok();
     let learned = service::learned(&s).map_err(ApiError::internal)?;
     let lines = service::journal(&s).map_err(ApiError::internal)?;

@@ -73,6 +73,9 @@ pub(crate) struct Ctx {
     pub learn_wait: Mutex<BTreeMap<String, Instant>>,
     /// `restart for running` while it runs.
     pub repair: Mutex<Option<String>>,
+    /// The person whose job runs now (`do`, a task, an answer's re-run): the asks it
+    /// raises carry it, and only a person answers them.
+    pub by: Mutex<Option<String>>,
     /// The action whose WITHIN wait runs, and when its steps ended.
     pub ran: Mutex<Option<(String, Instant)>>,
 }
@@ -177,6 +180,7 @@ impl Ctx {
             learning: tokio::sync::Mutex::new(()),
             learn_wait: Mutex::new(BTreeMap::new()),
             repair: Mutex::new(None),
+            by: Mutex::new(None),
             ran: Mutex::new(None),
         })
     }
@@ -649,6 +653,7 @@ impl Loop {
                     goal: g.name.clone(),
                     forced: None,
                     ignore_tries: false,
+                    by: None,
                 })
             }
         };
@@ -676,7 +681,7 @@ impl Loop {
         }
         self.running = Some(match &mut job {
             Job::Repair(r) => {
-                if r.forced.is_none() && !r.ignore_tries {
+                if r.by.is_none() {
                     self.warn(&r.goal);
                 }
                 r.goal.clone()
@@ -768,12 +773,13 @@ impl Loop {
                     action: action.clone(),
                     text: Some(word.clone()),
                     n: Some(n),
-                    by: Some(by),
+                    by: Some(by.clone()),
                     ..Default::default()
                 });
                 let Some(goal) = ask.goal.clone() else {
                     return;
                 };
+                let by = Some(by);
                 let job = match (word.as_str(), action) {
                     (_, Some(a)) => Some(Repair {
                         goal,
@@ -783,6 +789,7 @@ impl Loop {
                             rules_ok: Vec::new(),
                         }),
                         ignore_tries: true,
+                        by,
                     }),
                     ("yes" | "always", None) => Some(match ask.action.clone() {
                         Some(a) => Repair {
@@ -793,11 +800,13 @@ impl Loop {
                                 rules_ok: rule.into_iter().collect(),
                             }),
                             ignore_tries: true,
+                            by,
                         },
                         None => Repair {
                             goal,
                             forced: None,
                             ignore_tries: true,
+                            by,
                         },
                     }),
                     _ => None,
@@ -844,6 +853,7 @@ impl Loop {
                         rules_ok: Vec::new(),
                     }),
                     ignore_tries: true,
+                    by: Some(by),
                 }));
             }
             Ctl::Forget { name, by } => {

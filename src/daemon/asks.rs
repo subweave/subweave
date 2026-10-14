@@ -94,9 +94,17 @@ pub(crate) struct AskReq {
     pub answers: Vec<String>,
 }
 
-/// Journals the ask (and its rule as a `gate` line), sends it to every channel.
+/// Journals the ask (and its rule as a `gate` line), sends it to every channel. An ask a
+/// person's job raised carries their `by`: it waits for a person's answer and is never
+/// withdrawn.
 pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
     let n = ctx.shared.next_ask();
+    let by = ctx
+        .by
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .filter(|b| !b.is_empty());
     let (title, text, facts) = {
         let mut j = ctx.journal();
         if let Some(rule) = &req.rule {
@@ -106,6 +114,7 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
                 action: req.action.clone(),
                 text: Some(rule.clone()),
                 n: Some(n),
+                by: by.clone(),
                 ..Default::default()
             });
         }
@@ -118,6 +127,7 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
             n: Some(n),
             answers: Some(req.answers.clone()),
             body: Some(req.text.clone()),
+            by,
             ..Default::default()
         });
         let title = l.text.unwrap_or_default();

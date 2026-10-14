@@ -50,12 +50,17 @@ pub(crate) enum Job {
 }
 
 impl Job {
+    /// The person who asked for it: `do`, a task, an answer that runs it.
+    pub fn by(&self) -> Option<&str> {
+        match self {
+            Job::Repair(r) => r.by.as_deref(),
+            Job::Task(t) => Some(t.by.as_str()),
+        }
+    }
+
     /// Asked for by the person: kept while the box does not fit, and no warning.
     pub fn by_person(&self) -> bool {
-        match self {
-            Job::Repair(r) => r.forced.is_some() || r.ignore_tries,
-            Job::Task(_) => true,
-        }
+        self.by().is_some()
     }
 }
 
@@ -64,6 +69,8 @@ pub(crate) struct Repair {
     pub goal: String,
     pub forced: Option<Forced>,
     pub ignore_tries: bool,
+    /// Who asked for it; `None` when the loop did.
+    pub by: Option<String>,
 }
 
 /// A person's task in words.
@@ -128,11 +135,13 @@ enum Pick {
 
 /// The goal the job was for, and how it ended.
 pub(crate) async fn run(ctx: Arc<Ctx>, job: Job) -> (Option<String>, Outcome) {
+    *ctx.by.lock().unwrap_or_else(|e| e.into_inner()) = job.by().map(str::to_string);
     let out = match &job {
         Job::Repair(r) => repair(&ctx, r).await,
         Job::Task(t) => task(&ctx, t).await,
     };
     *ctx.repair.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *ctx.by.lock().unwrap_or_else(|e| e.into_inner()) = None;
     match job {
         Job::Repair(r) => (Some(r.goal), out),
         Job::Task(_) => (None, out),

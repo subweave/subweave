@@ -317,8 +317,10 @@ pub struct Ask {
     pub t: String,
 }
 
-/// A service's open asks, oldest first.
+/// A service's open asks, oldest first. The rule reads as the box reads it, `$name`
+/// replaced; the gate line keeps it as written, the key of `always` and `never`.
 pub fn asks(service: &str, lines: &[Line]) -> Vec<Ask> {
+    let args = spec(service).map(|s| s.args).unwrap_or_default();
     open_asks(lines)
         .into_iter()
         .filter_map(|l| {
@@ -326,7 +328,8 @@ pub fn asks(service: &str, lines: &[Line]) -> Vec<Ask> {
             let rule = lines
                 .iter()
                 .find(|g| g.kind == Kind::Gate && g.n == Some(n))
-                .and_then(|g| g.text.clone());
+                .and_then(|g| g.text.as_deref())
+                .map(|t| crate::weave::subst(t, &args));
             Some(Ask {
                 n,
                 service: service.to_string(),

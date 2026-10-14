@@ -538,7 +538,7 @@ The daemon sends two kinds of message:
 | warning | a goal starts failing, and the loop acts | — |
 | info | a goal holds again; an ask is withdrawn; `run` or `tell` finished; a command was learned | — |
 
-A goal that fails again within 10 minutes of holding sends nothing new. An ask the loop raised for a goal is withdrawn when the goal holds again: the journal gets an `answer` line with `text: "withdrawn"`, and the goal is no longer parked.
+A goal that fails again within 10 minutes of holding sends nothing new. An ask the loop raised on its own for a goal is withdrawn when the goal holds again: the journal gets an `answer` line with `text: "withdrawn"`, and the goal is no longer parked. An ask a person caused (a `do`, a task, an answer that runs an action) carries their `by` and waits for a person's answer.
 
 A channel is where messages go. Channels belong to the daemon, not to the weave: every service on the box uses them.
 
@@ -583,7 +583,7 @@ subweave channel test steery
 - A `check` line holds the facts the goal read.
 - A `command` line holds `output`: stdout and stderr, secrets redacted, the last 4 KB.
 - An `ask` line holds `text`, its title, and `body`, what the channels got with it.
-- `by` says who acted, on lines a person causes: `answer`, a task, `do`, `tell`, `stop`, `start`, `forget`. `cli:<user>` at a terminal, `dash@<ip>` from the dashboard, the channel's answerer for an answer from a channel.
+- `by` says who acted, on lines a person causes: `answer`, a task, `do`, `tell`, `stop`, `start`, `forget`, and the `ask` and `gate` lines of a job a person asked for. `cli:<user>` at a terminal, `dash@<ip>` from the dashboard, the channel's answerer for an answer from a channel.
 - Every line of a person's task has `action: "task"`. It starts with `{"kind":"action","action":"task","text":"<the task>","by":"…"}`, with no `ok`, when the task starts, and ends with an `action` line whose `ok` says whether it was done and whose `text` is the coder's summary, or why it failed: `ended: the service stopped` when a stop or new settings cut it off.
 - A task that asks waits for the answer; other tasks wait behind it. `yes` runs it again with every rule passed so far and what its earlier runs did.
 - The decider reads the newest journal lines for the failing goal. `SINCE()`, `PREV()` and `TRIES` read the journal in code.

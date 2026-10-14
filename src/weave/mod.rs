@@ -87,3 +87,41 @@ pub fn subst(text: &str, args: &BTreeMap<String, String>) -> String {
     out.push_str(rest);
     out
 }
+
+impl Weave {
+    /// Makes the words the box acts on read as it reads them, with `$name` replaced by
+    /// `subst`: quoted facts and goals, WHENs, DO tasks, quoted rules, skills. RUN
+    /// scripts and fact commands stay as written: bash expands them from the
+    /// environment.
+    pub fn substitute(&mut self, args: &BTreeMap<String, String>) {
+        let w = self;
+        let s = |t: &mut String| *t = subst(t, args);
+        for f in &mut w.facts {
+            if let FactSource::Quoted(t) = &mut f.source {
+                s(t);
+            }
+        }
+        for g in &mut w.goals {
+            if let Condition::Quoted(t) = &mut g.cond {
+                s(t);
+            }
+        }
+        for a in &mut w.actions {
+            s(&mut a.when);
+            for step in &mut a.steps {
+                if let Step::Do { task, .. } = step {
+                    s(task);
+                }
+            }
+        }
+        for r in &mut w.rules {
+            if let Rule::Never { text, .. } | Rule::Ask { text, .. } = r {
+                s(text);
+            }
+        }
+        for k in &mut w.skills {
+            s(&mut k.when);
+            s(&mut k.body);
+        }
+    }
+}
