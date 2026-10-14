@@ -203,9 +203,14 @@ const FACT_CMD: &str = "if curl -fs \"http://127.0.0.1:$port/\" 2>/dev/null | gr
 const FACT_WRONG: &str =
     "curl -s -o /dev/null -w '%{http_code}' \"http://127.0.0.1:$port/\" || true";
 
-/// `/chat/completions`: a fact learner gets the fact command; a task's coder goes on
-/// from the tool calls it already made: a forbidden firewall command, mkdir, the page,
-/// then `done`.
+/// A person's task, and what the coder does and says for it.
+const TASK_TEXT: &str = "tidy the web root";
+const TASK_CMD: &str = "echo \"tidied $root on port $port\"";
+const TASK_SUMMARY: &str = "the web root was already tidy";
+
+/// `/chat/completions`: a fact learner gets the fact command; a person's task gets one
+/// command and `done`; an action's coder goes on from the tool calls it already made: a
+/// forbidden firewall command, mkdir, the page, then `done`.
 async fn chat(State(m): State<Mock>, headers: HeaderMap, body: String) -> axum::Json<Value> {
     record(&m, "/chat/completions", &headers, &body);
     let req: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
@@ -230,6 +235,21 @@ async fn chat(State(m): State<Mock>, headers: HeaderMap, body: String) -> axum::
         })
         .collect::<Vec<_>>()
         .join("\n");
+    // A person's task from the dashboard: one command, then `done` with a summary.
+    if body.contains("Task from the person") {
+        if !made.contains("tidied") {
+            return tool_call(
+                "t1",
+                "shell",
+                json!({"command": TASK_CMD, "purpose": "tidy the web root"}),
+            );
+        }
+        return tool_call(
+            "t2",
+            "done",
+            json!({"commands": [TASK_CMD], "summary": TASK_SUMMARY}),
+        );
+    }
     if !made.contains("firewall") {
         let cmd = format!("touch {} && echo opened", m.firewall_mark.display());
         return tool_call(
@@ -265,18 +285,19 @@ async fn hook(State(m): State<Mock>, body: String) -> &'static str {
     "ok"
 }
 
-/// The temporary box: directories, the daemon, the toy server's pid file.
+/// The temporary box: directories, the daemon, the dashboard, the toy server's pid file.
 struct Box_ {
     dir: PathBuf,
     state: PathBuf,
     config: PathBuf,
     daemon: Option<tokio::process::Child>,
+    dash: Option<tokio::process::Child>,
 }
 
 impl Drop for Box_ {
     fn drop(&mut self) {
-        if let Some(d) = &mut self.daemon {
-            let _ = d.start_kill();
+        for c in [&mut self.daemon, &mut self.dash].into_iter().flatten() {
+            let _ = c.start_kill();
         }
         kill_pidfile(&self.dir.join("toy.pid"));
     }
@@ -520,6 +541,166 @@ ACTION rotate FOR rotated WITHIN 5s
     )
 }
 
+const DASH_PASSWORD: &str = "pw-e2e-41c7";
+
+/// Reads an event stream until it holds `want`, or fails after `secs`; what came.
+async fn sse_until(b: &Box_, events: &mut reqwest::Response, got: &mut String, want: &str, secs: u64) {
+    let end = Instant::now() + Duration::from_secs(secs);
+    while !got.contains(want) {
+        let left = end.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(left, events.chunk()).await {
+            Ok(Ok(Some(c))) => got.push_str(&String::from_utf8_lossy(&c)),
+            Ok(Ok(None)) => b.fail(&format!("the event stream ended before {want:?}:\n{got}")),
+            Ok(Err(e)) => b.fail(&format!("the event stream failed: {e}\n{got}")),
+            Err(_) => b.fail(&format!("no {want:?} in the event stream in {secs}s:\n{got}")),
+        }
+    }
+}
+
+/// `subweave dash` with a password, against the running daemon: login, the services,
+/// a journal line live over SSE, and a task in words that the mock coder runs.
+async fn dashboard(b: &mut Box_) {
+    use tokio::io::AsyncWriteExt;
+    let port = free_port();
+    let mut set = b.command();
+    set.args(["dash", "--port", &port.to_string(), "--password"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = set.spawn().expect("subweave dash --password runs");
+    let mut stdin = child.stdin.take().unwrap();
+    stdin
+        .write_all(format!("{DASH_PASSWORD}\n").as_bytes())
+        .await
+        .unwrap();
+    drop(stdin);
+    let o = child.wait_with_output().await.unwrap();
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(o.status.success() && out.contains("password set"), "{out}");
+    let saved = std::fs::read_to_string(b.config.join("dash.json")).unwrap();
+    assert!(saved.contains("$argon2id$") && !saved.contains(DASH_PASSWORD), "{saved}");
+
+    let log = std::fs::File::create(b.dir.join("dash.log")).unwrap();
+    let dash = b
+        .command()
+        .arg("dash")
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .spawn()
+        .expect("the dashboard starts");
+    b.dash = Some(dash);
+    let api = |p: &str| format!("http://127.0.0.1:{port}/api{p}");
+    let http = reqwest::Client::new();
+    let mut session = None;
+    for _ in 0..100 {
+        if let Ok(r) = http.get(api("/session")).send().await {
+            session = Some(r.json::<Value>().await.unwrap());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(session, Some(json!({"auth": "password", "ok": false})));
+    let r = http.get(api("/services")).send().await.unwrap();
+    assert_eq!(r.status(), 401, "no session, no services");
+    let r = http
+        .post(api("/login"))
+        .json(&json!({"password": "not it"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    let r = http
+        .post(api("/login"))
+        .json(&json!({"password": DASH_PASSWORD}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+    let set_cookie = r.headers()["set-cookie"].to_str().unwrap().to_string();
+    assert!(
+        set_cookie.contains("HttpOnly") && set_cookie.contains("SameSite=Strict"),
+        "{set_cookie}"
+    );
+    let cookie = set_cookie.split(';').next().unwrap().to_string();
+
+    let services: Value = http
+        .get(api("/services"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let toy = services
+        .as_array()
+        .and_then(|s| s.iter().find(|s| s["name"] == "toy"))
+        .unwrap_or_else(|| b.fail(&format!("no toy in /api/services: {services}")));
+    assert_eq!(toy["state"], "running", "{toy}");
+
+    let mut events = http
+        .get(api("/events"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(events.status(), 200);
+    let mut got = String::new();
+    sse_until(b, &mut events, &mut got, "event: hello", 10).await;
+
+    let r = http
+        .post(api("/services/toy/task"))
+        .header("cookie", &cookie)
+        .json(&json!({"text": TASK_TEXT}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 202);
+    // The daemon writes the task's start line; the dashboard streams it.
+    sse_until(b, &mut events, &mut got, TASK_TEXT, 30).await;
+    let start = got
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter_map(|d| serde_json::from_str::<Value>(d).ok())
+        .find(|e| e["line"]["text"] == TASK_TEXT)
+        .unwrap_or_else(|| b.fail(&format!("no task line in the stream:\n{got}")));
+    assert_eq!(start["service"], "toy");
+    assert_eq!(start["line"]["kind"], "action");
+    assert_eq!(start["line"]["action"], "task");
+    assert_eq!(start["line"]["by"], "dash@127.0.0.1");
+    assert!(start["line"]["i"].is_u64(), "{start}");
+    assert!(start["line"].get("ok").is_none(), "{start}");
+
+    let end = b
+        .until("the task to end", 30, || {
+            b.lines("action", |l| l["action"] == "task" && l["ok"].is_boolean())
+                .first()
+                .cloned()
+        })
+        .await;
+    assert_eq!(end["ok"], true, "{end}");
+    assert_eq!(end["text"], TASK_SUMMARY);
+    assert_eq!(end["by"], "dash@127.0.0.1");
+    let cmd = b.lines("command", |l| l["action"] == "task");
+    assert_eq!(cmd.len(), 1, "one command for the task");
+    assert!(cmd[0].get("goal").is_none(), "{}", cmd[0]);
+    assert_eq!(cmd[0]["text"], TASK_CMD);
+    assert!(
+        cmd[0]["output"]
+            .as_str()
+            .is_some_and(|o| o.starts_with("tidied ") && o.contains(" on port ")),
+        "{}",
+        cmd[0]
+    );
+    assert!(
+        b.lines("note", |l| l["action"] == "task"
+            && l["text"].as_str().is_some_and(|t| t.starts_with("coder ")))
+            .len()
+            == 1,
+        "the task's coder session is journaled"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn daemon_and_cli_keep_a_toy_service() {
     let started = Instant::now();
@@ -535,6 +716,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
         config: dir.join("config"),
         dir: dir.clone(),
         daemon: None,
+        dash: None,
     };
     let weave_dir = dir.join("weaves/toy");
     std::fs::create_dir_all(&weave_dir).unwrap();
@@ -659,6 +841,12 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .filter_map(|l| l["text"].as_str().map(String::from))
         .collect();
     assert_eq!(ran, [MKDIR, WRITE]);
+    // A command line carries its output, redacted.
+    let mkdir = b.lines("command", |l| l["action"] == "install" && l["text"] == MKDIR);
+    assert_eq!(
+        mkdir[0]["output"],
+        format!("web root {}, token [TOY_TOKEN]", www.display())
+    );
     let learned = b.learned();
     assert_eq!(
         learned["steps"]["install/installed"]["commands"],
@@ -827,11 +1015,12 @@ async fn daemon_and_cli_keep_a_toy_service() {
     b.holds(&["rotated"], 20).await;
     assert!(dir.join("rotated").is_file());
     assert_eq!(b.passes("rotate"), 1);
+    let answers = b.lines("answer", |l| l["n"] == n && l["text"] == "yes");
+    assert_eq!(answers.len(), 1, "the answer is journaled");
     assert!(
-        b.lines("answer", |l| l["n"] == n && l["text"] == "yes")
-            .len()
-            == 1,
-        "the answer is journaled"
+        answers[0]["by"].as_str().is_some_and(|by| by.starts_with("cli:")),
+        "{}",
+        answers[0]
     );
     b.until("the webhook to hear the answer", 10, || {
         mock.hooks().into_iter().find(|h| {
@@ -1015,6 +1204,10 @@ async fn daemon_and_cli_keep_a_toy_service() {
         out.contains("mkdir -p") && out.contains("index.html"),
         "{out}"
     );
+
+    // 8. The dashboard: a password, the API, the live journal, a task in words.
+    phase("8 dash");
+    dashboard(&mut b).await;
 
     // 6d. The secret never left the box: journal, state, webhook, model requests.
     let journal_text = std::fs::read_to_string(b.service().join("journal.jsonl")).unwrap();
