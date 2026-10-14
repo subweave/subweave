@@ -1,15 +1,15 @@
-//! Where a weave comes from: a local directory, or `name[:tag]` in the repository.
+//! Where a weave comes from: a local directory, or `name[:tag]` in the subweave/library repository.
 
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-const RAW: &str = "https://raw.githubusercontent.com/subweave/subweave";
+const RAW: &str = "https://raw.githubusercontent.com/subweave/library";
 
 /// Returns the weave's name and its Weavefile's text.
 ///
 /// A path to a directory holding `Weavefile`, or to the file itself, names the weave
-/// after the directory. Otherwise `name[:tag]` is read from the repository at the git
+/// after the directory. Otherwise `name[:tag]` is read from the library at the git
 /// tag `<name>-<tag>`, or `main` without a tag.
 pub async fn resolve(spec: &str) -> Result<(String, String)> {
     let path = Path::new(spec);
@@ -47,7 +47,7 @@ pub async fn resolve(spec: &str) -> Result<(String, String)> {
         Some(t) => format!("{name}-{t}"),
         None => "main".to_string(),
     };
-    let url = format!("{RAW}/{git_ref}/examples/{name}/Weavefile");
+    let url = format!("{RAW}/{git_ref}/{name}/Weavefile");
     let mut req = reqwest::Client::new().get(&url);
     if let Ok(token) = std::env::var("GITHUB_TOKEN") {
         req = req.bearer_auth(token);
@@ -57,7 +57,7 @@ pub async fn resolve(spec: &str) -> Result<(String, String)> {
         .await
         .with_context(|| format!("fetching {url}"))?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        bail!("no weave {spec} in github.com/subweave/subweave ({url})");
+        bail!("no weave {spec} in github.com/subweave/library ({url})");
     }
     if !resp.status().is_success() {
         bail!("fetching {url}: HTTP {}", resp.status());
