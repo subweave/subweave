@@ -54,7 +54,7 @@ pub(crate) fn steps_key(ctx: &Ctx, a: &Action) -> String {
 
 pub(crate) fn save(service: &str, l: &Learned) {
     if let Err(e) = save_json(&paths::learned(service), l) {
-        eprintln!("{e:#}");
+        tracing::error!(service, error = %format!("{e:#}"), "cannot save learned.json");
     }
 }
 

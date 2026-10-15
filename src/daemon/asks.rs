@@ -36,7 +36,7 @@ pub(crate) fn load_sent() -> BTreeMap<u64, SentAsk> {
 
 fn save_sent(sent: &BTreeMap<u64, SentAsk>) {
     if let Err(e) = super::save_json(&sent_file(), sent) {
-        eprintln!("{e:#}");
+        tracing::error!(error = %format!("{e:#}"), "cannot save asks.sent.json");
     }
 }
 
@@ -60,7 +60,7 @@ pub(crate) fn withdraw(shared: &Shared, n: u64) {
         for (name, sent) in gone.sent {
             if let Some(ch) = channels.iter().find(|c| c.name == name) {
                 if let Err(e) = channel::close(ch, &sent).await {
-                    eprintln!("ask #{n}: {e:#}");
+                    tracing::warn!(ask = n, channel = %name, error = %format!("{e:#}"), "closing an ask failed");
                 }
             }
         }
@@ -77,7 +77,7 @@ impl Shared {
             .and_then(|t| t.trim().parse().ok())
             .unwrap_or(1);
         if let Err(e) = std::fs::write(&path, format!("{}\n", n + 1)) {
-            eprintln!("write {}: {e}", path.display());
+            tracing::error!(path = %path.display(), error = %e, "cannot write the next ask number");
         }
         n
     }
@@ -159,7 +159,7 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
         let channels = match channel::ls() {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("channels: {e:#}");
+                tracing::error!(error = %format!("{e:#}"), "cannot read the channels");
                 return;
             }
         };
@@ -169,7 +169,7 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
                     // Settled while it was being sent: nothing to poll, no buttons.
                     if shared.answered.lock().unwrap_or_else(|e| e.into_inner()).contains(&n) {
                         if let Err(e) = channel::close(&ch, &s).await {
-                            eprintln!("ask #{n}: {e:#}");
+                            tracing::warn!(ask = n, channel = %ch.name, error = %format!("{e:#}"), "closing an ask failed");
                         }
                         continue;
                     }
@@ -180,7 +180,7 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
                     save_sent(&sent);
                 }
                 Ok(None) => {}
-                Err(e) => eprintln!("{e:#}"),
+                Err(e) => tracing::warn!(service = %service, ask = n, channel = %ch.name, error = %format!("{e:#}"), "sending an ask failed"),
             }
         }
     });
@@ -230,12 +230,12 @@ pub(crate) async fn poll_loop(
                         let _ = tx.send((a, name.clone()));
                     }
                 }
-                Ok((_, Err(e))) => {
-                    eprintln!("{e:#}");
+                Ok((name, Err(e))) => {
+                    tracing::warn!(channel = %name, error = %format!("{e:#}"), "polling a channel failed");
                     failed = true;
                 }
                 Err(e) => {
-                    eprintln!("poll: {e}");
+                    tracing::error!(error = %e, "a channel poll ended");
                     failed = true;
                 }
             }

@@ -203,7 +203,7 @@ pub(crate) async fn sample(app: Arc<App>) {
         return;
     }
     if let Err(e) = std::fs::create_dir_all(paths::dash_state()) {
-        eprintln!("create {}: {e}", paths::dash_state().display());
+        tracing::error!(path = %paths::dash_state().display(), error = %e, "cannot create the dashboard's state");
     }
     prune();
     let mut pruned = Instant::now();
@@ -314,7 +314,7 @@ fn append(s: &Sample) {
         f.write_all(&line)
     };
     if let Err(e) = write() {
-        eprintln!("write {}: {e}", file().display());
+        tracing::error!(path = %file().display(), error = %e, "cannot write a vitals sample");
     }
 }
 
@@ -342,7 +342,7 @@ fn prune() {
     }
     let tmp = file().with_extension("jsonl.tmp");
     if let Err(e) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, file())) {
-        eprintln!("prune {}: {e}", file().display());
+        tracing::error!(path = %file().display(), error = %e, "cannot prune the vitals");
     }
 }
 

@@ -123,6 +123,7 @@ impl<S: Send + Sync> FromRequestParts<S> for Svc {
 /// Runs the dashboard in the foreground until SIGINT or SIGTERM.
 pub async fn serve(config: Config) -> Result<()> {
     config.need_password()?;
+    crate::logs::init();
     let ip = config.addr()?;
     let port = config.port;
     let app = Arc::new(App {
@@ -164,10 +165,10 @@ pub async fn serve(config: Config) -> Result<()> {
     let listener = tokio::net::TcpListener::bind((ip, port))
         .await
         .with_context(|| format!("listening on {ip}:{port}"))?;
-    eprintln!(
-        "subweave dash: http://{} (state {})",
-        SocketAddr::new(ip, port),
-        crate::paths::state().display()
+    tracing::info!(
+        url = %format!("http://{}", SocketAddr::new(ip, port)),
+        state = %crate::paths::state().display(),
+        "subweave dash started"
     );
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("listening for SIGTERM")?;
@@ -182,7 +183,7 @@ pub async fn serve(config: Config) -> Result<()> {
                 Ok(c) => c,
                 Err(e) => {
                     // Out of file descriptors, most likely: let some close.
-                    eprintln!("accept: {e}");
+                    tracing::warn!(error = %e, "accept failed");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 }

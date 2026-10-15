@@ -307,7 +307,7 @@ pub(crate) async fn run(
         Ok(c) => Arc::new(c),
         Err(e) => {
             super::journal::note(&name, &format!("cannot start: {e:#}"), "");
-            eprintln!("{name}: cannot start: {e:#}");
+            tracing::error!(service = %name, error = %format!("{e:#}"), "cannot start");
             return;
         }
     };
@@ -972,7 +972,7 @@ impl Loop {
             stopped: false,
         };
         if let Err(e) = save_json(&paths::status(&ctx.name), &status) {
-            eprintln!("{e:#}");
+            tracing::error!(service = %ctx.name, error = %format!("{e:#}"), "cannot write status.json");
         }
         self.status_at = Some(Instant::now());
         self.dirty = false;

@@ -21,7 +21,7 @@ pub(crate) struct Journal {
 impl Journal {
     pub fn open(service: &str, secrets: Vec<(String, String)>) -> Journal {
         let lines = svc::journal(service).unwrap_or_else(|e| {
-            eprintln!("{service}: {e:#}");
+            tracing::error!(service, error = %format!("{e:#}"), "cannot read the journal");
             Vec::new()
         });
         Journal {
@@ -277,7 +277,7 @@ pub(crate) fn append(path: &Path, l: &Line) {
         f.write_all(&bytes)
     };
     if let Err(e) = write() {
-        eprintln!("write {}: {e}", path.display());
+        tracing::error!(path = %path.display(), error = %e, "cannot write a journal line");
     }
 }
 
