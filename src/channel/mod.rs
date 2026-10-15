@@ -95,6 +95,9 @@ pub struct AskInfo {
     /// Answer word → its button label.
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
+    /// Only the person's signed answer on a Steery card settles it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub signed: bool,
 }
 
 impl AskInfo {

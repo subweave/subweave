@@ -240,6 +240,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                     goal: Some(goal.name.clone()),
                     action: None,
                     rule: None,
+                    signed: false,
                     card: card::tries(ctx, goal, n, per, &shown),
                     facts: shown,
                 });
@@ -254,6 +255,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                         goal: Some(goal.name.clone()),
                         action: None,
                         rule: None,
+                        signed: false,
                         card: card::no_fit(ctx, goal, &refusals, &[], None, &shown),
                         facts: shown,
                     });
@@ -272,6 +274,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                                     goal: Some(goal.name.clone()),
                                     action: None,
                                     rule: None,
+                                    signed: false,
                                     card: card::by_hand(ctx, goal, o, &shown),
                                     facts: shown,
                                 });
@@ -290,6 +293,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                                 goal: Some(goal.name.clone()),
                                 action: None,
                                 rule: None,
+                                signed: false,
                                 card,
                                 facts: shown,
                             });
@@ -455,6 +459,7 @@ fn ask_gate(ctx: &Ctx, goal: &Goal, action: &str, rule: &Rule, shown: &BTreeMap<
         goal: Some(goal.name.clone()),
         action: Some(action.to_string()),
         rule: Some(rule_text(rule)),
+        signed: false,
         card: card::gate(ctx, goal, a, rule, shown),
         facts: shown.clone(),
     });

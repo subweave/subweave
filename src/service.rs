@@ -148,6 +148,9 @@ pub struct Line {
     /// `ask`: what it says beyond its title, as the channels get it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// `ask`: only the person's signed answer on a Steery card settles it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed: Option<bool>,
     /// `command`: stdout and stderr, secrets redacted, the last 4 KB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
@@ -363,6 +366,8 @@ pub struct Ask {
     pub answers: Vec<String>,
     /// Answer word → button label.
     pub labels: BTreeMap<String, String>,
+    /// Only the person's signed answer on a Steery card settles it.
+    pub signed: bool,
     pub t: String,
 }
 
@@ -390,6 +395,7 @@ pub fn asks(service: &str, lines: &[Line]) -> Vec<Ask> {
                 facts: l.facts.clone().unwrap_or_default(),
                 answers: l.answers.clone().unwrap_or_default(),
                 labels: l.labels.clone().unwrap_or_default(),
+                signed: l.signed == Some(true),
                 t: l.t.clone(),
             })
         })

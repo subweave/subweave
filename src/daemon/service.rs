@@ -718,6 +718,7 @@ impl Loop {
                     goal: None,
                     action: None,
                     rule: None,
+                    signed: false,
                     card: card::misfit(&ctx),
                     facts: BTreeMap::new(),
                 });

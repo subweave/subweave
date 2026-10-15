@@ -93,6 +93,9 @@ pub(crate) struct AskReq {
     pub rule: Option<String>,
     pub card: Card,
     pub facts: BTreeMap<String, String>,
+    /// Only the person's signed answer on a Steery card settles it: it goes to no other
+    /// channel, and no inbox answer is taken.
+    pub signed: bool,
 }
 
 /// Journals the ask (and its rule as a `gate` line), sends it to every channel. An ask a
@@ -132,6 +135,7 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
             answers: Some(answers.clone()),
             labels: Some(labels.clone()),
             body: Some(req.card.lines.join("\n")),
+            signed: req.signed.then_some(true),
             by,
             ..Default::default()
         });
@@ -158,6 +162,7 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
             n,
             answers,
             labels,
+            signed: req.signed,
         }),
     };
     let shared = ctx.shared.clone();
@@ -167,6 +172,7 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
     let secrets = ctx.secrets.clone();
     let about = ctx.w.about.clone();
     let ep = super::episode::for_line().map(|(ep, _)| ep);
+    let signed = req.signed;
     tokio::spawn(async move {
         let channels = match channel::ls() {
             Ok(c) => c,
@@ -192,6 +198,9 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
             });
         }
         for ch in channels {
+            if signed && ch.kind() != channel::ChannelKind::Steery {
+                continue;
+            }
             match channel::send(&ch, &msg).await {
                 Ok(Some(s)) => {
                     // Settled while it was being sent: nothing to poll, no buttons.

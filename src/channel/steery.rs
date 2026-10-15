@@ -148,7 +148,7 @@ fn view(msg: &Message) -> Value {
 }
 
 /// An ask in session mode goes to the service's agent conversation; everything else,
-/// and every ask in card mode, goes as a card.
+/// every ask in card mode and every signed ask, goes as a card.
 pub(super) async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
     match (&ch.via, &msg.ask) {
         (
@@ -156,8 +156,8 @@ pub(super) async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
                 escalate: Escalate::Session { reach },
                 ..
             },
-            Some(_),
-        ) => session(ch, msg, reach).await,
+            Some(ask),
+        ) if !ask.signed => session(ch, msg, reach).await,
         _ => card(ch, msg).await,
     }
 }

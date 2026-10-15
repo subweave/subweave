@@ -391,6 +391,16 @@ impl Daemon {
             tracing::warn!(ask = n, word, answers = %answers.join(", "), "answer: not one of the ask's words");
             return;
         }
+        let on_steery = from.as_deref().is_some_and(|name| {
+            channel::ls()
+                .unwrap_or_default()
+                .iter()
+                .any(|c| c.name == name && c.kind() == channel::ChannelKind::Steery)
+        });
+        if ask.signed == Some(true) && !on_steery {
+            tracing::warn!(ask = n, by, "answer: only a signed answer on Steery settles this ask");
+            return;
+        }
         self.shared
             .answered
             .lock()

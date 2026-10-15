@@ -17,6 +17,9 @@ pub struct AnswerArgs {
     n: u64,
     /// yes, no, always, never, or an action's name
     word: String,
+    /// Why, in a sentence; it goes in the journal after the answer
+    #[arg(long)]
+    note: Option<String>,
     /// Run on this box, over ssh
     #[arg(long, value_name = "USER@HOST")]
     pub on: Option<String>,
@@ -36,7 +39,7 @@ pub fn run() -> Result<ExitCode> {
         .unwrap_or(0);
     for a in &asks {
         println!(
-            "#{:<3} {:sw$}  {:gw$}  {}  [{}]",
+            "#{:<3} {:sw$}  {:gw$}  {}  [{}]{}",
             a.n,
             a.service,
             a.goal.as_deref().unwrap_or("-"),
@@ -49,17 +52,21 @@ pub fn run() -> Result<ExitCode> {
                 })
                 .collect::<Vec<_>>()
                 .join(" | "),
+            if a.signed { "  signed: answer on Steery" } else { "" },
         );
     }
     println!("\nanswer with: subweave answer <n> <word>");
     Ok(ExitCode::SUCCESS)
 }
 
-/// The open ask `n`, when `word` answers it.
+/// The open ask `n`, when `word` answers it and an answer from here may settle it.
 pub(crate) fn check_answer(n: u64, word: &str) -> Result<Ask> {
     let Some(ask) = service::all_asks()?.into_iter().find(|a| a.n == n) else {
         bail!("no open ask #{n}: subweave inbox lists them");
     };
+    if ask.signed {
+        bail!("#{n}: only a signed answer on Steery settles this");
+    }
     if !ask.answers.iter().any(|a| a == word) {
         bail!("#{n} takes {}, not {word:?}", ask.answers.join(", "));
     }
@@ -80,7 +87,11 @@ pub(crate) fn send_answer(n: u64, word: &str, by: String, note: Option<String>) 
 }
 
 pub fn answer(args: AnswerArgs) -> Result<ExitCode> {
-    let ask = send_answer(args.n, &args.word, super::by(), None)?;
+    let note = args
+        .note
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    let ask = send_answer(args.n, &args.word, super::by(), note)?;
     println!("answered #{} for {}: {}", args.n, ask.service, args.word);
     Ok(ExitCode::SUCCESS)
 }
