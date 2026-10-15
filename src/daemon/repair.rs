@@ -205,9 +205,16 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
     let shown = facts::shown(&values);
     let (action, rules_ok) = match &job.forced {
         Some(f) => {
-            if ctx.w.action(&f.action).is_none() {
+            let Some(a) = ctx.w.action(&f.action) else {
                 ctx.journal()
                     .note(Some(&goal.name), format!("no action {}", f.action));
+                return Outcome::Nothing;
+            };
+            if is_off(ctx, a, &values) {
+                ctx.journal().note(
+                    Some(&goal.name),
+                    format!("{} does not run on this box: its IF is false", f.action),
+                );
                 return Outcome::Nothing;
             }
             match gate(ctx, goal, &f.action, &values, f.approved) {
@@ -241,35 +248,49 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
             let mut out: BTreeSet<String> = BTreeSet::new();
             let mut refusals: Vec<(&Action, &Rule, bool)> = Vec::new();
             loop {
-                let cands = candidates(ctx, goal, &values, &out);
-                if cands.is_empty() {
+                let (cands, off) = candidates(ctx, goal, &values, &out);
+                if cands.is_empty() && off.is_empty() {
                     ctx.ask(AskReq {
                         goal: Some(goal.name.clone()),
                         action: None,
                         rule: None,
-                        card: card::no_fit(
-                            ctx,
-                            goal,
-                            &refusals,
-                            &off_here(ctx, goal, &values),
-                            &shown,
-                        ),
+                        card: card::no_fit(ctx, goal, &refusals, &[], None, &shown),
                         facts: shown,
                     });
                     return Outcome::Asked;
                 }
-                let pick = if cands.len() == 1 {
+                // An action its IF keeps off still takes part in the diagnosis: when it is
+                // the fix, the person gets its steps instead of a bare "make this true".
+                let pick = if cands.len() == 1 && off.is_empty() {
                     cands[0].name.clone()
                 } else {
-                    match decide(ctx, goal, &cands, &values).await {
-                        Pick::Action(a) => a,
+                    let all: Vec<&Action> = cands.iter().chain(&off).copied().collect();
+                    match decide(ctx, goal, &all, &values).await {
+                        Pick::Action(a) => match off.iter().find(|o| o.name == a) {
+                            Some(o) => {
+                                ctx.ask(AskReq {
+                                    goal: Some(goal.name.clone()),
+                                    action: None,
+                                    rule: None,
+                                    card: card::by_hand(ctx, goal, o, &shown),
+                                    facts: shown,
+                                });
+                                return Outcome::Asked;
+                            }
+                            None => a,
+                        },
                         Pick::Wait => return Outcome::Wait,
                         Pick::Ask(why) => {
+                            let card = if cands.is_empty() {
+                                card::no_fit(ctx, goal, &refusals, &off, Some(&why), &shown)
+                            } else {
+                                card::which(ctx, goal, &cands, &why, &shown)
+                            };
                             ctx.ask(AskReq {
                                 goal: Some(goal.name.clone()),
                                 action: None,
                                 rule: None,
-                                card: card::which(ctx, goal, &cands, &why, &shown),
+                                card,
                                 facts: shown,
                             });
                             return Outcome::Asked;
@@ -298,39 +319,54 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
     Outcome::Done
 }
 
+/// The actions for this goal, not ruled out yet: those that run on this box, then the
+/// ones that are the person's here: written for it (`FOR` names it), with an `IF` that
+/// reads only ARGs and is false. An `IF` on facts, `SINCE` or `PREV` is a precondition:
+/// while false, the action is no fix at all.
 fn candidates<'a>(
     ctx: &'a Ctx,
     goal: &Goal,
     values: &Values,
     out: &BTreeSet<String>,
-) -> Vec<&'a Action> {
-    let scope = Scope {
-        ctx,
-        facts: values,
-        prev: None,
-    };
-    ctx.w
-        .actions
-        .iter()
-        .filter(|a| a.for_goals.is_empty() || a.for_goals.contains(&goal.name))
-        .filter(|a| a.when_if.as_ref().is_none_or(|e| expr::holds(e, &scope)))
-        .filter(|a| !out.contains(&a.name))
-        .collect()
+) -> (Vec<&'a Action>, Vec<&'a Action>) {
+    let mut runs = Vec::new();
+    let mut theirs = Vec::new();
+    for a in &ctx.w.actions {
+        if out.contains(&a.name) {
+            continue;
+        }
+        let named = a.for_goals.contains(&goal.name);
+        if !named && !a.for_goals.is_empty() {
+            continue;
+        }
+        if !is_off(ctx, a, values) {
+            runs.push(a);
+        } else if named && a.when_if.as_ref().is_some_and(|e| args_only(&ctx.w, e)) {
+            theirs.push(a);
+        }
+    }
+    (runs, theirs)
 }
 
-/// The actions written for this goal (`FOR` names it) that their `IF` keeps off now.
-fn off_here<'a>(ctx: &'a Ctx, goal: &Goal, values: &Values) -> Vec<&'a Action> {
+/// The action's `IF` keeps it off now.
+fn is_off(ctx: &Ctx, a: &Action, values: &Values) -> bool {
     let scope = Scope {
         ctx,
         facts: values,
         prev: None,
     };
-    ctx.w
-        .actions
-        .iter()
-        .filter(|a| a.for_goals.contains(&goal.name))
-        .filter(|a| a.when_if.as_ref().is_some_and(|e| !expr::holds(e, &scope)))
-        .collect()
+    a.when_if.as_ref().is_some_and(|e| !expr::holds(e, &scope))
+}
+
+/// The expression reads only ARGs: it says how this box is set up, not how it is now.
+fn args_only(w: &weave::Weave, e: &weave::Expr) -> bool {
+    let mut only = true;
+    e.walk(&mut |x| match x {
+        weave::Expr::Since(_) | weave::Expr::Prev(_) => only = false,
+        weave::Expr::Name(n) if w.fact(n).is_some() => only = false,
+        _ => {}
+    });
+    only
 }
 
 /// A rule as written, the key its `always` and `never` answers are kept under.

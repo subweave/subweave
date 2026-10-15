@@ -255,7 +255,9 @@ ACTION fix WITHIN 30m
 - `"<label>"`: the button that runs the action on a card, at most 40 characters: `"Restart PostgreSQL"`. Without one, the button shows the name.
 - `FOR`: the goals this action may fix. Without `FOR`, any goal.
 - `WITHIN`: after the last step, the goal must hold again within this time; `5m` by default. Until then the loop does nothing else for that goal. A restore that replays WAL for hours says `WITHIN 6h`.
-- `IF`: not a candidate while the expression is false.
+- `IF`: the action does not run while the expression is false.
+  - An `IF` on facts, `SINCE` or `PREV` is a precondition: while false, the action is no fix at all.
+  - An `IF` on ARGs only says how the box is set up: the action is the person's here. When its `FOR` names the failing goal and the decider picks it, the person gets a card that names the fix, like `Update reth and Lighthouse yourself?`. `subweave do` and an answer never run it.
 - `WHEN` says when the action is the right fix, not what it does. The decider chooses by the name and `WHEN` alone. See [LIMITS.md](LIMITS.md#2-the-action-description-is-the-decision).
 - Steps run in order. A `RUN` that exits non-zero ends the action as failed.
 - `DO` hands the task to the coder, unless this box already learned its steps.
@@ -326,8 +328,8 @@ Each tick, the daemon:
 2. Checks the due goals in graph order: code conditions in code, quoted ones in one decider request.
 3. Takes the first goal that fails.
    - It has no action: the daemon asks the person, with the facts.
-   - It has one action: the daemon runs it. No model.
-   - It has several: the decider picks one of them, `wait` or `ask`.
+   - It has one action that runs on this box, and no other: the daemon runs it. No model.
+   - Otherwise the decider picks one of them, `wait` or `ask`, counting the actions this box's ARGs keep off. Such an action goes to the person as the fix to make by hand.
 4. Gates the action with the rules.
 5. Runs the action: the learned steps, else a recipe, else its `RUN`, `DO` and `ADD` steps.
 6. Checks the goal until it holds or `WITHIN` ends, and writes the outcome to the journal.

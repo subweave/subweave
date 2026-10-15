@@ -62,6 +62,11 @@ pub async fn run() -> Result<()> {
     for dir in [paths::inbox(), paths::services()] {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     }
+    // Two daemons on one state would each run every service: every check, repair and ask
+    // twice.
+    if let Some(r) = running() {
+        anyhow::bail!("a daemon already runs on {}: pid {}", paths::state().display(), r.pid);
+    }
     save_json(
         &paths::daemon(),
         &Running {

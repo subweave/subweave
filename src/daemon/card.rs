@@ -199,16 +199,18 @@ pub(crate) fn tries(
     }
 }
 
-/// No action fits the goal: a rule refuses each one that does, or the `IF` of each one
-/// written for it keeps it off on this box.
+/// No action fits the goal: a rule refuses each one that does, the `IF` of each one
+/// written for it keeps it off on this box, or `decided` says why the decider picked none.
 pub(crate) fn no_fit(
     ctx: &Ctx,
     g: &Goal,
     refused: &[(&Action, &Rule, bool)],
     off: &[&Action],
+    decided: Option<&str>,
     now: &BTreeMap<String, String>,
 ) -> Card {
     let mut lines = goal_lines(ctx, g, now);
+    lines.extend(decided.map(str::to_string));
     for (a, r, kept) in refused {
         lines.push(if *kept {
             format!("{} is off: you answered Never run it for it before.", label(ctx, a))
@@ -230,6 +232,27 @@ pub(crate) fn no_fit(
         title: format!("Can you make this true: {}?", short(&subject(ctx, g), SUBJECT)),
         lines,
         buttons: buttons(&[("yes", "Fixed it, check again"), ("no", &later(Some(g)))]),
+    }
+}
+
+/// The decider's fix is an action this box's ARGs keep off: the person makes it.
+/// `yes` checks the goal again; it never runs the action.
+pub(crate) fn by_hand(ctx: &Ctx, g: &Goal, a: &Action, now: &BTreeMap<String, String>) -> Card {
+    let mut lines = goal_lines(ctx, g, now);
+    let when = weave::subst(&a.when, &ctx.spec.args);
+    let when = when.trim().trim_end_matches('.');
+    lines.push(if when.is_empty() {
+        format!("Subweave's fix: {}.", label(ctx, a))
+    } else {
+        format!("Subweave's fix: {}. It is right when {when}.", label(ctx, a))
+    });
+    if let Some(e) = &a.when_if {
+        lines.push(format!("This box is set up so Subweave does not run it: `IF {e}`."));
+    }
+    Card {
+        title: format!("{} yourself?", label(ctx, a).trim_end_matches(['.', '?'])),
+        lines,
+        buttons: buttons(&[("yes", "Done, check again"), ("no", &later(Some(g)))]),
     }
 }
 
