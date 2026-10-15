@@ -25,7 +25,8 @@ pub struct BoxInfo {
     pub cpus: u32,
     pub gpus: u32,
     pub ram_gb: f64,
-    /// Free plus used space of the filesystem that holds the state directory.
+    /// Free plus used space of the box's largest disk filesystem: a weave may keep its
+    /// data on any mount, like `/mnt/data`, not only where the state directory is.
     pub disk_gb: f64,
 }
 
@@ -39,17 +40,21 @@ impl BoxInfo {
             cpus,
             gpus,
             ram_gb,
-            disk_gb: disk_gb(&paths::state())?,
+            disk_gb: largest_disk_gb()?,
         })
     }
 
-    /// What this box lacks for the weave's FROM and NEEDS, one line each.
+    /// What this box lacks for the weave's FROM and NEEDS, one line each. FROM fits the
+    /// box's system at that version, or a version under it (`macos:26` fits 26.5).
     pub fn check(&self, w: &Weave) -> Vec<String> {
         let mut out = Vec::new();
         if let Some(from) = &w.from {
-            if from.os != self.os || from.version != self.version {
+            let fits = from.os == self.os
+                && (self.version == from.version
+                    || self.version.starts_with(&format!("{}.", from.version)));
+            if !fits {
                 out.push(format!(
-                    "this box runs {} {}; the weave needs {} {}",
+                    "this box runs {} {}; the weave needs {}:{}",
                     self.os, self.version, from.os, from.version
                 ));
             }
@@ -75,7 +80,7 @@ impl BoxInfo {
         }
         if let Some(disk) = n.disk_gb.filter(|d| self.disk_gb < d * SIZE_SLACK) {
             out.push(format!(
-                "this box has a {:.0} GB disk; the weave needs {disk} GB",
+                "this box's largest disk is {:.0} GB; the weave needs {disk} GB",
                 self.disk_gb
             ));
         }
@@ -163,6 +168,30 @@ fn run(cmd: &str, args: &[&str]) -> Result<String> {
         bail!("{cmd} {} exited with {}", args.join(" "), out.status);
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// The largest filesystem on a block device: `/proc/mounts` sources under `/dev/`.
+#[cfg(target_os = "linux")]
+fn largest_disk_gb() -> Result<f64> {
+    let mounts = std::fs::read_to_string("/proc/mounts").context("reading /proc/mounts")?;
+    let largest = mounts
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            let source = f.next()?;
+            let at = f.next()?;
+            source.starts_with("/dev/").then_some(at)
+        })
+        // /proc/mounts escapes a space in a mount point as \040.
+        .filter_map(|at| disk_gb(Path::new(&at.replace("\\040", " "))).ok())
+        .fold(0.0, f64::max);
+    if largest > 0.0 { Ok(largest) } else { disk_gb(&paths::state()) }
+}
+
+/// macOS keeps one data volume: the one that holds the state directory.
+#[cfg(not(target_os = "linux"))]
+fn largest_disk_gb() -> Result<f64> {
+    disk_gb(&paths::state())
 }
 
 /// The nearest existing directory at or above `dir`: the state directory may not exist yet.

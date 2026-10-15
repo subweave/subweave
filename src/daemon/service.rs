@@ -156,7 +156,7 @@ impl Ctx {
         };
         let (boxinfo, misfit) = match BoxInfo::read() {
             Ok(info) => {
-                let misfit = misfit(&w, &info);
+                let misfit = info.check(&w);
                 (Some(info), misfit)
             }
             Err(e) => (None, vec![format!("cannot read this box: {e:#}")]),
@@ -247,26 +247,6 @@ impl Ctx {
     pub fn ask(&self, req: AskReq) -> u64 {
         asks::raise(self, req)
     }
-}
-
-/// FROM matches when the box runs that system at that version, or a version under it
-/// (`macos:26` fits 26.5); NEEDS by the box module.
-fn misfit(w: &Weave, info: &BoxInfo) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(f) = &w.from {
-        let fits = f.os == info.os
-            && (info.version == f.version || info.version.starts_with(&format!("{}.", f.version)));
-        if !fits {
-            out.push(format!(
-                "this box runs {} {}; the weave needs {}:{}",
-                info.os, info.version, f.os, f.version
-            ));
-        }
-    }
-    let mut needs_only = w.clone();
-    needs_only.from = None;
-    out.extend(info.check(&needs_only));
-    out
 }
 
 struct Track {
