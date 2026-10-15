@@ -43,13 +43,36 @@ pub async fn run(args: Args) -> Result<ExitCode> {
     check_name(&name)?;
     let decide = model::decide_model(args.decide.as_deref(), &w.model)?;
     let code = model::code_models(&args.code, &w.model)?;
-    let request = args.request.unwrap_or_default();
     let decider = Decider::new(decide.clone())?;
-    let plan = plan::plan(&w, &request, &decider, None).await?;
+    // The service already here: a new weave version, and the sentence, if any, is a change
+    // to its ARGs, as with `tell`. Every ARG it does not say keeps its value.
+    let before = service::names()?
+        .contains(&name)
+        .then(|| service::spec(&name))
+        .transpose()?;
+    let request = match (args.request, &before) {
+        (Some(r), _) => r,
+        (None, Some(s)) => s.request.clone(),
+        (None, None) => String::new(),
+    };
+    let said = if before.is_some() && request == before.as_ref().map_or("", |s| s.request.as_str())
+    {
+        ""
+    } else {
+        request.as_str()
+    };
+    let plan = plan::plan(&w, said, &decider, before.as_ref().map(|s| &s.args)).await?;
     if !flow::settle(&plan, args.yes)? {
         return Ok(ExitCode::FAILURE);
     }
-    let secrets = flow::secrets(&w, &plan.secrets, &plan.values)?;
+    let have = super::tell::stored_secrets(&name);
+    let missing: Vec<String> = plan
+        .secrets
+        .iter()
+        .filter(|s| !have.contains_key(*s))
+        .cloned()
+        .collect();
+    let secrets = flow::secrets(&w, &missing, &plan.values)?;
     let bundle = Bundle {
         spec: Spec {
             name: name.clone(),
@@ -58,7 +81,7 @@ pub async fn run(args: Args) -> Result<ExitCode> {
             args: plan.values,
             decide: decide.to_string(),
             code: code.iter().map(ModelRef::to_string).collect(),
-            created: now(),
+            created: before.map_or_else(now, |s| s.created),
             stopped: false,
         },
         weavefile: text,

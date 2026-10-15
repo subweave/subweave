@@ -124,7 +124,7 @@ pub fn send_keys(args: &Args, host: &str) -> Result<()> {
 }
 
 /// The SECRETs the daemon holds; none when this user cannot read them.
-fn stored_secrets(service: &str) -> BTreeMap<String, serde_json::Value> {
+pub(crate) fn stored_secrets(service: &str) -> BTreeMap<String, serde_json::Value> {
     std::fs::read(paths::secrets(service))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())

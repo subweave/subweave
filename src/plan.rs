@@ -12,7 +12,7 @@ use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::json;
 
-use crate::model::decider::{Decider, Question};
+use crate::model::decider::{Answers, Decider, Question};
 use crate::weave::expr::{self, Env, Value};
 use crate::weave::{ArgKind, Rule, Weave, graph};
 
@@ -268,12 +268,21 @@ pub async fn plan(
         },
     );
     let about = w.about.as_deref().unwrap_or(&w.name);
-    let a1 = decider
-        .ask(
-            json!({"service": about, "request": request, "words": words}),
-            q1,
-        )
-        .await?;
+    // No words say nothing: every setting is unsaid, without a decider call.
+    let a1 = if words.is_empty() {
+        Answers {
+            answers: IndexMap::new(),
+            usage: Default::default(),
+            cost_usd: 0.0,
+        }
+    } else {
+        decider
+            .ask(
+                json!({"service": about, "request": request, "words": words}),
+                q1,
+            )
+            .await?
+    };
     cost += a1.cost_usd;
 
     // 2. Code: each word fills one setting; the most confident slot keeps it.
@@ -345,8 +354,10 @@ pub async fn plan(
             }
             ArgKind::Options(opts) => {
                 let key = format!("arg.{}", a.name);
-                let Some((c, _, confidence)) = a1.choice(&key) else {
-                    bail!("decider: no choice for {key}");
+                let (c, confidence) = match a1.choice(&key) {
+                    Some((c, _, p)) => (c, p),
+                    None if words.is_empty() => ("unsaid", 1.0),
+                    None => bail!("decider: no choice for {key}"),
                 };
                 let p = round2(confidence);
                 if c == "other" || c == "unsaid" {
@@ -543,15 +554,21 @@ pub async fn plan(
             ));
         }
     }
+    let after: BTreeMap<&str, &str> = vals
+        .iter()
+        .filter_map(|(k, v)| Some((k.as_str(), v.as_deref()?)))
+        .collect();
+    let changed = |now: &BTreeMap<String, String>| {
+        after.len() != now.len()
+            || now
+                .iter()
+                .any(|(k, v)| after.get(k.as_str()) != Some(&v.as_str()))
+    };
     let ask_p: Vec<f64> = match current {
         None => (0..asks.len())
             .map(|i| noul2(&format!("ask.{i}")))
             .collect(),
-        Some(now) if !asks.is_empty() => {
-            let after: BTreeMap<&str, &str> = vals
-                .iter()
-                .filter_map(|(k, v)| Some((k.as_str(), v.as_deref()?)))
-                .collect();
+        Some(now) if !asks.is_empty() && changed(now) => {
             let q3: IndexMap<String, Question> = asks
                 .iter()
                 .enumerate()

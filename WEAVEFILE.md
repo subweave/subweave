@@ -540,7 +540,9 @@ The check is two decider requests, then code:
 - `plan --json` prints the findings with each probability.
 - `plan <weave>` with no request prints the `ARG`s and the goal graph.
 
-`subweave tell <service> "<request>"` changes the ARGs of a running service. Each quoted `ASK` then compares the ARGs now with the ARGs after. When the person says yes, the daemon checks every goal again. A goal that the new ARGs break fails, and the loop fixes it like any other.
+`subweave tell <service> "<request>"` changes the ARGs of a running service. Each quoted `ASK` then compares the ARGs now with the ARGs after; with no ARG changed, nothing asks. When the person says yes, the daemon checks every goal again. A goal that the new ARGs break fails, and the loop fixes it like any other.
+
+`subweave run` with the name of a service the box already runs takes a new version of its weave. Its ARGs and SECRETs stay; a request, if given, is a change, as with `tell`. The same request again, or none, changes no ARG and asks the decider nothing.
 
 ## Channels
 

@@ -125,7 +125,9 @@ fn view(msg: &Message) -> Value {
             .facts
             .iter()
             .map(|(k, v)| {
+                // Steery refuses an empty field value; an empty fact is news too.
                 let v = match v.char_indices().nth(FACT_VALUE) {
+                    _ if v.trim().is_empty() => "empty".to_owned(),
                     Some((i, _)) => format!("{}…", &v[..i]),
                     None => v.clone(),
                 };

@@ -1772,6 +1772,53 @@ async fn daemon_and_cli_keep_a_toy_service() {
         );
     }
 
+    // 6h. run again, as for a new weave version: no request, no TOY_TOKEN in the shell. The
+    // ARGs and the SECRET stay, and the request check asks the decider nothing.
+    phase("6h run again");
+    let checks = || {
+        mock.seen()
+            .requests
+            .iter()
+            .filter(|(p, _, b)| p == "/systemone" && b.contains("\"words\""))
+            .count()
+    };
+    let checks_before = checks();
+    let spec_before = std::fs::read(b.service().join("service.json")).unwrap();
+    let mut args = vec!["run", &weave, "--yes", "-d"];
+    args.extend(models);
+    let o = b
+        .command()
+        .env_remove("TOY_TOKEN")
+        .args(&args)
+        .output()
+        .await
+        .expect("subweave runs");
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        o.status.success(),
+        "{out}\n{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(out.contains("handed toy to the daemon"), "{out}");
+    assert_eq!(checks(), checks_before, "the run again asked the decider");
+    b.until("the daemon to take the run again", 15, || {
+        b.lines("note", |l| {
+            l["text"].as_str().is_some_and(|t| t.starts_with("run "))
+        })
+        .get(1)
+        .cloned()
+    })
+    .await;
+    let spec: Value =
+        serde_json::from_slice(&std::fs::read(b.service().join("service.json")).unwrap()).unwrap();
+    let was: Value = serde_json::from_slice(&spec_before).unwrap();
+    assert_eq!(spec["args"], was["args"]);
+    assert_eq!(spec["request"], was["request"]);
+    assert_eq!(spec["created"], was["created"]);
+    let secrets = std::fs::read_to_string(b.service().join("secrets.json")).unwrap();
+    assert!(secrets.contains(SECRET), "the run again kept TOY_TOKEN");
+    b.holds(&["installed", "running"], 30).await;
+
     // 7. stop: the loop ends and the journal stops growing, even with the server down.
     phase("7 stop");
     let out = b.ok(&["stop", "toy"]).await;

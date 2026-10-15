@@ -514,7 +514,10 @@ fn write_bundle(b: &svc::Bundle) -> Result<()> {
     let mut spec = b.spec.clone();
     spec.stopped = false;
     save_json(&paths::service_json(name), &spec)?;
-    write_secrets(name, &b.secrets)
+    // A run again keeps the SECRETs it did not ask for.
+    let mut secrets = read_secrets(name);
+    secrets.extend(b.secrets.clone());
+    write_secrets(name, &secrets)
 }
 
 fn read_secrets(service: &str) -> BTreeMap<String, String> {
