@@ -30,10 +30,12 @@ const LEARN_EFFORT: &str = "low";
 const FACT_SYSTEM: &str = "You write one bash command that reads a fact on this box. The \
     command must only read: never install, write, delete, restart or refresh a cache. It runs \
     as `bash -eo pipefail -c <command>` with a 60 second limit, and the ARGs are environment \
-    variables. The service may be down or not installed yet: test that first and print the \
-    fact's value for that case (`systemctl is-active -q <unit> || { echo 0; exit 0; }`). Then \
-    read the fact with no fallback: when the service runs and the read fails, the command must \
-    fail too, so a wrong query never reads as a healthy value. Answer by calling the tool `fact`.";
+    variables. The service may be down or not installed yet: test that first, on a unit, \
+    container or process the fact, the ARGs or the skills name, and print the fact's value for \
+    that case (`systemctl is-active -q <unit> || { echo 0; exit 0; }`). `Service` below is \
+    Subweave's label for this weave, not a unit name. Then read the fact with no fallback: \
+    when the service runs and the read fails, the command must fail too, so a wrong query \
+    never reads as a healthy value. Answer by calling the tool `fact`.";
 
 pub(crate) fn key(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
@@ -419,13 +421,17 @@ async fn learn(
                     instructions: "Does this command swallow the errors of its main read with \
                         `|| echo`, `2>/dev/null`, `|| R=0` or a similar fallback that prints a \
                         value, rather than only guarding for the service being down or not \
-                        installed?"
+                        installed? A guard on a unit, container or process that neither `fact` \
+                        nor `args` names is such a fallback: it can print the value forever."
                         .into(),
                 },
             );
         }
         let a = decider
-            .ask(json!({"fact": text, "command": ctx.redact(&command)}), q)
+            .ask(
+                json!({"fact": text, "args": ctx.spec.args, "command": ctx.redact(&command)}),
+                q,
+            )
             .await?;
         *cost += a.cost_usd;
         let p = a.noul("changes").unwrap_or(1.0);
