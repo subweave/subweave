@@ -374,7 +374,9 @@ async fn check(app: &App, ip: IpAddr, password: String) -> Result<(), ApiError> 
 /// its SHA-256, so later scrapes skip argon2.
 pub(crate) async fn scraper(app: &App, headers: &HeaderMap, peer: SocketAddr) -> Result<(), ApiError> {
     let ip = client_ip(headers, peer);
-    if ip.is_loopback() {
+    // A proxy on this box reaches the dashboard over loopback for clients anywhere.
+    let forwarded = headers.contains_key("x-forwarded-for");
+    if ip.is_loopback() && !forwarded {
         return Ok(());
     }
     let Some(password) = headers

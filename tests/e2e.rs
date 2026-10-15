@@ -788,6 +788,20 @@ async fn dashboard(b: &mut Box_) {
     );
     let r = http.get(&metrics).send().await.unwrap();
     assert_eq!(r.status(), 200, "a loopback scrape needs no password");
+    // A proxy on this box forwards for a client elsewhere: the password is needed.
+    let forwarded = |auth: Option<&str>| {
+        let mut req = http.get(&metrics).header("x-forwarded-for", "203.0.113.7");
+        if let Some(a) = auth {
+            req = req.bearer_auth(a);
+        }
+        req.send()
+    };
+    let r = forwarded(None).await.unwrap();
+    assert_eq!(r.status(), 401, "a forwarded scrape with no password");
+    let r = forwarded(Some("not it")).await.unwrap();
+    assert_eq!(r.status(), 401, "a forwarded scrape with a wrong password");
+    let r = forwarded(Some(DASH_PASSWORD)).await.unwrap();
+    assert_eq!(r.status(), 200, "a forwarded scrape with the password");
     // A scrape from this box's own non-loopback address, when it has one and can reach it.
     let lan = std::net::UdpSocket::bind("0.0.0.0:0")
         .and_then(|s| s.connect("192.0.2.1:9").map(|()| s))
