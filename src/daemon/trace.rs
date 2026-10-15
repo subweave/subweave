@@ -100,6 +100,9 @@ fn kind_name(k: Kind) -> &'static str {
     }
 }
 
+/// How long an open episode with no new line keeps its root span back.
+const STALE: Duration = Duration::from_secs(3600);
+
 /// A journal line of `service`, just written: a child span of its episode's trace.
 pub(crate) fn line(service: &str, l: &Line) {
     let Some(t) = TRACES.as_ref() else { return };
@@ -112,8 +115,17 @@ pub(crate) fn line(service: &str, l: &Line) {
         .unwrap_or(end);
     let ends_task =
         l.kind == Kind::Action && l.action.as_deref() == Some(TASK) && l.ok.is_some();
+    let mut stale = Vec::new();
     let ended = {
         let mut open = t.open.lock().unwrap_or_else(|e| e.into_inner());
+        // A task that waits on an unanswered ask, or a line after its episode ended, never
+        // sees an end: its root goes out once it has been quiet for STALE.
+        if !open.contains_key(ep) {
+            let before = end.checked_sub(STALE).unwrap_or(end);
+            let old: Vec<String> =
+                open.iter().filter(|(_, r)| r.end < before).map(|(k, _)| k.clone()).collect();
+            stale.extend(old.into_iter().filter_map(|k| open.remove(&k).map(|r| (k, r))));
+        }
         let r = open.entry(ep.to_string()).or_insert_with(|| Root {
             service: service.to_string(),
             job: None,
@@ -187,6 +199,11 @@ pub(crate) fn line(service: &str, l: &Line) {
     span.end_with_timestamp(end);
     if let Some(r) = ended {
         root(t, trace_id, root_id, r);
+    }
+    for (ep, r) in stale {
+        if let Some((trace_id, root_id)) = ids(&ep) {
+            root(t, trace_id, root_id, r);
+        }
     }
 }
 
