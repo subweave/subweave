@@ -142,9 +142,10 @@ impl FromStr for ChannelKind {
 
 /// One entry of `channels.json`.
 ///
-/// `target`: steery the workspace id, telegram the chat id, email the address, webhook
-/// and heartbeat the URL. `secret`: steery the key, telegram the bot token, slack the
-/// incoming-webhook URL, email the SMTP URL, webhook an optional bearer token.
+/// `target`: steery the workspace id, telegram the chat id, slack the channel id (bot
+/// token) or none (webhook), email the address, webhook and heartbeat the URL. `secret`:
+/// steery the key, telegram and slack the bot token, a slack incoming-webhook URL, email
+/// the SMTP URL, webhook an optional bearer token.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Channel {
     pub name: String,
@@ -293,12 +294,18 @@ pub async fn add(
             target
         }
         ChannelKind::Slack => {
-            need_secret("an incoming-webhook URL")?;
-            need_url(secret.as_deref().unwrap_or_default())?;
-            if target.is_some() {
-                bail!("slack takes no target: the webhook URL comes from stdin");
+            let secret = secret.as_deref().unwrap_or_default();
+            match &target {
+                Some(_) if !secret.starts_with("xoxb-") => {
+                    bail!("slack with a channel id needs a bot token (xoxb-…) on stdin")
+                }
+                Some(_) => {}
+                None => {
+                    need_secret("an incoming-webhook URL, or a bot token with a channel id")?;
+                    need_url(secret)?;
+                }
             }
-            None
+            target
         }
         ChannelKind::Email => {
             need_target("the address to send to")?;
