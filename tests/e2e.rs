@@ -1190,7 +1190,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .find(|l| l.starts_with(&format!("#{n} ")))
         .unwrap_or_else(|| b.fail(&format!("no #{n} in inbox:\n{out}")));
     assert!(
-        row.contains("toy") && row.contains("rotated") && row.contains("run rotate for rotated?"),
+        row.contains("toy") && row.contains("rotated") && row.contains("rotated fails: run rotate?"),
         "{row}"
     );
     assert!(row.contains("[yes no always never]"), "{row}");
