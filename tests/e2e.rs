@@ -1,7 +1,8 @@
 //! One end-to-end scenario: the built `subweave` binary runs as a daemon and as CLI
 //! commands against a temporary state and config directory. Only the vendors are
 //! mocked: one local HTTP server plays OpenRouter (`/systemone` for the decider,
-//! `/chat/completions` for the coder) and a webhook receiver.
+//! `/chat/completions` for the coder), Steery (`/v1/…`, signing as a pinned phone) and
+//! a webhook receiver.
 //!
 //! The mock answers by what each request asks (question keys, the failing goal, the
 //! box's facts, the coder's earlier tool calls), never by call order.
@@ -9,18 +10,27 @@
 use std::net::TcpListener as StdListener;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::extract::State;
-use axum::http::HeaderMap;
-use axum::routing::post;
+use axum::extract::{Path as UrlPath, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::routing::{get, post};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Map, Value, json};
 
 const SECRET: &str = "tok-e2e-5f1c9a77d3";
 const API_KEY: &str = "mock-key-e2e-81b2c";
 const FIREWALL_RULE: &str = "open a port on the firewall";
+const STEERY_KEY: &str = "sk-e2e-3b9d0c51";
+const WORKSPACE: &str = "0199f3a0-1c2d-7e4f-8a5b-6c7d8e9f0a1b";
+const SIGNER: &str = "0199f3a0-2d3e-7f40-9b6c-7d8e9f0a1b2c";
+const SIGNER_NAME: &str = "e2e phone";
+/// How an agent elsewhere runs subweave on the toy's box.
+const REACH: &str = "root@box-e2e";
 
 /// Every request the mock got.
 #[derive(Default)]
@@ -35,9 +45,23 @@ struct Seen {
     traces: Vec<Vec<u8>>,
 }
 
+/// What the Steery mock holds.
+#[derive(Default)]
+struct Steery {
+    /// Each `POST`: (path, body).
+    posts: Vec<(String, Value)>,
+    throws: std::collections::BTreeMap<String, Value>,
+    requests: std::collections::BTreeMap<String, Value>,
+    /// Sessions that answer 404 to the next throw naming them.
+    gone: Vec<String>,
+}
+
 #[derive(Clone)]
 struct Mock {
     seen: Arc<Mutex<Seen>>,
+    steery: Arc<Mutex<Steery>>,
+    /// While set, a card summary waits: an ask can settle before its card goes out.
+    hold_summary: Arc<AtomicBool>,
     /// Where the forbidden coder command would leave its mark.
     firewall_mark: PathBuf,
 }
@@ -67,6 +91,172 @@ impl Mock {
 
     fn hooks(&self) -> Vec<Value> {
         self.seen().hooks.clone()
+    }
+
+    fn steery(&self) -> std::sync::MutexGuard<'_, Steery> {
+        self.steery.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The bodies Steery got on `POST path`.
+    fn posts(&self, path: &str) -> Vec<Value> {
+        self.steery()
+            .posts
+            .iter()
+            .filter(|(p, _)| p == path)
+            .map(|(_, b)| b.clone())
+            .collect()
+    }
+
+    /// The throws for escalation `n`, oldest first.
+    fn throws_for(&self, n: u64) -> Vec<Value> {
+        let head = format!("# Escalation #{n}:");
+        self.posts("/v1/throws")
+            .into_iter()
+            .filter(|t| t["body"].as_str().is_some_and(|b| b.starts_with(&head)))
+            .collect()
+    }
+
+    /// The person's Go delivered `throw` to `session`: its newest aim says so.
+    fn deliver(&self, throw: &str, session: &str) {
+        let mut s = self.steery();
+        let t = s.throws.get_mut(throw).expect("the throw was made");
+        t["status"] = json!("delivered");
+        let index = t["aims"].as_array().map_or(0, Vec::len);
+        t["aims"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"index": index, "status": "delivered", "act": "continue", "session_id": session}));
+    }
+
+    /// The person presses `word` on card `id`, signed by the pinned phone.
+    fn respond(&self, id: &str, word: &str) {
+        use p256::ecdsa::signature::Signer as _;
+        use subweave::channel::steery;
+        let mut s = self.steery();
+        let r = s.requests.get_mut(id).expect("the card was raised");
+        let content = steery::content_sha256(r).unwrap();
+        let answer = json!({"values": {"answer": word}});
+        let at = "2026-10-15T12:00:00.000Z";
+        let message = steery::message(
+            WORKSPACE,
+            id,
+            SIGNER,
+            &content,
+            &steery::answer_sha256(&answer).unwrap(),
+            "neutral",
+            at,
+        );
+        let signature: p256::ecdsa::Signature = signing_key().sign(message.as_bytes());
+        r["status"] = json!("responded");
+        r["response"] = json!({
+            "answer": answer,
+            "stance": "neutral",
+            "signer": SIGNER,
+            "at": at,
+            "signature": URL_SAFE_NO_PAD.encode(signature.to_der().as_bytes()),
+        });
+    }
+}
+
+/// The pinned phone's key.
+fn signing_key() -> p256::ecdsa::SigningKey {
+    p256::ecdsa::SigningKey::from_slice(&[0x2a; 32]).expect("a P-256 scalar")
+}
+
+fn steery_ok(headers: &HeaderMap) -> bool {
+    headers.get("authorization").and_then(|h| h.to_str().ok())
+        == Some(&format!("Bearer {STEERY_KEY}"))
+}
+
+async fn steery_me(headers: HeaderMap) -> (StatusCode, axum::Json<Value>) {
+    if !steery_ok(&headers) {
+        return (StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+    }
+    let me = json!({"workspace": {"id": WORKSPACE, "name": "e2e"}});
+    (StatusCode::OK, axum::Json(me))
+}
+
+async fn steery_signers(headers: HeaderMap) -> (StatusCode, axum::Json<Value>) {
+    if !steery_ok(&headers) || headers.get("steery-workspace").is_none() {
+        return (StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+    }
+    let key = signing_key();
+    let point = key.verifying_key().to_encoded_point(false);
+    let signers = json!([{
+        "id": SIGNER,
+        "kind": "phone",
+        "name": SIGNER_NAME,
+        "public_key": URL_SAFE_NO_PAD.encode(point.as_bytes()),
+        "revoked_at": null,
+    }]);
+    (StatusCode::OK, axum::Json(signers))
+}
+
+/// `POST /v1/throws`: with `session`, delivered at once, or 404 once for a gone one;
+/// without, held for the person's pick.
+async fn throw_create(State(m): State<Mock>, headers: HeaderMap, body: String) -> (StatusCode, axum::Json<Value>) {
+    let t: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    let mut s = m.steery();
+    s.posts.push(("/v1/throws".into(), t.clone()));
+    let Some(id) = t["id"].as_str().filter(|_| steery_ok(&headers)) else {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"code": "invalid"}})));
+    };
+    let throw = match t["session"].as_str() {
+        Some(session) => {
+            if let Some(i) = s.gone.iter().position(|g| g == session) {
+                s.gone.remove(i);
+                let gone = json!({"error": {"code": "not_found", "message": "no such session"}});
+                return (StatusCode::NOT_FOUND, axum::Json(gone));
+            }
+            json!({"id": id, "status": "delivered", "body": t["body"], "aims": [
+                {"index": 0, "status": "delivered", "act": t["act"], "session_id": session}
+            ]})
+        }
+        None => json!({"id": id, "status": "held", "body": t["body"], "aims": [
+            {"index": 0, "status": "held", "act": "continue"}
+        ]}),
+    };
+    s.throws.insert(id.to_owned(), throw.clone());
+    (StatusCode::CREATED, axum::Json(throw))
+}
+
+async fn throw_get(State(m): State<Mock>, UrlPath(id): UrlPath<String>) -> (StatusCode, axum::Json<Value>) {
+    match m.steery().throws.get(&id) {
+        Some(t) => (StatusCode::OK, axum::Json(t.clone())),
+        None => (StatusCode::NOT_FOUND, axum::Json(json!({"error": {"code": "not_found"}}))),
+    }
+}
+
+async fn request_create(State(m): State<Mock>, headers: HeaderMap, body: String) -> (StatusCode, axum::Json<Value>) {
+    let mut r: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    let mut s = m.steery();
+    s.posts.push(("/v1/requests".into(), r.clone()));
+    let Some(id) = r["id"].as_str().filter(|_| steery_ok(&headers)).map(String::from) else {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"code": "invalid"}})));
+    };
+    r["workspace"] = json!(WORKSPACE);
+    r["status"] = json!("open");
+    s.requests.insert(id, r.clone());
+    (StatusCode::CREATED, axum::Json(r))
+}
+
+/// `GET /v1/requests/{id}`: with `wait_secs`, held until it is answered or the wait ends.
+async fn request_get(
+    State(m): State<Mock>,
+    UrlPath(id): UrlPath<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, axum::Json<Value>) {
+    let wait = q.get("wait_secs").and_then(|w| w.parse().ok()).unwrap_or(0u64);
+    let end = Instant::now() + Duration::from_secs(wait.min(50));
+    loop {
+        match m.steery().requests.get(&id) {
+            None => return (StatusCode::NOT_FOUND, axum::Json(json!({"error": {"code": "not_found"}}))),
+            Some(r) if r["status"] != "open" || Instant::now() >= end => {
+                return (StatusCode::OK, axum::Json(r.clone()));
+            }
+            Some(_) => {}
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -230,6 +420,10 @@ async fn chat(State(m): State<Mock>, headers: HeaderMap, body: String) -> axum::
     record(&m, "/chat/completions", &headers, &body);
     let req: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
     if offers_tool(&body, "save") {
+        let end = Instant::now() + Duration::from_secs(15);
+        while m.hold_summary.load(Ordering::SeqCst) && Instant::now() < end {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         return tool_call("s1", "save", json!({"lines": CARD_SUMMARY}));
     }
     if offers_tool(&body, "fact") {
@@ -315,6 +509,8 @@ struct Box_ {
     config: PathBuf,
     daemon: Option<tokio::process::Child>,
     dash: Option<tokio::process::Child>,
+    /// The mock server, which plays Steery too.
+    steery_url: String,
 }
 
 impl Drop for Box_ {
@@ -344,6 +540,7 @@ impl Box_ {
         c.env("SUBWEAVE_STATE", &self.state)
             .env("SUBWEAVE_CONFIG", &self.config)
             .env("MOCK_API_KEY", API_KEY)
+            .env("STEERY_URL", &self.steery_url)
             .env("TOY_TOKEN", SECRET)
             .env_remove("OPENROUTER_API_KEY")
             .env_remove("GITHUB_TOKEN")
@@ -479,6 +676,57 @@ impl Box_ {
                     .collect();
                 (n, words)
             })
+    }
+
+    /// `subweave do toy rotate`: ASK BEFORE rotate escalates it; the new ask's number.
+    async fn rotate_ask(&self) -> u64 {
+        let asks = |b: &Box_| -> Vec<u64> {
+            b.lines("ask", |l| l["action"] == "rotate")
+                .iter()
+                .filter_map(|l| l["n"].as_u64())
+                .collect()
+        };
+        let before = asks(self);
+        self.ok(&["do", "toy", "rotate"]).await;
+        self.until("the ask for a rotate by hand", 20, || {
+            asks(self).into_iter().find(|n| !before.contains(n))
+        })
+        .await
+    }
+
+    /// The answer line of ask `n`, once it has one.
+    async fn answered(&self, n: u64, secs: u64) -> Value {
+        self.until(&format!("the answer to #{n}"), secs, || {
+            self.lines("answer", |l| l["n"] == n).into_iter().next()
+        })
+        .await
+    }
+
+    /// The first note whose text starts with `head`, once there is one.
+    async fn note(&self, head: &str, secs: u64) -> Value {
+        self.until(&format!("a note {head:?}"), secs, || {
+            self.lines("note", |l| l["text"].as_str().is_some_and(|t| t.starts_with(head)))
+                .into_iter()
+                .next()
+        })
+        .await
+    }
+
+    /// `subweave <args>` with `input` on stdin.
+    async fn sw_stdin(&self, args: &[&str], input: &str) -> Output {
+        use tokio::io::AsyncWriteExt;
+        let mut child = self
+            .command()
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("subweave runs");
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(input.as_bytes()).await.unwrap();
+        drop(stdin);
+        child.wait_with_output().await.expect("subweave runs")
     }
 }
 
@@ -941,6 +1189,390 @@ async fn dashboard(b: &mut Box_) {
     );
 }
 
+const AGENT_NOTE: &str = "the agent ran the rotate";
+const GOAL_WHY: &str = "a rotate every two hours is enough";
+const RULE_WHY: &str = "the web root holds the only copy of the page";
+const WIPE_RULE: &str = "delete the web root";
+
+/// stdout and stderr.
+fn both(o: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    )
+}
+
+/// Escalation targets: an agent channel settles an escalation; Steery session mode
+/// connects once, sends straight to the stored session, and connects again when it is
+/// gone; an agent changes the weave, a goal at once and a rule on the person's signed
+/// answer only; `stats` counts who settled what.
+async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
+    let dir = &b.dir;
+    let d = dir.display();
+    let sw = env!("CARGO_BIN_EXE_subweave");
+    let svc_dir = b.service();
+    let base = std::fs::read_to_string(svc_dir.join("Weavefile")).unwrap();
+
+    // 9a. What an agent reads first, and changes refused before the daemon hears them.
+    eprintln!("9a weave");
+    let out = b.ok(&["weave", "toy"]).await;
+    assert!(out.starts_with(&base), "{out}");
+    assert!(
+        out.contains(&format!("\nport={port}\n")) && out.contains(&format!("\nroot={}\n", www.display())),
+        "{out}"
+    );
+    assert!(out.ends_with(&format!("\nsource: {weave}\n")), "{out}");
+    let goal_text = base.replace("SINCE(rotate) < 1h", "SINCE(rotate) < 2h");
+    let firewall = format!("NEVER \"{FIREWALL_RULE}\"\n");
+    let rule_text = goal_text.replace(&firewall, &format!("{firewall}NEVER \"{WIPE_RULE}\"\n"));
+    assert!(goal_text != base && rule_text != goal_text);
+    let (goal_file, rule_file, bad_file) = (
+        dir.join("goal.Weavefile"),
+        dir.join("rule.Weavefile"),
+        dir.join("bad.Weavefile"),
+    );
+    std::fs::write(&goal_file, &goal_text).unwrap();
+    std::fs::write(&rule_file, &rule_text).unwrap();
+    std::fs::write(&bad_file, format!("{base}\nGOAL\n")).unwrap();
+    let path = |p: &PathBuf| p.display().to_string();
+    for (file, why, want) in [
+        (&bad_file, "a test", "the new Weavefile does not parse"),
+        (&goal_file, "", "say why, in a sentence"),
+        (&rule_file, RULE_WHY, "only a signed answer on Steery settles that: this box has no Steery channel"),
+    ] {
+        let o = b.sw(&["weave", "toy", "--change", &path(file), "--why", why]).await;
+        assert!(!o.status.success() && both(&o).contains(want), "{}", both(&o));
+    }
+    assert_eq!(std::fs::read_to_string(svc_dir.join("Weavefile")).unwrap(), base);
+
+    // 9b. An agent channel: its command reads the escalation on stdin and answers it.
+    eprintln!("9b agent channel");
+    let script = dir.join("answer.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "cat > {d}/agent-$SUBWEAVE_ASK.md\n\
+             echo \"agent in $(pwd) for $SUBWEAVE_SERVICE #$SUBWEAVE_ASK, token {SECRET}\"\n\
+             exec {sw} answer \"$SUBWEAVE_ASK\" yes --note '{AGENT_NOTE}'\n"
+        ),
+    )
+    .unwrap();
+    let command = format!("sh {}", script.display());
+    let out = b.ok(&["channel", "add", "agent", &command]).await;
+    assert!(out.contains(&format!("added agent: agent {command}, level ask")), "{out}");
+    let rotates = b.passes("rotate");
+    let n = b.rotate_ask().await;
+    let answer = b.answered(n, 20).await;
+    assert_eq!(answer["text"], "yes", "{answer}");
+    assert_eq!(answer["by"], "agent", "{answer}");
+    let noted = b.lines("note", |l| l["text"] == AGENT_NOTE);
+    assert!(noted.len() == 1 && noted[0]["by"] == "agent", "{noted:?}");
+    let ended = b.note(&format!("escalated #{n} to agent: "), 10).await;
+    assert_eq!(
+        ended["text"],
+        format!("escalated #{n} to agent: exit 0; output in escalations/{n}.log")
+    );
+    let log_file = svc_dir.join(format!("escalations/{n}.log"));
+    let log = std::fs::read_to_string(&log_file).unwrap();
+    assert!(
+        log.contains(&format!(
+            "agent in {} for toy #{n}, token [TOY_TOKEN]",
+            svc_dir.display()
+        )) && !log.contains(SECRET),
+        "{log}"
+    );
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&log_file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let read = std::fs::read_to_string(dir.join(format!("agent-{n}.md"))).unwrap();
+    assert!(read.starts_with(&format!("# Escalation #{n}: ")), "{read}");
+    assert!(
+        read.contains(&format!("`subweave answer {n} <word> --note")) && read.contains("# Subweave escalation"),
+        "{read}"
+    );
+    b.until("the agent's yes to run rotate", 20, || {
+        (b.passes("rotate") > rotates).then_some(())
+    })
+    .await;
+    b.ok(&["channel", "rm", "agent"]).await;
+
+    // 9c. Steery session mode: the first escalation connects a conversation, the next
+    // goes straight to it, and a gone session connects again.
+    eprintln!("9c steery session");
+    let o = b.sw_stdin(&["channel", "add", "steery"], STEERY_KEY).await;
+    assert!(
+        !o.status.success() && both(&o).contains("needs --reach USER@HOST"),
+        "{}",
+        both(&o)
+    );
+    let o = b
+        .sw_stdin(&["channel", "add", "steery", "--reach", REACH], STEERY_KEY)
+        .await;
+    let out = both(&o);
+    assert!(o.status.success(), "{out}");
+    assert!(
+        out.contains(&format!(
+            "added steery: steery {WORKSPACE}, level ask, escalates session via {REACH}"
+        )),
+        "{out}"
+    );
+    assert!(out.lines().any(|l| l.starts_with("phone") && l.ends_with(&format!("{SIGNER_NAME}  pinned"))), "{out}");
+    let out = b.ok(&["channel", "ls"]).await;
+    assert!(
+        out.contains(&format!("escalates session via {REACH}  signers: {SIGNER_NAME}")),
+        "{out}"
+    );
+    let connected = || -> Option<Value> {
+        serde_json::from_slice(&std::fs::read(svc_dir.join("escalation.json")).ok()?).ok()
+    };
+    let n1 = b.rotate_ask().await;
+    let (throw, request) = b
+        .until("the connect throw and its request", 20, || {
+            let t = mock.throws_for(n1).into_iter().next()?;
+            let r = mock.posts("/v1/requests").into_iter().find(|r| r["throw"] == t["id"])?;
+            Some((t, r))
+        })
+        .await;
+    assert!(throw.get("session").is_none() && throw.get("act").is_none(), "{throw}");
+    let text = throw["body"].as_str().unwrap_or_default();
+    for want in [
+        format!("`ssh {REACH} sudo -n subweave answer {n1} <word> --note"),
+        format!("`ssh {REACH} sudo -n subweave log toy`"),
+        format!("`ssh {REACH} sudo -n subweave mcp`"),
+        "# Subweave escalation".to_string(),
+    ] {
+        assert!(text.contains(&want), "the throw lacks {want:?}:\n{text}");
+    }
+    assert!(request.get("input").is_none() && request.get("payload").is_none(), "{request}");
+    assert!(
+        request["body"].as_str().is_some_and(|t| t.contains("pick the agent conversation")),
+        "{request}"
+    );
+    assert!(connected().is_none());
+    let s1 = "0199f3a0-3e4f-7a51-8c7d-8e9f0a1b2c3d";
+    mock.deliver(throw["id"].as_str().unwrap(), s1);
+    b.until("the connected session", 20, || {
+        connected().filter(|c| c["steery_session"] == s1)
+    })
+    .await;
+    b.ok(&["answer", &n1.to_string(), "yes"]).await;
+
+    let requests = mock.posts("/v1/requests").len();
+    let n2 = b.rotate_ask().await;
+    let t2 = b
+        .until("the throw to the session", 20, || mock.throws_for(n2).into_iter().next())
+        .await;
+    assert!(t2["session"] == s1 && t2["act"] == "continue", "{t2}");
+    assert!(
+        t2["body"].as_str().is_some_and(|t| t.contains("# Subweave escalation")),
+        "the first throw to a new session carries the skill: {t2}"
+    );
+    b.until("the skill marked sent", 10, || {
+        connected().filter(|c| c["skill_sent"] == true)
+    })
+    .await;
+    assert_eq!(mock.posts("/v1/requests").len(), requests, "a connected session needs no request");
+    b.ok(&["answer", &n2.to_string(), "yes"]).await;
+
+    // The session is gone: forgotten, and a new connect throw and request go. Its ask
+    // settles before the person's Go; the Go still connects.
+    mock.steery().gone.push(s1.to_string());
+    let n3 = b.rotate_ask().await;
+    let t3 = b
+        .until("the connect throw again", 20, || {
+            let t = mock.throws_for(n3).into_iter().find(|t| t.get("session").is_none())?;
+            mock.posts("/v1/requests")
+                .iter()
+                .any(|r| r["throw"] == t["id"])
+                .then_some(t)
+        })
+        .await;
+    let tried = mock.throws_for(n3);
+    assert!(tried.len() == 2 && tried[0]["session"] == s1, "{tried:?}");
+    assert!(connected().is_none(), "the gone session is forgotten");
+    b.ok(&["answer", &n3.to_string(), "yes"]).await;
+    let s2 = "0199f3a0-4f50-7b62-9d8e-9f0a1b2c3d4e";
+    mock.deliver(t3["id"].as_str().unwrap(), s2);
+    b.until("the session connected again", 20, || {
+        connected().filter(|c| c["steery_session"] == s2)
+    })
+    .await;
+
+    // 9d. An agent changes the weave: a goal at once; a rule only on the signed answer.
+    eprintln!("9d weave changes by an agent");
+    let spec_before: Value =
+        serde_json::from_slice(&std::fs::read(svc_dir.join("service.json")).unwrap()).unwrap();
+    let script = dir.join("change.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "cat > /dev/null\n\
+             {sw} weave toy > {d}/weave-read.txt\n\
+             {sw} weave toy --change {goal} --why '{GOAL_WHY}' > {d}/goal.out 2>&1\n\
+             for i in $(seq 100); do {sw} weave toy | grep -q 'SINCE(rotate) < 2h' && break; sleep 0.2; done\n\
+             {sw} weave toy --change {rule} --why '{RULE_WHY}' > {d}/rule.out 2>&1\n\
+             exec {sw} answer \"$SUBWEAVE_ASK\" yes --note 'the weave changes are proposed'\n",
+            goal = goal_file.display(),
+            rule = rule_file.display(),
+        ),
+    )
+    .unwrap();
+    let command = format!("sh {}", script.display());
+    b.ok(&["channel", "add", "agent", &command]).await;
+    let n4 = b.rotate_ask().await;
+    let answer = b.answered(n4, 60).await;
+    assert_eq!(answer["by"], "agent", "{answer}");
+    let t4 = b
+        .until("the throw to the new session", 20, || mock.throws_for(n4).into_iter().next())
+        .await;
+    assert!(
+        t4["session"] == s2 && t4["body"].as_str().is_some_and(|t| t.contains("# Subweave escalation")),
+        "{t4}"
+    );
+    let read = std::fs::read_to_string(dir.join("weave-read.txt")).unwrap();
+    assert!(read.starts_with(&base), "{read}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("goal.out")).unwrap(),
+        "handed the change to toy to the daemon: GOAL rotated changed\n"
+    );
+    let rule_out = std::fs::read_to_string(dir.join("rule.out")).unwrap();
+    assert!(
+        rule_out.starts_with(
+            "the rules of toy change: an escalation asks the person for a signed answer on Steery\n"
+        ) && rule_out.contains(&format!("+ NEVER \"{WIPE_RULE}\"")),
+        "{rule_out}"
+    );
+    let changed = b.note(&format!("weave changed by agent: {GOAL_WHY}"), 10).await;
+    assert_eq!(
+        changed["text"],
+        format!("weave changed by agent: {GOAL_WHY}; GOAL rotated changed")
+    );
+    assert_eq!(changed["by"], "agent");
+    let spec: Value =
+        serde_json::from_slice(&std::fs::read(svc_dir.join("service.json")).unwrap()).unwrap();
+    assert_eq!(spec["args"], spec_before["args"]);
+    assert_eq!(spec["created"], spec_before["created"]);
+    assert!(std::fs::read_to_string(svc_dir.join("secrets.json")).unwrap().contains(SECRET));
+    let running = std::fs::read_to_string(svc_dir.join("Weavefile")).unwrap();
+    assert!(running.contains("SINCE(rotate) < 2h") && !running.contains(WIPE_RULE), "{running}");
+
+    let signed = b
+        .until("the signed ask", 20, || {
+            b.lines("ask", |l| l["action"] == "weave").into_iter().next()
+        })
+        .await;
+    let ns = signed["n"].as_u64().unwrap();
+    assert_eq!(signed["signed"], true, "{signed}");
+    assert_eq!(signed["text"], "Change the rules of toy?", "{signed}");
+    assert_eq!(signed["answers"], json!(["yes", "no"]), "{signed}");
+    assert!(
+        signed["body"].as_str().is_some_and(|t| {
+            t.contains(RULE_WHY) && t.contains(&format!("Added: NEVER \"{WIPE_RULE}\""))
+        }),
+        "{signed}"
+    );
+    let out = b.ok(&["inbox"]).await;
+    let row = out
+        .lines()
+        .find(|l| l.starts_with(&format!("#{ns} ")))
+        .unwrap_or_else(|| b.fail(&format!("no #{ns} in inbox:\n{out}")));
+    assert!(row.contains("Change the rules of toy?") && row.ends_with("signed: answer on Steery"), "{row}");
+    let refused = "only a signed answer on Steery settles this";
+    let o = b.sw(&["answer", &ns.to_string(), "yes"]).await;
+    assert!(!o.status.success() && both(&o).contains(refused), "{}", both(&o));
+    let mut mcp = Mcp::start(b);
+    mcp.request(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "e2e-agent", "version": "1"}}),
+    )
+    .await;
+    mcp.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        .await;
+    let (bad, _) = mcp
+        .call("answer", json!({"service": "toy", "n": ns, "word": "yes"}))
+        .await;
+    assert!(
+        bad["isError"] == true && bad["content"][0]["text"].as_str().is_some_and(|t| t.contains(refused)),
+        "{bad}"
+    );
+    drop(mcp);
+    let card = b
+        .until("the signed card", 20, || {
+            mock.posts("/v1/requests").into_iter().find(|r| r["payload"]["n"] == ns)
+        })
+        .await;
+    assert_eq!(card["title"], "Change the rules of toy?", "{card}");
+    assert_eq!(
+        card["input"][0]["options"],
+        json!([
+            {"id": "yes", "label": "Apply it", "stance": "neutral"},
+            {"id": "no", "label": "Keep the rules", "stance": "rejection"},
+        ]),
+        "{card}"
+    );
+    assert!(mock.throws_for(ns).is_empty(), "a signed escalation goes as no throw");
+    assert!(
+        b.lines("note", |l| l["n"] == ns).is_empty(),
+        "a signed escalation has no model summary and no agent"
+    );
+    assert!(!svc_dir.join(format!("escalations/{ns}.log")).exists());
+    let kept = svc_dir.join(format!("changes/{ns}.json"));
+    assert!(kept.is_file());
+    assert!(!std::fs::read_to_string(svc_dir.join("Weavefile")).unwrap().contains(WIPE_RULE));
+    mock.respond(card["id"].as_str().unwrap(), "yes");
+    let applied = b.note(&format!("weave changed by agent: {RULE_WHY}"), 70).await;
+    assert_eq!(
+        applied["text"],
+        format!(
+            "weave changed by agent: {RULE_WHY}; no fact, goal, action or skill changed; signed yes on #{ns} by steery:{SIGNER_NAME}"
+        )
+    );
+    let answer = b.answered(ns, 5).await;
+    assert_eq!(answer["text"], "yes", "{answer}");
+    assert_eq!(answer["by"], format!("steery:{SIGNER_NAME}"), "{answer}");
+    let running = std::fs::read_to_string(svc_dir.join("Weavefile")).unwrap();
+    assert_eq!(running, rule_text);
+    assert!(!kept.exists());
+    b.note(&format!("escalated #{n4} to agent: exit 0"), 10).await;
+    b.ok(&["channel", "rm", "agent"]).await;
+    b.holds(&["installed", "running", "rotated"], 30).await;
+
+    // After the skill went whole once, a throw to the session points at it.
+    let n5 = b.rotate_ask().await;
+    let t5 = b
+        .until("a later throw to the session", 20, || mock.throws_for(n5).into_iter().next())
+        .await;
+    let text = t5["body"].as_str().unwrap_or_default();
+    assert!(
+        t5["session"] == s2
+            && text.contains(&format!("Read the escalation skill first: `ssh {REACH} sudo -n subweave skill`."))
+            && !text.contains("# Subweave escalation"),
+        "{t5}"
+    );
+    b.ok(&["answer", &n5.to_string(), "yes"]).await;
+    for (path, body) in &mock.steery().posts {
+        assert!(!body.to_string().contains(SECRET), "a Steery {path} holds the secret");
+    }
+
+    // 9e. stats: this week's repairs by rung, escalations by who settled them, and the
+    // two weave changes.
+    eprintln!("9e stats");
+    let out = b.ok(&["stats", "toy"]).await;
+    let row = out.lines().last().unwrap_or_default();
+    let cols: Vec<&str> = row.split_whitespace().collect();
+    let num = |i: usize| cols.get(i).and_then(|c| c.parse::<usize>().ok());
+    assert!(num(2) >= Some(1) && num(3) >= Some(1), "decider and coder repairs: {out}");
+    let answers = b.lines("answer", |l| l["n"].is_u64()).len();
+    assert_eq!(num(4), Some(answers), "{out}");
+    assert_eq!(num(5), Some(2), "{out}");
+    for want in ["agent 2", "mcp 1", "steery 1", "withdrawn "] {
+        assert!(row.contains(want), "stats lacks {want:?}:\n{out}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn daemon_and_cli_keep_a_toy_service() {
     let started = Instant::now();
@@ -957,6 +1589,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
         dir: dir.clone(),
         daemon: None,
         dash: None,
+        steery_url: String::new(),
     };
     let weave_dir = dir.join("examples/toy");
     std::fs::create_dir_all(&weave_dir).unwrap();
@@ -967,6 +1600,8 @@ async fn daemon_and_cli_keep_a_toy_service() {
     // The vendors: OpenRouter and a webhook, on one local server.
     let mock = Mock {
         seen: Arc::new(Mutex::new(Seen::default())),
+        steery: Arc::new(Mutex::new(Steery::default())),
+        hold_summary: Arc::new(AtomicBool::new(false)),
         firewall_mark: dir.join("firewall-opened"),
     };
     let app = Router::new()
@@ -974,10 +1609,17 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .route("/chat/completions", post(chat))
         .route("/hook", post(hook))
         .route("/v1/traces", post(traces))
+        .route("/v1/me", get(steery_me))
+        .route("/v1/signers", get(steery_signers))
+        .route("/v1/throws", post(throw_create))
+        .route("/v1/throws/{id}", get(throw_get))
+        .route("/v1/requests", post(request_create))
+        .route("/v1/requests/{id}", get(request_get))
         .with_state(mock.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mock_url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await });
+    b.steery_url = mock_url.clone();
 
     let out = b.ok(&["provider", "add", "mock", &mock_url]).await;
     assert!(out.contains("added mock"), "{out}");
@@ -1463,8 +2105,10 @@ async fn daemon_and_cli_keep_a_toy_service() {
     assert_eq!(mock.coder_requests(), chats_after_install);
 
     // 6f. An ask whose goal holds again is withdrawn: the person brought the server back.
+    // Its card summary is held until then: a withdrawn ask goes to no channel.
     phase("6f withdrawn ask");
     std::fs::write(dir.join("scene"), "unsure").unwrap();
+    mock.hold_summary.store(true, Ordering::SeqCst);
     kill_pidfile(&dir.join("toy.pid"));
     let (n, _) = b
         .until("a second which-action ask", 30, || b.open_ask("running"))
@@ -1487,6 +2131,23 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .await;
     assert_eq!(withdrawn["text"], "withdrawn", "{withdrawn}");
     assert_eq!(withdrawn["by"], "daemon: running holds again", "{withdrawn}");
+    mock.hold_summary.store(false, Ordering::SeqCst);
+    b.until("the withdrawn ask's summary", 20, || {
+        b.lines("note", |l| {
+            l["n"] == n && l["text"].as_str().is_some_and(|t| t.starts_with("card summary"))
+        })
+        .into_iter()
+        .next()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        !mock
+            .hooks()
+            .iter()
+            .any(|h| h["kind"] == "ask" && h["ask"]["n"] == n),
+        "the withdrawn ask #{n} still went to the webhook"
+    );
     let out = b.ok(&["inbox"]).await;
     assert!(out.contains("no open escalations"), "{out}");
     b.until("the webhook to hear the withdrawal", 10, || {
@@ -1529,7 +2190,12 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .await;
     assert_eq!(init["result"]["serverInfo"]["name"], "subweave", "{init}");
     assert_eq!(init["result"]["capabilities"], json!({"tools": {}}), "{init}");
-    assert!(init["result"]["instructions"].is_string(), "{init}");
+    assert!(
+        init["result"]["instructions"]
+            .as_str()
+            .is_some_and(|t| t.contains("Read the `skill` tool first")),
+        "{init}"
+    );
     mcp.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
         .await;
     let list = mcp.request("tools/list", json!({})).await;
@@ -1541,8 +2207,25 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .collect();
     assert_eq!(
         tools,
-        ["inbox", "wait_ask", "answer", "status", "log", "task", "do"],
+        [
+            "inbox", "wait_ask", "answer", "status", "log", "task", "do", "weave",
+            "weave_change", "skill"
+        ],
         "{list}"
+    );
+    let (skill, _) = mcp.call("skill", json!({})).await;
+    assert!(
+        skill["content"][0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("# Subweave escalation") && t.contains("Never answer a signed escalation.")),
+        "{skill}"
+    );
+    let (_, shown) = mcp.call("weave", json!({"service": "toy"})).await;
+    assert_eq!(shown["source"], weave, "{shown}");
+    assert_eq!(shown["args"]["port"], port.to_string(), "{shown}");
+    assert!(
+        shown["weavefile"].as_str().is_some_and(|w| w.contains("ASK   BEFORE rotate")),
+        "{shown}"
     );
     let (_, asks) = mcp.call("inbox", json!({})).await;
     let ask = asks
@@ -1818,6 +2501,10 @@ async fn daemon_and_cli_keep_a_toy_service() {
     let secrets = std::fs::read_to_string(b.service().join("secrets.json")).unwrap();
     assert!(secrets.contains(SECRET), "the run again kept TOY_TOKEN");
     b.holds(&["installed", "running"], 30).await;
+
+    // 9. Escalation targets: an agent channel, Steery sessions, weave changes, stats.
+    phase("9 escalation");
+    escalation(&b, &mock, &weave, port, &www).await;
 
     // 7. stop: the loop ends and the journal stops growing, even with the server down.
     phase("7 stop");
