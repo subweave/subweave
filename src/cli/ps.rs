@@ -1,25 +1,31 @@
 use std::process::ExitCode;
 
 use anyhow::Result;
+use indexmap::IndexMap;
 use serde::Serialize;
 
-use crate::service::{self, GoalState};
+use crate::daemon::journal;
+use crate::daemon::state::GoalState;
+use crate::service;
 
-/// One service as `ps` shows it.
+/// One service as `ps` shows it, from its journal's fold.
 #[derive(Serialize)]
 pub(crate) struct Row {
     pub service: String,
-    /// `None` until the daemon's first tick of the service.
+    /// `None` until the daemon's loop journals the service's goals.
     pub goals: Option<Goals>,
     pub failing: Vec<String>,
     /// Open asks, by number.
     pub asks: Vec<u64>,
-    /// `stopped`, `starting` before the first tick, or the action running now.
+    /// `stopped`, `starting` before the loop journals the goals, or what runs now.
     pub repair: Option<String>,
     /// The decider, then the coder chain.
     pub models: String,
-    /// `None` until the daemon's first tick of the service.
+    /// `None` until the daemon's loop journals the service's goals.
     pub spend_month_usd: Option<f64>,
+    pub stopped: bool,
+    /// Each goal's state, in graph order.
+    pub states: IndexMap<String, GoalState>,
 }
 
 #[derive(Serialize)]
@@ -30,50 +36,39 @@ pub(crate) struct Goals {
 
 /// Every service the daemon keeps, by name.
 pub(crate) fn rows() -> Result<Vec<Row>> {
+    let now = crate::daemon::now();
+    let month = &now[..7];
     let mut rows = Vec::new();
     for name in service::names()? {
-        let row = match service::status(&name)? {
-            Some(st) => Row {
-                goals: Some(Goals {
-                    held: st
-                        .goals
-                        .iter()
-                        .filter(|g| g.state == GoalState::Holds)
-                        .count(),
-                    // An off goal does not apply on this box: it is neither held nor owed.
-                    total: st.goals.iter().filter(|g| g.state != GoalState::Off).count(),
-                }),
-                failing: st
-                    .goals
-                    .iter()
-                    .filter(|g| g.state == GoalState::Fails)
-                    .map(|g| g.name.clone())
-                    .collect(),
-                asks: st.asks,
-                repair: if st.stopped {
-                    Some("stopped".into())
-                } else {
-                    st.repair
-                },
-                models: models(st.decide, &st.code),
-                spend_month_usd: Some(st.spend_month_usd),
-                service: name,
+        let spec = service::spec(&name)?;
+        let st = journal::read(&name);
+        let started = !st.goals.is_empty();
+        rows.push(Row {
+            goals: started.then(|| Goals {
+                held: st.goals.values().filter(|g| g.holds()).count(),
+                // An off goal does not apply on this box: it is neither held nor owed.
+                total: st.goals.values().filter(|g| !g.off()).count(),
+            }),
+            failing: st
+                .goals
+                .iter()
+                .filter(|(_, g)| g.fails())
+                .map(|(n, _)| n.clone())
+                .collect(),
+            asks: st.open().map(|e| e.n).collect(),
+            repair: if spec.stopped {
+                Some("stopped".into())
+            } else if !started {
+                Some("starting".into())
+            } else {
+                st.running()
             },
-            None => {
-                let spec = service::spec(&name)?;
-                let state = if spec.stopped { "stopped" } else { "starting" };
-                Row {
-                    goals: None,
-                    failing: Vec::new(),
-                    asks: Vec::new(),
-                    repair: Some(state.into()),
-                    models: models(spec.decide, &spec.code),
-                    spend_month_usd: None,
-                    service: name,
-                }
-            }
-        };
-        rows.push(row);
+            models: models(spec.decide, &spec.code),
+            spend_month_usd: started.then(|| st.spend_in(month)),
+            stopped: spec.stopped,
+            states: st.goals,
+            service: name,
+        });
     }
     Ok(rows)
 }
@@ -88,13 +83,20 @@ fn models(mut decide: String, code: &[String]) -> String {
 
 #[derive(clap::Args)]
 pub struct Args {
+    /// Print every service as JSON, with each goal's state
+    #[arg(long)]
+    pub json: bool,
     /// Run on this box, over ssh
     #[arg(long, value_name = "USER@HOST")]
     pub on: Option<String>,
 }
 
-pub fn run() -> Result<ExitCode> {
+pub fn run(args: &Args) -> Result<ExitCode> {
     let services = rows()?;
+    if args.json {
+        println!("{}", serde_json::to_string(&services)?);
+        return Ok(ExitCode::SUCCESS);
+    }
     if services.is_empty() {
         println!("no services here");
         return Ok(ExitCode::SUCCESS);

@@ -425,6 +425,9 @@ textarea:focus-visible {
 .glyph-fails {
   background: var(--red);
 }
+.glyph-suspect {
+  border: 1.5px solid var(--red);
+}
 .glyph-waiting,
 .glyph-ask {
   border: 1.5px solid var(--amber);
@@ -775,6 +778,9 @@ a.card:hover {
 }
 .seg-fails {
   background: var(--red);
+}
+.seg-suspect {
+  background: repeating-linear-gradient(90deg, var(--red) 0 3px, transparent 3px 5px);
 }
 .seg-waiting {
   background: var(--amber);

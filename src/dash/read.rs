@@ -1,4 +1,5 @@
-//! What the dashboard reads: the files the daemon keeps, through the CLI's helpers.
+//! What the dashboard reads: the files the daemon keeps, through the CLI's helpers, and
+//! each service's state, folded from its journal.
 
 use std::collections::BTreeSet;
 
@@ -8,20 +9,69 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{ApiError, Svc};
-use crate::cli::log::kind_str;
 use crate::cli::stats;
-use crate::service::{self, Line, Spec, Status};
+use crate::daemon::journal;
+use crate::daemon::state::{Event, ServiceState};
+use crate::service::{self, Spec};
 use crate::{paths, weave};
 
 const JOURNAL_PAGE: usize = 100;
 const JOURNAL_MAX: usize = 500;
 
-/// A journal line with its index in the file.
+/// A journal event with its index in the file.
 #[derive(Serialize)]
 pub(crate) struct Numbered<'a> {
     pub i: u64,
     #[serde(flatten)]
-    pub line: &'a Line,
+    pub line: &'a Event,
+}
+
+/// A service's state as the dashboard shows it.
+#[derive(Serialize, PartialEq)]
+pub(crate) struct Status {
+    pub service: String,
+    pub goals: Vec<GoalStatus>,
+    /// What runs now.
+    pub repair: Option<String>,
+    /// Open asks, by number.
+    pub asks: Vec<u64>,
+    pub spend_month_usd: f64,
+    pub decide: String,
+    pub code: Vec<String>,
+    pub stopped: bool,
+}
+
+#[derive(Serialize, PartialEq)]
+pub(crate) struct GoalStatus {
+    pub name: String,
+    pub state: &'static str,
+    /// When it last changed state, when its state keeps that.
+    pub since: Option<String>,
+}
+
+/// `None` until the daemon's loop journals the service's goals.
+pub(crate) fn status(name: &str, spec: &Spec, st: &ServiceState) -> Option<Status> {
+    if st.goals.is_empty() {
+        return None;
+    }
+    Some(Status {
+        service: name.to_string(),
+        goals: st
+            .goals
+            .iter()
+            .map(|(g, s)| GoalStatus {
+                name: g.clone(),
+                state: s.name(),
+                since: s.since().map(str::to_string),
+            })
+            .collect(),
+        repair: if spec.stopped { None } else { st.running() },
+        asks: st.open().map(|e| e.n).collect(),
+        spend_month_usd: st.spend_in(&crate::daemon::now()[..7]),
+        decide: spec.decide.clone(),
+        code: spec.code.clone(),
+        stopped: spec.stopped,
+    })
 }
 
 /// The service's spec, or 404.
@@ -32,7 +82,7 @@ pub(crate) fn spec(s: &str) -> Result<Spec, ApiError> {
     service::spec(s).map_err(ApiError::internal)
 }
 
-/// `running`, `stopped`, or `starting` before the daemon wrote its first status.
+/// `running`, `stopped`, or `starting` before the daemon's loop journaled the goals.
 fn state(spec: &Spec, status: &Option<Status>) -> &'static str {
     if spec.stopped {
         "stopped"
@@ -47,7 +97,7 @@ pub(crate) async fn services() -> Result<Json<Value>, ApiError> {
     let mut out = Vec::new();
     for name in service::names().map_err(ApiError::internal)? {
         let spec = service::spec(&name).map_err(ApiError::internal)?;
-        let status = service::status(&name).ok().flatten();
+        let status = status(&name, &spec, &journal::read(&name));
         out.push(json!({
             "name": name,
             "weave": spec.weave,
@@ -62,7 +112,7 @@ pub(crate) async fn services() -> Result<Json<Value>, ApiError> {
 
 pub(crate) async fn service(Svc(s): Svc) -> Result<Json<Value>, ApiError> {
     let spec = spec(&s)?;
-    let status = service::status(&s).ok().flatten();
+    let st = journal::read(&s);
     let weavefile = std::fs::read_to_string(paths::weavefile(&s)).ok();
     // The parsed weave as the box reads it: `$name` replaced. `weavefile` stays raw.
     let weave = weavefile.as_deref().and_then(|text| {
@@ -72,15 +122,14 @@ pub(crate) async fn service(Svc(s): Svc) -> Result<Json<Value>, ApiError> {
     });
     let readme = std::fs::read_to_string(paths::readme(&s)).ok();
     let learned = service::learned(&s).map_err(ApiError::internal)?;
-    let lines = service::journal(&s).map_err(ApiError::internal)?;
     Ok(Json(json!({
+        "status": status(&s, &spec, &st),
+        "asks": journal::asks(&s, &st),
         "spec": spec,
-        "status": status,
         "weave": weave,
         "weavefile": weavefile,
         "readme": readme,
         "learned": learned,
-        "asks": service::asks(&s, &lines),
     })))
 }
 
@@ -110,11 +159,11 @@ pub(crate) async fn journal(
         .filter(|k| !k.is_empty())
         .map(|k| k.split(',').map(str::trim).collect());
     let needle = q.q.as_deref().filter(|t| !t.is_empty()).map(str::to_lowercase);
-    let lines = service::journal_numbered(&s).map_err(ApiError::internal)?;
-    let hit = |l: &Line| {
-        kinds.as_ref().is_none_or(|k| k.contains(kind_str(l.kind)))
-            && q.goal.as_ref().is_none_or(|g| l.goal.as_ref() == Some(g))
-            && q.action.as_ref().is_none_or(|a| l.action.as_ref() == Some(a))
+    let lines = journal::numbered(&s);
+    let hit = |l: &Event| {
+        kinds.as_ref().is_none_or(|k| k.contains(l.kind.name()))
+            && q.goal.as_deref().is_none_or(|g| l.goal() == Some(g))
+            && q.action.as_deref().is_none_or(|a| l.action() == Some(a))
             && needle.as_ref().is_none_or(|n| matches(l, n))
     };
     let eps: BTreeSet<&str> = if q.whole {
@@ -140,16 +189,16 @@ pub(crate) async fn journal(
 }
 
 /// The search box: the text, the goal, the action, a fact or the output, any case.
-fn matches(l: &Line, needle: &str) -> bool {
+fn matches(l: &Event, needle: &str) -> bool {
     let has = |s: &str| s.to_lowercase().contains(needle);
-    l.text.as_deref().is_some_and(has)
-        || l.goal.as_deref().is_some_and(has)
-        || l.action.as_deref().is_some_and(has)
-        || l.output.as_deref().is_some_and(has)
+    l.text().is_some_and(has)
+        || l.goal().is_some_and(has)
+        || l.action().is_some_and(has)
+        || l.kind.output().is_some_and(has)
         || l.by.as_deref().is_some_and(has)
         || l
-            .facts
-            .as_ref()
+            .kind
+            .facts()
             .is_some_and(|f| f.iter().any(|(k, v)| has(k) || has(v)))
 }
 
@@ -158,7 +207,7 @@ pub(crate) struct Range {
     range: Option<String>,
 }
 
-/// Numeric fact values from `check` lines, the mean of each step, as `stats` reads them.
+/// Numeric fact values from `check` events, the mean of each step, as `stats` reads them.
 pub(crate) async fn metrics(
     Svc(s): Svc,
     Query(q): Query<Range>,
@@ -171,7 +220,7 @@ pub(crate) async fn metrics(
         other => return Err(ApiError::bad(format!("range {other:?}: 24h, 7d or 30d"))),
     };
     let now = crate::daemon::epoch();
-    let lines = service::journal(&s).map_err(ApiError::internal)?;
+    let lines = journal::events(&s);
     let series = stats::series(&lines, now, step, steps);
     let t: Vec<String> = (0..steps as i64)
         .filter_map(|k| jiff::Timestamp::from_second(now - (steps as i64 - k) * step).ok())

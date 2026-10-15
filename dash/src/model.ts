@@ -6,7 +6,7 @@ import type { Shown } from "./components/ui";
 export type Counts = Record<GoalState, number>;
 
 export function counts(status: Status | null | undefined): Counts {
-  const c: Counts = { holds: 0, fails: 0, unknown: 0, off: 0, waiting: 0 };
+  const c: Counts = { holds: 0, suspect: 0, fails: 0, unknown: 0, off: 0, waiting: 0 };
   for (const g of status?.goals ?? []) c[g.state]++;
   return c;
 }
@@ -18,6 +18,7 @@ export function serviceShown(status: Status | null | undefined, stopped: boolean
   if (c.fails) return "fails";
   if (status.asks.length) return "ask";
   if (status.repair) return "running";
+  if (c.suspect) return "suspect";
   if (c.waiting) return "waiting";
   if (c.unknown) return "unknown";
   return "holds";
@@ -26,7 +27,7 @@ export function serviceShown(status: Status | null | undefined, stopped: boolean
 /** Goals that count toward `holds/total`: every goal that is not off. */
 export function holdsOf(status: Status | null | undefined): { holds: number; total: number } {
   const c = counts(status);
-  return { holds: c.holds, total: c.holds + c.fails + c.unknown + c.waiting };
+  return { holds: c.holds, total: c.holds + c.suspect + c.fails + c.unknown + c.waiting };
 }
 
 export interface GoalNode {
@@ -59,16 +60,19 @@ export function limitOf(goal: Goal): { fact: string; op: string; value: number }
 }
 
 export const KIND_CHIPS = [
-  { label: "Checks", kinds: ["check"] },
+  { label: "Checks", kinds: ["check", "off", "waiting", "goals"] },
   { label: "Decisions", kinds: ["decide"] },
   { label: "Gates", kinds: ["gate"] },
   { label: "Actions", kinds: ["action"] },
   { label: "Commands", kinds: ["command"] },
   { label: "Learned", kinds: ["learn"] },
-  { label: "Escalations", kinds: ["ask", "answer"] },
+  { label: "Escalations", kinds: ["ask", "answer", "withdraw", "refused", "sent", "watch", "unwatch"] },
   { label: "Messages", kinds: ["message"] },
   { label: "Notes", kinds: ["note"] },
 ] as const;
+
+/** Events that mark where an escalation went: shown on its ask. */
+const ROUTED = ["sent", "watch", "unwatch"];
 
 /** Checks that only repeat a holding state (newest-first input). */
 export function routineChecks(lines: Line[]): Set<number> {
@@ -149,7 +153,7 @@ function announced(chrono: Line[], ts: number[], k: number, gone: Set<number>): 
   const m = chrono[k];
   const rest = (m.text ?? "").replace(/^[a-z]+:\s*/, "");
   const n = /^#(\d+)\b/.exec(rest);
-  const asked = n && { kind: rest.endsWith(" withdrawn") ? "answer" : "ask", n: Number(n[1]) };
+  const asked = n && { kind: rest.endsWith(" withdrawn") ? "withdraw" : "ask", n: Number(n[1]) };
   const learned = /^learned (.+)$/.exec(rest)?.[1];
   const fails = /^(\S+) fails$/.exec(rest)?.[1];
   const holds = /^(\S+) holds again$/.exec(rest)?.[1];
@@ -181,51 +185,6 @@ function addUsage(a: Usage | null, b: Usage): Usage {
   };
 }
 
-/** Older journals have no `ep`: a goal from its failing check to its next holding check,
- *  and a person's task from start to end. Chronological in and out. */
-function legacy(chrono: Line[]): ({ lines: Line[]; held: boolean } | Line)[] {
-  const open = new Map<string, { lines: Line[]; held: boolean }>();
-  let task: { lines: Line[]; held: boolean } | null = null;
-  const out: ({ lines: Line[]; held: boolean } | Line)[] = [];
-  const failing = new Map<string, boolean>();
-  for (const l of chrono) {
-    if (l.action === TASK) {
-      if (!task || (l.kind === "action" && l.ok === undefined)) {
-        task = { lines: [], held: false };
-        out.push(task);
-      }
-      task.lines.push(l);
-      if (l.kind === "action" && l.ok !== undefined) task = null;
-      continue;
-    }
-    const g = l.goal;
-    if (l.kind === "check" && g) {
-      const ep = open.get(g);
-      if (l.ok === false && !ep && !failing.get(g)) {
-        const e = { lines: [l], held: false };
-        open.set(g, e);
-        out.push(e);
-        failing.set(g, true);
-        continue;
-      }
-      if (ep) {
-        ep.lines.push(l);
-        if (l.ok === true) {
-          ep.held = true;
-          open.delete(g);
-        }
-      } else out.push(l);
-      if (l.ok !== undefined) failing.set(g, l.ok === false);
-      continue;
-    }
-    const ep = g ? open.get(g) : undefined;
-    if (ep) ep.lines.push(l);
-    else out.push(l);
-  }
-  // A goal's episode of one check says no more than the line.
-  return out.map((it) => ("lines" in it && it.lines.length === 1 && it.lines[0].action !== TASK ? it.lines[0] : it));
-}
-
 /** The timeline: lines folded into episodes and rows. Lines in, newest first; items out,
  *  newest first. `running` is the status's repair: an open job episode runs only then. */
 export function timeline(lines: Line[], running: string | null): Item[] {
@@ -243,12 +202,15 @@ export function timeline(lines: Line[], running: string | null): Item[] {
     gone.add(g.i);
   });
 
-  // A message is a mark on the line it announces, else on its episode.
+  // A message is a mark on the line it announces, else on its episode; where an
+  // escalation went is a mark on its ask.
   const sentOn = new Map<number, Line[]>();
   const sentEp = new Map<string, Line[]>();
   chrono.forEach((m, k) => {
-    if (m.kind !== "message") return;
-    const to = announced(chrono, ts, k, gone);
+    let to: Line | null | undefined;
+    if (ROUTED.includes(m.kind)) to = chrono.find((l) => l.kind === "ask" && l.n === m.n);
+    else if (m.kind === "message") to = announced(chrono, ts, k, gone);
+    else return;
     if (to) push(sentOn, to.i, m);
     else if (m.ep) push(sentEp, m.ep, m);
     else return;
@@ -285,7 +247,7 @@ export function timeline(lines: Line[], running: string | null): Item[] {
     adopted.add(l.i);
   });
 
-  function build(key: string, all: Line[], ep: string | undefined, held: boolean): Episode {
+  function build(key: string, all: Line[], ep: string): Episode {
     all.sort((a, b) => a.i - b.i);
     const task = all.some((l) => l.action === TASK);
     const start = task ? all.find((l) => l.kind === "action" && l.action === TASK && l.ok === undefined) : undefined;
@@ -316,8 +278,7 @@ export function timeline(lines: Line[], running: string | null): Item[] {
     }
 
     let outcome: Outcome | null = null;
-    if (held) outcome = "held";
-    else if (end) outcome = end.ok ? (task ? "done" : "held") : "failed";
+    if (end) outcome = end.ok ? (task ? "done" : "held") : "failed";
     else if (what === "learn") outcome = learns.length ? "learned" : cannot ? "failed" : null;
     else if (all.some((l) => l.kind === "ask")) outcome = "asked";
 
@@ -335,7 +296,7 @@ export function timeline(lines: Line[], running: string | null): Item[] {
       end: outcome ? all[all.length - 1].t : null,
       cost,
       usage,
-      sent: ep ? (sentEp.get(ep) ?? []) : [],
+      sent: sentEp.get(ep) ?? [],
       steps: all
         .filter((l) => !gone.has(l.i) && l !== start && l !== hand && !(l.kind === "note" && l.usage))
         .map((l) => ({ line: l, gate: gateOf.get(l.i), sent: sentOn.get(l.i) ?? [] })),
@@ -343,15 +304,10 @@ export function timeline(lines: Line[], running: string | null): Item[] {
   }
 
   const items: { at: number; item: Item }[] = [];
-  for (const s of spans) items.push({ at: Math.min(...s.ls.map((l) => l.i)), item: build(`ep-${s.ep}`, s.ls, s.ep, false) });
-  const rest = chrono.filter((l) => !l.ep && !gone.has(l.i) && !adopted.has(l.i));
-  // Guessed episodes only for lines older than the first with an `ep`; after it, a line with
-  // none belongs to no episode.
-  const first = chrono.find((l) => l.ep)?.i ?? Infinity;
-  const older = legacy(rest.filter((l) => l.i < first));
-  for (const it of [...older, ...rest.filter((l) => l.i >= first)]) {
-    if ("lines" in it) items.push({ at: it.lines[0].i, item: build(`lg-${it.lines[0].i}`, it.lines, undefined, it.held) });
-    else items.push({ at: it.i, item: { type: "step", step: { line: it, gate: gateOf.get(it.i), sent: sentOn.get(it.i) ?? [] } } });
+  for (const s of spans) items.push({ at: Math.min(...s.ls.map((l) => l.i)), item: build(`ep-${s.ep}`, s.ls, s.ep) });
+  for (const l of chrono) {
+    if (l.ep || gone.has(l.i) || adopted.has(l.i)) continue;
+    items.push({ at: l.i, item: { type: "step", step: { line: l, gate: gateOf.get(l.i), sent: sentOn.get(l.i) ?? [] } } });
   }
   items.sort((a, b) => b.at - a.at);
 

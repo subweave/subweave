@@ -19,6 +19,7 @@ export type Shown = GoalState | "running" | "ask";
 
 const LABEL: Record<Shown, string> = {
   holds: "holds",
+  suspect: "failed once",
   fails: "fails",
   unknown: "unknown",
   off: "off",

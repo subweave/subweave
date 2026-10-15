@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
-use jiff::Timestamp;
 
 use super::flow;
 use crate::model::{ModelRef, decider::Decider};
@@ -92,7 +91,6 @@ pub async fn run(args: Args) -> Result<ExitCode> {
         None => (spec.request.clone(), spec.args.clone(), BTreeMap::new()),
     };
     let journal = flow::journal_end(&args.service);
-    let since = Timestamp::now();
     service::put(&Command::Tell {
         service: args.service.clone(),
         request,
@@ -107,7 +105,7 @@ pub async fn run(args: Args) -> Result<ExitCode> {
         println!("follow it: subweave log -f {}", args.service);
         return Ok(ExitCode::SUCCESS);
     }
-    flow::follow(&args.service, since, journal).await?;
+    flow::follow(&args.service, journal).await?;
     Ok(ExitCode::SUCCESS)
 }
 

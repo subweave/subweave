@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 
 use super::{ApiError, App};
 use crate::boxinfo::BoxInfo;
+use crate::daemon::journal;
 use crate::daemon::{epoch, epoch_of, hostname, now, running};
 use crate::{paths, service};
 
@@ -491,11 +492,14 @@ pub(crate) async fn box_info() -> Result<Json<Value>, ApiError> {
             Some(json!({"mount": m, "size_bytes": size, "used_bytes": used}))
         })
         .collect();
+    let now = now();
+    let month = &now[..7];
     let mut spend = 0.0;
+    let mut asks_open = 0;
     for name in service::names().map_err(ApiError::internal)? {
-        if let Ok(Some(s)) = service::status(&name) {
-            spend += s.spend_month_usd;
-        }
+        let st = journal::read(&name);
+        spend += st.spend_in(month);
+        asks_open += st.open().count();
     }
     let daemon = match running() {
         Some(r) => json!({"active": true, "since": r.since}),
@@ -512,6 +516,6 @@ pub(crate) async fn box_info() -> Result<Json<Value>, ApiError> {
         "version": env!("CARGO_PKG_VERSION"),
         "daemon": daemon,
         "spend_month_usd": spend,
-        "asks_open": service::all_asks().map_err(ApiError::internal)?.len(),
+        "asks_open": asks_open,
     })))
 }

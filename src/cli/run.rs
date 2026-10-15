@@ -89,7 +89,6 @@ pub async fn run(args: Args) -> Result<ExitCode> {
         secrets,
     };
     let journal = flow::journal_end(&name);
-    let since = Timestamp::now();
     service::put(&Command::Run {
         bundle,
         by: super::by(),
@@ -100,7 +99,7 @@ pub async fn run(args: Args) -> Result<ExitCode> {
         println!("follow it: subweave log -f {name}");
         return Ok(ExitCode::SUCCESS);
     }
-    flow::follow(&name, since, journal).await?;
+    flow::follow(&name, journal).await?;
     Ok(ExitCode::SUCCESS)
 }
 

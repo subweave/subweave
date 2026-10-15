@@ -15,7 +15,9 @@ use opentelemetry::{Context, KeyValue};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::trace::{SdkTracer, SdkTracerProvider};
 
-use crate::service::{JobKind, Kind, Line, TASK};
+use crate::service::TASK;
+
+use super::state::{Act, Event, JobKind, Kind};
 
 struct Traces {
     provider: SdkTracerProvider,
@@ -85,26 +87,11 @@ fn ids(ep: &str) -> Option<(TraceId, SpanId)> {
     Some((TraceId::from(id), SpanId::from_bytes((id as u64).to_be_bytes())))
 }
 
-fn kind_name(k: Kind) -> &'static str {
-    match k {
-        Kind::Check => "check",
-        Kind::Decide => "decide",
-        Kind::Gate => "gate",
-        Kind::Action => "action",
-        Kind::Command => "command",
-        Kind::Learn => "learn",
-        Kind::Ask => "ask",
-        Kind::Answer => "answer",
-        Kind::Message => "message",
-        Kind::Note => "note",
-    }
-}
-
 /// How long an open episode with no new line keeps its root span back.
 const STALE: Duration = Duration::from_secs(3600);
 
-/// A journal line of `service`, just written: a child span of its episode's trace.
-pub(crate) fn line(service: &str, l: &Line) {
+/// A journal event of `service`, just written: a child span of its episode's trace.
+pub(crate) fn line(service: &str, l: &Event) {
     let Some(t) = TRACES.as_ref() else { return };
     let Some(ep) = l.ep.as_deref() else { return };
     let Some((trace_id, root_id)) = ids(ep) else { return };
@@ -113,8 +100,8 @@ pub(crate) fn line(service: &str, l: &Line) {
         .ms
         .and_then(|ms| end.checked_sub(Duration::from_millis(ms)))
         .unwrap_or(end);
-    let ends_task =
-        l.kind == Kind::Action && l.action.as_deref() == Some(TASK) && l.ok.is_some();
+    let action_ended = matches!(l.kind, Kind::Action(Act::Ended { .. }));
+    let ends_task = action_ended && l.action() == Some(TASK);
     let mut stale = Vec::new();
     let ended = {
         let mut open = t.open.lock().unwrap_or_else(|e| e.into_inner());
@@ -140,11 +127,11 @@ pub(crate) fn line(service: &str, l: &Line) {
         r.start = r.start.min(start);
         r.end = r.end.max(end);
         if r.goal.is_none() {
-            r.goal.clone_from(&l.goal);
+            r.goal = l.goal().map(str::to_string);
         }
-        if l.kind == Kind::Action && l.ok.is_some() {
-            r.action.clone_from(&l.action);
-            r.ok = l.ok;
+        if action_ended {
+            r.action = l.action().map(str::to_string);
+            r.ok = l.ok();
         }
         r.cost_usd += l.cost_usd.unwrap_or(0.0);
         if ends_task { open.remove(ep) } else { None }
@@ -152,15 +139,15 @@ pub(crate) fn line(service: &str, l: &Line) {
 
     let mut attrs = vec![
         KeyValue::new("subweave.service", service.to_string()),
-        KeyValue::new("subweave.kind", kind_name(l.kind)),
+        KeyValue::new("subweave.kind", l.kind.name()),
     ];
-    if let Some(g) = &l.goal {
-        attrs.push(KeyValue::new("subweave.goal", g.clone()));
+    if let Some(g) = l.goal() {
+        attrs.push(KeyValue::new("subweave.goal", g.to_string()));
     }
-    if let Some(a) = &l.action {
-        attrs.push(KeyValue::new("subweave.action", a.clone()));
+    if let Some(a) = l.action() {
+        attrs.push(KeyValue::new("subweave.action", a.to_string()));
     }
-    if let Some(ok) = l.ok {
+    if let Some(ok) = l.ok() {
         attrs.push(KeyValue::new("subweave.ok", ok));
     }
     if let Some(c) = l.cost_usd {
@@ -175,10 +162,14 @@ pub(crate) fn line(service: &str, l: &Line) {
             KeyValue::new("subweave.tokens.reasoning", u.reasoning as i64),
         ]);
     }
-    if let Some(text) = &l.text {
+    if let Some(text) = l.text() {
         // Redacted already: the journal wrote it.
-        let key = if l.kind == Kind::Command { "subweave.command" } else { "subweave.text" };
-        attrs.push(KeyValue::new(key, text.clone()));
+        let key = if matches!(l.kind, Kind::Command { .. }) {
+            "subweave.command"
+        } else {
+            "subweave.text"
+        };
+        attrs.push(KeyValue::new(key, text.to_string()));
     }
     let parent = Context::new().with_remote_span_context(SpanContext::new(
         trace_id,
@@ -188,12 +179,12 @@ pub(crate) fn line(service: &str, l: &Line) {
         TraceState::default(),
     ));
     let mut span = t.tracer.build_with_context(
-        SpanBuilder::from_name(kind_name(l.kind))
+        SpanBuilder::from_name(l.kind.name())
             .with_start_time(start)
             .with_attributes(attrs),
         &parent,
     );
-    if l.ok == Some(false) {
+    if l.ok() == Some(false) {
         span.set_status(Status::error("failed"));
     }
     span.end_with_timestamp(end);

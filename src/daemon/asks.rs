@@ -1,100 +1,31 @@
-//! Asks: numbered daemon-wide, journaled, sent to every channel; answers come from the
-//! inbox or from the answering channels, which one background task polls.
+//! Escalations: numbered daemon-wide, journaled, sent to every channel; answers come
+//! from the inbox or from the answering channels, which one background task polls.
+//! Where each went is an event on it, so its answer is read back from the fold.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-use crate::channel::{self, AskInfo, Message, Sent};
+use crate::channel::{self, AskInfo, Message};
 use crate::model::coder::{Coder, Tally};
 use crate::paths;
-use crate::service::{Kind, Line, TASK};
+use crate::service::{self as svc, TASK};
 
-use super::Shared;
 use super::card::{self, Card};
+use super::journal::Journal;
 use super::service::Ctx;
-
-/// Where one ask went, so its answer can be read back. Kept in `asks.sent.json`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct SentAsk {
-    pub service: String,
-    /// Channel name → what it needs to find the answer.
-    pub sent: BTreeMap<String, Sent>,
-    /// The ask is answered or withdrawn: what is left is watched for its own sake (a
-    /// Steery connect), never for an answer.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub settled: bool,
-}
-
-fn sent_file() -> std::path::PathBuf {
-    paths::state().join("asks.sent.json")
-}
-
-pub(crate) fn load_sent() -> BTreeMap<u64, SentAsk> {
-    std::fs::read(sent_file())
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
-}
-
-fn save_sent(sent: &BTreeMap<u64, SentAsk>) {
-    if let Err(e) = super::save_json(&sent_file(), sent) {
-        tracing::error!(error = %format!("{e:#}"), "cannot save asks.sent.json");
-    }
-}
-
-/// The ask is settled: every channel stops watching it, except a watch that outlives
-/// its ask (`channel::outlives_ask`). What stopped, for its buttons to be taken away.
-pub(crate) fn forget_sent(shared: &Shared, n: u64) -> Option<SentAsk> {
-    let mut sent = shared.sent.lock().unwrap_or_else(|e| e.into_inner());
-    let entry = sent.get_mut(&n)?;
-    let (keep, gone): (BTreeMap<_, _>, BTreeMap<_, _>) = std::mem::take(&mut entry.sent)
-        .into_iter()
-        .partition(|(_, s)| channel::outlives_ask(s));
-    let gone = SentAsk {
-        service: entry.service.clone(),
-        sent: gone,
-        settled: true,
-    };
-    if keep.is_empty() {
-        sent.remove(&n);
-    } else {
-        entry.sent = keep;
-        entry.settled = true;
-    }
-    save_sent(&sent);
-    Some(gone)
-}
-
-/// An ask nobody needs to answer now: it counts as settled, so a send still to come
-/// skips it and a later answer is ignored; its agent process, if any, is killed, no
-/// channel polls for it, and each channel that showed buttons takes them away.
-pub(crate) fn withdraw(shared: &Shared, n: u64) {
-    shared.answered.lock().unwrap_or_else(|e| e.into_inner()).insert(n);
-    super::agent::kill(shared, n);
-    let Some(gone) = forget_sent(shared, n) else {
-        return;
-    };
-    tokio::spawn(async move {
-        let channels = channel::ls().unwrap_or_default();
-        for (name, sent) in gone.sent {
-            if let Some(ch) = channels.iter().find(|c| c.name == name) {
-                if let Err(e) = channel::close(ch, &sent).await {
-                    tracing::warn!(ask = n, channel = %name, error = %format!("{e:#}"), "closing an ask failed");
-                }
-            }
-        }
-    });
-}
+use super::state::{Event, Kind, Sent};
+use super::{Shared, lock};
 
 impl Shared {
-    /// The next ask number, from `asks.next`.
+    /// The next escalation number, from `asks.next`: never one a removed service used,
+    /// so a late answer to it reaches nothing.
     fn next_ask(&self) -> u64 {
-        let _g = self.ask_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock(&self.ask_lock);
         let path = paths::asks_next();
         let n: u64 = std::fs::read_to_string(&path)
             .ok()
@@ -105,6 +36,43 @@ impl Shared {
         }
         n
     }
+}
+
+/// Journals `e`, an answer or a withdraw of escalation `n`. Once it settles, its agent
+/// process, if any, is killed, no channel polls for it, and each channel that showed
+/// buttons takes them away. `false`: the escalation did not take it, and it is journaled
+/// as refused.
+pub(crate) fn settle(shared: &Shared, j: &mut Journal, e: Event) -> bool {
+    let Some(n) = e.n() else { return false };
+    let sent = j
+        .state()
+        .escalations
+        .get(&n)
+        .map(|x| x.sent().to_vec())
+        .unwrap_or_default();
+    if !j.add(e) {
+        return false;
+    }
+    super::agent::kill(shared, n);
+    close(n, sent);
+    true
+}
+
+/// Takes the buttons away where escalation `n` went.
+fn close(n: u64, sent: Vec<Sent>) {
+    if sent.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        let channels = channel::ls().unwrap_or_default();
+        for s in sent {
+            if let Some(ch) = channels.iter().find(|c| c.name == s.channel) {
+                if let Err(e) = channel::close(ch, &s.handle).await {
+                    tracing::warn!(ask = n, channel = %s.channel, error = %format!("{e:#}"), "closing an ask failed");
+                }
+            }
+        }
+    });
 }
 
 pub(crate) struct AskReq {
@@ -119,56 +87,59 @@ pub(crate) struct AskReq {
     pub signed: bool,
 }
 
-/// Journals the ask (and its rule as a `gate` line), sends it to every channel. An ask a
-/// person's job raised carries their `by`: it waits for a person's answer and is never
-/// withdrawn. When a channel will show it, the coder's first model writes its summary
-/// first, journaled with what it cost.
-pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
+/// Journals the escalation and sends it to every channel. One a person's job raised
+/// carries their `by`: it waits for a person's answer and is never withdrawn. When a
+/// channel will show it, the coder's first model writes its summary first, journaled
+/// with what it cost. Its number, or `None` when the journal refused or could not write
+/// it: nothing is sent then.
+pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> Option<u64> {
     let n = ctx.shared.next_ask();
-    let by = ctx
-        .by
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-        .filter(|b| !b.is_empty());
+    let by = lock(&ctx.by).clone().filter(|b| !b.is_empty());
     let answers = req.card.words();
     let labels = req.card.labels();
     let (title, text, facts) = {
         let mut j = ctx.journal();
-        if let Some(rule) = &req.rule {
-            j.add(Line {
-                kind: Kind::Gate,
-                goal: req.goal.clone(),
-                action: req.action.clone(),
-                text: Some(rule.clone()),
-                n: Some(n),
+        if let (Some(rule), Some(action)) = (&req.rule, &req.action) {
+            j.add(Event {
                 by: by.clone(),
-                ..Default::default()
+                ..Kind::Gate {
+                    goal: req.goal.clone(),
+                    action: action.clone(),
+                    text: rule.clone(),
+                    ok: false,
+                    p: BTreeMap::new(),
+                    n: Some(n),
+                }
+                .into()
             });
         }
-        let l = j.add(Line {
-            kind: Kind::Ask,
-            goal: req.goal.clone(),
-            action: req.action.clone(),
-            text: Some(req.card.title.clone()),
-            facts: Some(req.facts.clone()),
-            n: Some(n),
-            answers: Some(answers.clone()),
-            labels: Some(labels.clone()),
-            body: Some(req.card.lines.join("\n")),
-            signed: req.signed.then_some(true),
+        let raised = j.add(Event {
             by,
-            ..Default::default()
+            ..Kind::Ask {
+                n,
+                goal: req.goal.clone(),
+                action: req.action.clone(),
+                rule: req.rule.clone(),
+                text: req.card.title.clone(),
+                body: req.card.lines.join("\n"),
+                facts: req.facts.clone(),
+                answers: answers.clone(),
+                labels: labels.clone(),
+                signed: req.signed,
+            }
+            .into()
         });
-        let title = l.text.unwrap_or_default();
-        j.add(Line {
-            kind: Kind::Message,
+        // The card as journaled: secrets redacted.
+        let card = match j.state().escalations.get(&n) {
+            Some(e) if raised => e.card.clone(),
+            _ => return None,
+        };
+        j.add(Kind::Message {
             goal: req.goal.clone(),
             action: req.action.clone().filter(|a| a == TASK),
-            text: Some(format!("ask: #{n} {title}")),
-            ..Default::default()
+            text: format!("ask: #{n} {}", card.title),
         });
-        (title, l.body.unwrap_or_default(), l.facts.unwrap_or_default())
+        (card.title, card.body, card.facts)
     };
     let mut msg = Message {
         kind: channel::Kind::Ask,
@@ -208,23 +179,26 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
         // A signed card shows only the daemon's words: a model's summary of it could
         // carry what an agent wrote into what the person signs.
         if let Some(coder) = coder.filter(|_| !signed) {
-            let line = summarize(&coder, &msg, about.as_deref()).await;
-            let mut j = journal.lock().unwrap_or_else(|e| e.into_inner());
-            if let Ok(lines) = &line.lines {
+            let note = summarize(&coder, &msg, about.as_deref()).await;
+            if let Ok(lines) = &note.lines {
                 msg.summary = lines.iter().map(|l| super::redact(l, &secrets)).collect();
             }
-            j.add(Line {
-                goal: msg.goal.clone(),
-                n: Some(n),
-                ep,
-                ..line.line
+            lock(&journal).add(Event {
+                ep: ep.clone(),
+                ..note.event(msg.goal.clone(), n)
             });
         }
-        let settled = || shared.answered.lock().unwrap_or_else(|e| e.into_inner()).contains(&n);
+        let open = || {
+            lock(&journal)
+                .state()
+                .escalations
+                .get(&n)
+                .is_some_and(|e| e.is_open())
+        };
         for ch in channels {
             // Answered or withdrawn during the summary or an earlier send: nobody needs
             // to hear of it now.
-            if settled() {
+            if !open() {
                 break;
             }
             if signed && ch.kind() != channel::ChannelKind::Steery {
@@ -235,38 +209,60 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
                 continue;
             }
             match channel::send(&ch, &msg).await {
-                Ok(Some(s)) => {
-                    // Settled while it was being sent: nothing to poll, no buttons; a
-                    // watch that outlives its ask goes on.
-                    let settled = settled();
-                    if settled && !channel::outlives_ask(&s) {
-                        if let Err(e) = channel::close(&ch, &s).await {
-                            tracing::warn!(ask = n, channel = %ch.name, error = %format!("{e:#}"), "closing an ask failed");
-                        }
-                        continue;
+                Ok(Some(handle)) => {
+                    // A watch outlives its escalation; any other handle is read for the
+                    // answer, and refused once the escalation settled while it was sent:
+                    // it loses its buttons then.
+                    let channel = ch.name.clone();
+                    if channel::outlives_ask(&handle) {
+                        lock(&journal).add(Kind::Watch { n, channel, handle });
+                    } else if !lock(&journal).add(Kind::Sent {
+                        n,
+                        channel: channel.clone(),
+                        handle: handle.clone(),
+                    }) {
+                        close(n, vec![Sent { channel, handle }]);
                     }
-                    let mut sent = shared.sent.lock().unwrap_or_else(|e| e.into_inner());
-                    let entry = sent.entry(n).or_default();
-                    entry.service = service.clone();
-                    entry.settled |= settled;
-                    entry.sent.insert(ch.name.clone(), s);
-                    save_sent(&sent);
                 }
                 Ok(None) => {}
                 Err(e) => tracing::warn!(service = %service, ask = n, channel = %ch.name, error = %format!("{e:#}"), "sending an ask failed"),
             }
         }
     });
-    n
+    Some(n)
 }
 
 /// The card waits this long for its summary, then goes without one.
 const SUMMARY_WAIT: Duration = Duration::from_secs(20);
 
-/// The summary's journal line, and its lines when they can be used.
+/// The summary's lines when they can be used, and what its note says it took.
 struct Summarized {
     lines: Result<Vec<String>, String>,
-    line: Line,
+    text: String,
+    tally: Option<(Tally, String)>,
+    ms: Option<u64>,
+}
+
+impl Summarized {
+    /// The note on escalation `n` that says what the summary came to.
+    fn event(self, goal: Option<String>, n: u64) -> Event {
+        let (cost_usd, usage) = match self.tally {
+            Some((t, model)) => (Some(t.cost_usd), Some(t.usage(model))),
+            None => (None, None),
+        };
+        Event {
+            cost_usd,
+            usage,
+            ms: self.ms,
+            ..Kind::Note {
+                goal,
+                action: None,
+                n: Some(n),
+                text: self.text,
+            }
+            .into()
+        }
+    }
 }
 
 /// The card as the person reads it goes to the model, never the journal's raw facts:
@@ -302,32 +298,24 @@ async fn summarize(coder: &Coder, msg: &Message, about: Option<&str>) -> Summari
             };
             Summarized {
                 lines: s.lines,
-                line: Line {
-                    kind: Kind::Note,
-                    text: Some(text),
-                    cost_usd: Some(tally.cost_usd),
-                    usage: Some(tally.usage(model)),
-                    ms: super::ms(start),
-                    ..Default::default()
-                },
+                text,
+                tally: Some((tally, model)),
+                ms: super::ms(start),
             }
         }
         Err(e) => Summarized {
             lines: Err(format!("{e:#}")),
-            line: Line {
-                kind: Kind::Note,
-                text: Some(format!("card summary: {e:#}")),
-                ms: super::ms(start),
-                ..Default::default()
-            },
+            text: format!("card summary: {e:#}"),
+            tally: None,
+            ms: super::ms(start),
         },
     }
 }
 
-/// Polls every answering channel for its open asks; answers go to `tx` with the
-/// channel's name.
+/// Polls every answering channel for what the services' folds say it reads: the open
+/// escalations sent to it and its watches. Answers go to `tx` with the channel's name.
 pub(crate) async fn poll_loop(
-    shared: std::sync::Arc<Shared>,
+    shared: Arc<Shared>,
     tx: mpsc::UnboundedSender<(channel::Answer, String)>,
 ) {
     loop {
@@ -336,24 +324,25 @@ pub(crate) async fn poll_loop(
             .into_iter()
             .filter(|c| c.kind().answers())
             .collect();
-        let mut set = JoinSet::new();
-        {
-            let sent = shared.sent.lock().unwrap_or_else(|e| e.into_inner());
-            let answered = shared.answered.lock().unwrap_or_else(|e| e.into_inner());
-            for ch in channels {
-                let open: Vec<(u64, Sent)> = sent
-                    .iter()
-                    .filter(|(n, s)| s.settled || !answered.contains(n))
-                    .filter_map(|(n, s)| s.sent.get(&ch.name).map(|s| (*n, s.clone())))
-                    .collect();
-                if open.is_empty() {
-                    continue;
-                }
-                set.spawn(async move {
-                    let r = channel::poll(&ch, &open).await;
-                    (ch.name, r)
-                });
+        let mut read: BTreeMap<String, Vec<(u64, channel::Sent)>> = BTreeMap::new();
+        for name in svc::names().unwrap_or_default() {
+            let journal = shared.journal(&name);
+            let j = lock(&journal);
+            for (n, ch, handle) in j.state().polled() {
+                read.entry(ch.to_string())
+                    .or_default()
+                    .push((n, handle.clone()));
             }
+        }
+        let mut set = JoinSet::new();
+        for ch in channels {
+            let Some(open) = read.remove(&ch.name) else {
+                continue;
+            };
+            set.spawn(async move {
+                let r = channel::poll(&ch, &open).await;
+                (ch.name, r)
+            });
         }
         if set.is_empty() {
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -366,8 +355,13 @@ pub(crate) async fn poll_loop(
                     for a in polled.answers {
                         let _ = tx.send((a, name.clone()));
                     }
-                    if !polled.done.is_empty() {
-                        stop_watching(&shared, &name, &polled.done);
+                    for n in polled.done {
+                        if let Some((_, journal)) = shared.find(n) {
+                            lock(&journal).add(Kind::Unwatch {
+                                n,
+                                channel: name.clone(),
+                            });
+                        }
                     }
                 }
                 Ok((name, Err(e))) => {
@@ -384,18 +378,4 @@ pub(crate) async fn poll_loop(
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
-}
-
-/// Channel `name` has no more to do for asks `done`: no answer comes on it.
-fn stop_watching(shared: &Shared, name: &str, done: &[u64]) {
-    let mut sent = shared.sent.lock().unwrap_or_else(|e| e.into_inner());
-    for n in done {
-        if let Some(entry) = sent.get_mut(n) {
-            entry.sent.remove(name);
-            if entry.sent.is_empty() {
-                sent.remove(n);
-            }
-        }
-    }
-    save_sent(&sent);
 }

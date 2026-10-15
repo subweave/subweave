@@ -5,7 +5,10 @@ import type { Episode, Outcome, Step } from "../model";
 import { FactsTable, Glyph, type Shown } from "./ui";
 
 const ICON: Record<Kind, ReactNode> = {
+  goals: <path d="M2 3h8M2 6h8M2 9h8" fill="none" />,
   check: null,
+  off: null,
+  waiting: null,
   decide: <path d="M6 1.5 10.5 6 6 10.5 1.5 6Z" />,
   gate: <path d="M6 1 10 2.6V6c0 2.4-1.7 4.2-4 5-2.3-.8-4-2.6-4-5V2.6Z" />,
   action: <path d="M3.5 2v8L10 6Z" />,
@@ -13,6 +16,11 @@ const ICON: Record<Kind, ReactNode> = {
   learn: <path d="M3 1.5h6v9L6 8.5 3 10.5Z" />,
   ask: <path d="M4.3 4.4a1.8 1.8 0 1 1 2.6 1.6c-.6.3-.9.7-.9 1.3M6 9.4v.1" fill="none" />,
   answer: <path d="M5 2.5 2 5.5l3 3M2.5 5.5H7a3 3 0 0 1 3 3v1" fill="none" />,
+  withdraw: <path d="M3 3l6 6M9 3 3 9" fill="none" />,
+  sent: <path d="M1.5 3h9v6h-9ZM1.5 3 6 6.5 10.5 3" fill="none" />,
+  watch: <path d="M1.5 3h9v6h-9ZM1.5 3 6 6.5 10.5 3" fill="none" />,
+  unwatch: <path d="M1.5 3h9v6h-9ZM1.5 3 6 6.5 10.5 3" fill="none" />,
+  refused: <path d="M6 1.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9ZM2.8 9.2l6.4-6.4" fill="none" />,
   message: <path d="M1.5 3h9v6h-9ZM1.5 3 6 6.5 10.5 3" fill="none" />,
   note: <circle cx="6" cy="6" r="1.8" />,
 };
@@ -30,12 +38,13 @@ export function KindGlyph({ line }: { line: Line }) {
   if (line.kind === "check") {
     return <Glyph state={line.ok === true ? "holds" : line.ok === false ? "fails" : "unknown"} />;
   }
+  if (line.kind === "off" || line.kind === "waiting") return <Glyph state={line.kind} />;
   const tone =
     line.kind === "gate"
       ? gateTone(line)
       : line.kind === "ask"
         ? "amber"
-        : line.kind === "command" && line.ok === false
+        : (line.kind === "command" && line.ok === false) || line.kind === "refused"
           ? "red"
           : byModel(line)
             ? "model"
@@ -108,7 +117,7 @@ function Facts({ facts }: { facts?: Record<string, string> }) {
 }
 
 /** A step's one line, the tags at its end, and what opens under it. */
-function describe({ line: l, gate }: Step): { main: ReactNode; tags?: ReactNode; more?: ReactNode } {
+function describe({ line: l }: Step): { main: ReactNode; tags?: ReactNode; more?: ReactNode } {
   const goal = l.goal ? <span className="row-goal">{l.goal}</span> : null;
   switch (l.kind) {
     case "check":
@@ -119,6 +128,24 @@ function describe({ line: l, gate }: Step): { main: ReactNode; tags?: ReactNode;
           </>
         ),
         more: <Facts facts={l.facts} />,
+      };
+    case "goals":
+      return { main: <>Goals: {(l.goals ?? []).join(", ")}</> };
+    case "off":
+      return {
+        main: (
+          <>
+            {goal} <span className="t-muted">off: {l.text}</span>
+          </>
+        ),
+      };
+    case "waiting":
+      return {
+        main: (
+          <>
+            {goal} <span className="t-muted">waits for {l.on}</span>
+          </>
+        ),
       };
     case "decide": {
       const p = l.text !== undefined ? l.p?.[l.text] : undefined;
@@ -192,7 +219,15 @@ function describe({ line: l, gate }: Step): { main: ReactNode; tags?: ReactNode;
           <>
             <b className="w-6">{l.action}</b>
             {l.goal && <> for {goal}</>}
-            {l.ok === undefined ? " started" : l.ok ? <span className="t-accent"> ended, the goal holds</span> : <span className="t-red"> ended, the goal still fails</span>}
+            {l.stopped !== undefined ? (
+              <span className="t-muted"> stopped: {l.stopped}</span>
+            ) : l.ok === undefined ? (
+              " started"
+            ) : l.ok ? (
+              <span className="t-accent"> ended, the goal holds</span>
+            ) : (
+              <span className="t-red"> ended, the goal still fails</span>
+            )}
             {l.by && <span className="t-muted"> · {l.by}</span>}
             {l.text && <span className="t-muted"> · {l.text}</span>}
           </>
@@ -212,7 +247,7 @@ function describe({ line: l, gate }: Step): { main: ReactNode; tags?: ReactNode;
         : { main: <>Learned {l.text}</> };
     }
     case "ask": {
-      const rule = gate && splitGate(gate.text ?? "");
+      const rule = l.rule ? splitGate(l.rule) : null;
       return {
         main: (
           <>
@@ -230,17 +265,6 @@ function describe({ line: l, gate }: Step): { main: ReactNode; tags?: ReactNode;
       };
     }
     case "answer":
-      // The daemon closes an ask whose goal holds again: by "daemon: <goal> holds again".
-      if (l.text === "withdrawn") {
-        return {
-          main: (
-            <>
-              Escalation #{l.n} withdrawn
-              {l.by && <span className="t-muted">: {l.by.replace(/^daemon:\s*/, "")}</span>}
-            </>
-          ),
-        };
-      }
       return {
         main: (
           <>
@@ -249,6 +273,32 @@ function describe({ line: l, gate }: Step): { main: ReactNode; tags?: ReactNode;
           </>
         ),
       };
+    case "withdraw":
+      return {
+        main: (
+          <>
+            Escalation #{l.n} withdrawn<span className="t-muted">: {l.text}</span>
+          </>
+        ),
+      };
+    case "sent":
+    case "watch":
+    case "unwatch":
+      return { main: <>{routed(l)}</> };
+    case "refused": {
+      const r = l.refused;
+      return {
+        main: (
+          <>
+            <span className="t-red">Refused</span> {r?.kind}
+            {r?.n !== undefined && <> #{r.n}</>}
+            {r?.text && <b className="w-6"> {r.text}</b>}
+            {l.by && <span className="t-muted"> by {l.by}</span>}
+            <span className="t-muted">: {l.text}</span>
+          </>
+        ),
+      };
+    }
     default:
       return {
         main: (
@@ -266,13 +316,20 @@ function describe({ line: l, gate }: Step): { main: ReactNode; tags?: ReactNode;
 function Sent({ lines }: { lines: Line[] }) {
   if (!lines.length) return null;
   return (
-    <span className="sent" title={`Sent to the channels:\n${lines.map((m) => m.text).join("\n")}`}>
+    <span className="sent" title={`Sent to the channels:\n${lines.map((m) => (m.kind === "message" ? m.text : routed(m))).join("\n")}`}>
       <svg className="kind" viewBox="0 0 12 12" aria-hidden="true">
         {ICON.message}
       </svg>
       sent
     </span>
   );
+}
+
+/** Where an escalation went, as a `sent`, `watch` or `unwatch` line says it. */
+function routed(l: Line): string {
+  if (l.kind === "watch") return `#${l.n} watched on ${l.channel}`;
+  if (l.kind === "unwatch") return `#${l.n}: nothing more to read on ${l.channel}`;
+  return `#${l.n} sent to ${l.channel}`;
 }
 
 /** The coder's usage: model, calls, tokens in (cached share), out, reasoning. */

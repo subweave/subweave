@@ -68,7 +68,7 @@ Each weave's README says what it cannot do. [LIMITS.md](LIMITS.md) says what Sub
 
 ## Metrics, logs, traces
 
-The dashboard serves Prometheus metrics at `/metrics`, a view of each service's journal, `status.json` and the box's vitals. A scrape from the box itself needs nothing; from elsewhere, or through a proxy that sets `X-Forwarded-For`, the dashboard password as a bearer token:
+The dashboard serves Prometheus metrics at `/metrics`, a view of each service's journal and the state folded from it, and the box's vitals. A scrape from the box itself needs nothing; from elsewhere, or through a proxy that sets `X-Forwarded-For`, the dashboard password as a bearer token:
 
 ```yaml
 scrape_configs:

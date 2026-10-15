@@ -112,8 +112,8 @@ impl Decider {
     }
 
     /// The journal's record of one request.
-    pub fn usage(&self, a: &Answers) -> crate::service::Usage {
-        crate::service::Usage {
+    pub fn usage(&self, a: &Answers) -> super::Usage {
+        super::Usage {
             model: self.model.to_string(),
             calls: 1,
             input: a.usage.input_tokens,

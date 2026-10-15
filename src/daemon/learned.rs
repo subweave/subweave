@@ -11,12 +11,24 @@ use sha2::{Digest, Sha256};
 use crate::model::coder::{Msg, Tally, Tool};
 use crate::model::decider::Question;
 use crate::paths;
-use crate::service::{self as svc, JobKind, Kind, Learned, LearnedFact, Line};
+use crate::service::{self as svc, Learned, LearnedFact};
 use crate::weave::expr::Op;
 use crate::weave::{self, Action, Condition, Expr, Fact, FactSource, Rule, Step, Weave};
 
 use super::service::Ctx;
+use super::state::{Event, JobKind, Kind};
 use super::{ms, now, save_json, sh};
+
+/// A note on a learn: no goal, no action.
+fn note(text: String) -> Event {
+    Kind::Note {
+        goal: None,
+        action: None,
+        n: None,
+        text,
+    }
+    .into()
+}
 
 const TRIES: usize = 3;
 /// After a quoted fact could not be learned, the next try waits this long.
@@ -194,12 +206,12 @@ pub(crate) async fn relearn(
     };
     let code = failed.code.map_or("killed".to_string(), |c| format!("exit {c}"));
     let output = ctx.redact(&super::cap(&failed.both(), 1000));
-    ctx.journal().add(Line {
-        kind: Kind::Learn,
-        ok: Some(false),
-        text: Some(format!("fact {}: `{command}` failed on this box ({code})", fact.name)),
+    ctx.journal().add(Kind::Learn {
+        goal: None,
+        action: None,
+        ok: false,
+        text: format!("fact {}: `{command}` failed on this box ({code})", fact.name),
         output: Some(output.clone()),
-        ..Default::default()
     });
     {
         let mut l = ctx.learned();
@@ -247,17 +259,16 @@ async fn learn_and_keep(ctx: &Ctx, fact: &Fact, hint: Option<&str>) -> Option<St
             .as_ref()
             .map(|c| c.model(0).to_string())
             .unwrap_or_default();
-        ctx.journal().add(Line {
-            kind: Kind::Note,
-            text: Some(format!(
-                "coder {model} for fact {}: {}",
-                fact.name,
-                tally.describe(FACT_SYSTEM.chars().count())
-            )),
+        let text = format!(
+            "coder {model} for fact {}: {}",
+            fact.name,
+            tally.describe(FACT_SYSTEM.chars().count())
+        );
+        ctx.journal().add(Event {
             cost_usd: Some(tally.cost_usd),
             usage: Some(tally.usage(model)),
             ms: ms(start),
-            ..Default::default()
+            ..note(text)
         });
         cost -= tally.cost_usd;
     }
@@ -275,12 +286,17 @@ async fn learn_and_keep(ctx: &Ctx, fact: &Fact, hint: Option<&str>) -> Option<St
                 );
                 save(&ctx.name, &l);
             }
-            ctx.journal().add(Line {
-                kind: Kind::Learn,
-                text: Some(format!("fact {}: {command}", fact.name)),
+            ctx.journal().add(Event {
                 cost_usd: Some(cost),
                 ms: ms(start),
-                ..Default::default()
+                ..Kind::Learn {
+                    goal: None,
+                    action: None,
+                    ok: true,
+                    text: format!("fact {}: {command}", fact.name),
+                    output: None,
+                }
+                .into()
             });
             ctx.message(
                 crate::channel::Kind::Info,
@@ -292,12 +308,10 @@ async fn learn_and_keep(ctx: &Ctx, fact: &Fact, hint: Option<&str>) -> Option<St
             Some(command)
         }
         Err(e) => {
-            ctx.journal().add(Line {
-                kind: Kind::Note,
-                text: Some(format!("cannot learn fact {}: {e:#}", fact.name)),
+            ctx.journal().add(Event {
                 cost_usd: (cost > 0.0).then_some(cost),
                 ms: ms(start),
-                ..Default::default()
+                ..note(format!("cannot learn fact {}: {e:#}", fact.name))
             });
             ctx.learn_wait
                 .lock()

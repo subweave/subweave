@@ -129,8 +129,9 @@ pub fn output(service: &str) -> PathBuf {
     self::service(service).join("output")
 }
 
-pub fn status(service: &str) -> PathBuf {
-    self::service(service).join("status.json")
+/// A cache of the journal's fold, written by the daemon; the journal is the truth.
+pub fn snapshot(service: &str) -> PathBuf {
+    self::service(service).join("state.json")
 }
 
 /// A weave change that waits for its signed answer: the `Command::Change` that a yes to

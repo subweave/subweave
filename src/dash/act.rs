@@ -45,17 +45,9 @@ pub(crate) async fn answer(
     Body(b): Body<Answer>,
 ) -> Accepted {
     spec(&s)?;
-    let lines = service::journal(&s).map_err(ApiError::internal)?;
-    if !service::asks(&s, &lines).iter().any(|a| a.n == b.n) {
-        return Err(ApiError::not_found(format!("{s} has no open escalation #{}", b.n)));
-    }
-    inbox::check_answer(b.n, &b.word).map_err(|e| ApiError::bad(format!("{e:#}")))?;
-    put(Command::Answer {
-        n: b.n,
-        word: b.word,
-        by: auth::by(&headers, peer),
-        note: None,
-    })
+    inbox::send_answer(Some(&s), b.n, &b.word, auth::by(&headers, peer), None)
+        .map_err(|e| ApiError::bad(format!("{e:#}")))?;
+    Ok(StatusCode::ACCEPTED)
 }
 
 #[derive(Deserialize)]

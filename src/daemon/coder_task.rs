@@ -14,7 +14,6 @@ use serde_json::{Value, json};
 use crate::model::coder::{Msg, Tally, Tool};
 use crate::model::decider::Question;
 use crate::paths;
-use crate::service::{Kind, Line};
 use crate::weave::{self, Condition, Goal, Rule, Skill};
 
 use super::asks::AskReq;
@@ -23,6 +22,7 @@ use super::facts::{self, Values};
 use super::goals;
 use super::repair::{command, command_output, rule_text};
 use super::service::Ctx;
+use super::state::{Event, Kind};
 use super::{cap, cap_to, ms, sh};
 
 const RUN_LIMIT: Duration = Duration::from_secs(30 * 60);
@@ -111,12 +111,11 @@ impl Work<'_> {
     }
 
     fn note(&self, ctx: &Ctx, text: String) {
-        ctx.journal().add(Line {
-            kind: Kind::Note,
+        ctx.journal().add(Kind::Note {
             goal: self.goal_name(),
             action: self.task_action(),
-            text: Some(text),
-            ..Default::default()
+            n: None,
+            text,
         });
     }
 }
@@ -252,23 +251,24 @@ pub(crate) async fn pick_skills<'a>(
         }
     }
     let names: Vec<&str> = picked.iter().map(|s| s.name.as_str()).collect();
-    ctx.journal().add(Line {
-        kind: Kind::Decide,
-        goal: work.and_then(|w| w.goal_name()),
-        action: work.and_then(|w| w.task_action()),
-        text: Some(format!(
-            "skills: {}",
-            if names.is_empty() {
-                "none".to_string()
-            } else {
-                names.join(", ")
-            }
-        )),
-        p: Some(p),
+    ctx.journal().add(Event {
         cost_usd: Some(answers.cost_usd),
         usage: Some(decider.usage(&answers)),
         ms: ms(start),
-        ..Default::default()
+        ..Kind::Decide {
+            goal: work.and_then(|w| w.goal_name()),
+            action: work.and_then(|w| w.task_action()),
+            text: format!(
+                "skills: {}",
+                if names.is_empty() {
+                    "none".to_string()
+                } else {
+                    names.join(", ")
+                }
+            ),
+            p,
+        }
+        .into()
     });
     picked
 }
@@ -588,19 +588,21 @@ async fn session(
             msgs.push(Msg::Results(results));
             mask(&mut msgs, &files);
         };
-        ctx.journal().add(Line {
-            kind: Kind::Note,
-            goal: work.goal_name(),
-            action: Some(work.action.to_string()),
-            text: Some(format!(
-                "coder {}: {}, {commands} commands so far",
-                coder.model(i),
-                tally.describe(system.chars().count())
-            )),
+        ctx.journal().add(Event {
             cost_usd: Some(tally.cost_usd),
             usage: Some(tally.usage(coder.model(i).to_string())),
             ms: ms(started),
-            ..Default::default()
+            ..Kind::Note {
+                goal: work.goal_name(),
+                action: Some(work.action.to_string()),
+                n: None,
+                text: format!(
+                    "coder {}: {}, {commands} commands so far",
+                    coder.model(i),
+                    tally.describe(system.chars().count())
+                ),
+            }
+            .into()
         });
         match end {
             End::Pass(commands, summary) => return DoResult::Pass { commands, summary },
@@ -739,16 +741,17 @@ async fn judge(
         return false;
     };
     let closer = probs.get("closer").copied().unwrap_or(0.0);
-    ctx.journal().add(Line {
-        kind: Kind::Decide,
-        goal: work.goal_name(),
-        action: Some(work.action.to_string()),
-        text: Some(format!("progress after {commands} commands: {choice}")),
-        p: Some(probs.iter().map(|(k, v)| (k.clone(), *v)).collect()),
+    ctx.journal().add(Event {
         cost_usd: Some(a.cost_usd),
         usage: Some(decider.usage(&a)),
         ms: ms(started),
-        ..Default::default()
+        ..Kind::Decide {
+            goal: work.goal_name(),
+            action: Some(work.action.to_string()),
+            text: format!("progress after {commands} commands: {choice}"),
+            p: probs.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        }
+        .into()
     });
     if closer >= 0.5 {
         return false;
@@ -909,31 +912,24 @@ async fn gate_and_run(
             continue;
         }
         let rule = rule_text(r);
-        let kept = ctx.journal().kept(&rule, work.action);
+        let kept = ctx.journal().state().kept(&rule, work.action);
+        let gate = |ok: bool| Kind::Gate {
+            goal: work.goal_name(),
+            action: work.action.to_string(),
+            text: format!("{rule}: {}", ctx.redact(command)),
+            ok,
+            p: BTreeMap::from([("yes".to_string(), p)]),
+            n: None,
+        };
         if *never || kept == Some("never") {
-            ctx.journal().add(Line {
-                kind: Kind::Gate,
-                goal: work.goal_name(),
-                action: Some(work.action.to_string()),
-                text: Some(format!("{rule}: {}", ctx.redact(command))),
-                p: Some(BTreeMap::from([("yes".to_string(), p)])),
-                ..Default::default()
-            });
+            ctx.journal().add(gate(false));
             return Ok((
                 format!("Refused by the rule {rule} ({p:.2}). Do it another way, or call ask."),
                 None,
             ));
         }
         if kept == Some("always") {
-            ctx.journal().add(Line {
-                kind: Kind::Gate,
-                goal: work.goal_name(),
-                action: Some(work.action.to_string()),
-                ok: Some(true),
-                text: Some(format!("{rule}: {}", ctx.redact(command))),
-                p: Some(BTreeMap::from([("yes".to_string(), p)])),
-                ..Default::default()
-            });
+            ctx.journal().add(gate(true));
             continue;
         }
         if rules_ok.iter().any(|ok| *ok == rule) {
@@ -956,15 +952,16 @@ async fn gate_and_run(
     let all = ctx.redact(&o.both());
     let file = save_output(ctx, &all);
     let shown = cap_to(&all, OUTPUT_CAP, file.as_deref());
-    ctx.journal().add(Line {
-        kind: Kind::Command,
-        goal: work.goal_name(),
-        action: Some(work.action.to_string()),
-        text: Some(command.to_string()),
-        ok: Some(o.ok()),
-        output: command_output(ctx, &o),
+    ctx.journal().add(Event {
         ms: took,
-        ..Default::default()
+        ..Kind::Command {
+            goal: work.goal_name(),
+            action: work.action.to_string(),
+            text: command.to_string(),
+            ok: o.ok(),
+            output: command_output(ctx, &o),
+        }
+        .into()
     });
     if o.ok() {
         ok_cmds.push(command.to_string());

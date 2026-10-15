@@ -535,8 +535,8 @@ fn kill_pidfile(file: &Path) {
 }
 
 impl Box_ {
-    fn command(&self) -> tokio::process::Command {
-        let mut c = tokio::process::Command::new(env!("CARGO_BIN_EXE_subweave"));
+    fn std_command(&self) -> std::process::Command {
+        let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_subweave"));
         c.env("SUBWEAVE_STATE", &self.state)
             .env("SUBWEAVE_CONFIG", &self.config)
             .env("MOCK_API_KEY", API_KEY)
@@ -544,9 +544,43 @@ impl Box_ {
             .env("TOY_TOKEN", SECRET)
             .env_remove("OPENROUTER_API_KEY")
             .env_remove("GITHUB_TOKEN")
-            .stdin(Stdio::null())
-            .kill_on_drop(true);
+            .stdin(Stdio::null());
         c
+    }
+
+    fn command(&self) -> tokio::process::Command {
+        let mut c = tokio::process::Command::from(self.std_command());
+        c.kill_on_drop(true);
+        c
+    }
+
+    /// `subweave daemon` in the background, its output appended to `daemon.log`; `otel`
+    /// receives its traces.
+    fn start_daemon(&mut self, otel: &str) {
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.dir.join("daemon.log"))
+            .unwrap();
+        let daemon = self
+            .command()
+            .env_remove("TOY_TOKEN")
+            .env("OTEL_EXPORTER_OTLP_ENDPOINT", otel)
+            .env("OTEL_BSP_SCHEDULE_DELAY", "200")
+            .arg("daemon")
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .expect("the daemon starts");
+        self.daemon = Some(daemon);
+    }
+
+    /// Kills the daemon, as a crash would, and starts another.
+    async fn restart_daemon(&mut self, otel: &str) {
+        if let Some(mut d) = self.daemon.take() {
+            d.kill().await.expect("the daemon dies");
+        }
+        self.start_daemon(otel);
     }
 
     async fn sw(&self, args: &[&str]) -> Output {
@@ -597,18 +631,22 @@ impl Box_ {
             .len()
     }
 
+    /// The toy service's row in `subweave ps --json`: its journal's fold.
     fn status(&self) -> Value {
-        std::fs::read(self.service().join("status.json"))
+        let o = self
+            .std_command()
+            .args(["ps", "--json"])
+            .output()
+            .expect("subweave runs");
+        serde_json::from_slice::<Vec<Value>>(&o.stdout)
             .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
+            .and_then(|rows| rows.into_iter().find(|r| r["service"] == "toy"))
             .unwrap_or(Value::Null)
     }
 
     fn goal(&self, name: &str) -> String {
-        self.status()["goals"]
-            .as_array()
-            .and_then(|gs| gs.iter().find(|g| g["name"] == name))
-            .and_then(|g| g["state"].as_str())
+        self.status()["states"][name]["state"]
+            .as_str()
             .unwrap_or("-")
             .to_string()
     }
@@ -629,7 +667,7 @@ impl Box_ {
         let journal =
             std::fs::read_to_string(self.service().join("journal.jsonl")).unwrap_or_default();
         panic!(
-            "{what}\n--- status.json\n{}\n--- journal.jsonl\n{journal}\n--- daemon log\n{log}",
+            "{what}\n--- ps --json\n{}\n--- journal.jsonl\n{journal}\n--- daemon log\n{log}",
             self.status()
         );
     }
@@ -658,15 +696,15 @@ impl Box_ {
     /// The open ask for `goal` in the journal: its number and answers.
     fn open_ask(&self, goal: &str) -> Option<(u64, Vec<String>)> {
         let j = self.journal();
-        let answered: Vec<u64> = j
+        let settled: Vec<u64> = j
             .iter()
-            .filter(|l| l["kind"] == "answer")
+            .filter(|l| l["kind"] == "answer" || l["kind"] == "withdraw")
             .filter_map(|l| l["n"].as_u64())
             .collect();
         j.iter()
             .filter(|l| l["kind"] == "ask" && l["goal"] == goal)
             .filter_map(|l| Some((l["n"].as_u64()?, l)))
-            .find(|(n, _)| !answered.contains(n))
+            .find(|(n, _)| !settled.contains(n))
             .map(|(n, l)| {
                 let words = l["answers"]
                     .as_array()
@@ -1565,8 +1603,8 @@ async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
     let cols: Vec<&str> = row.split_whitespace().collect();
     let num = |i: usize| cols.get(i).and_then(|c| c.parse::<usize>().ok());
     assert!(num(2) >= Some(1) && num(3) >= Some(1), "decider and coder repairs: {out}");
-    let answers = b.lines("answer", |l| l["n"].is_u64()).len();
-    assert_eq!(num(4), Some(answers), "{out}");
+    let settled = b.lines("answer", |l| l["n"].is_u64()).len() + b.lines("withdraw", |_| true).len();
+    assert_eq!(num(4), Some(settled), "{out}");
     assert_eq!(num(5), Some(2), "{out}");
     for want in ["agent 2", "mcp 1", "steery 1", "withdrawn "] {
         assert!(row.contains(want), "stats lacks {want:?}:\n{out}");
@@ -1666,18 +1704,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
     assert_eq!(mock.coder_requests(), 0);
 
     // The daemon, in the background.
-    let log = std::fs::File::create(dir.join("daemon.log")).unwrap();
-    let daemon = b
-        .command()
-        .env_remove("TOY_TOKEN")
-        .env("OTEL_EXPORTER_OTLP_ENDPOINT", &mock_url)
-        .env("OTEL_BSP_SCHEDULE_DELAY", "200")
-        .arg("daemon")
-        .stdout(log.try_clone().unwrap())
-        .stderr(log)
-        .spawn()
-        .expect("the daemon starts");
-    b.daemon = Some(daemon);
+    b.start_daemon(&mock_url);
 
     // 1. run: the plan, the inbox, the daemon applies it.
     phase("1 run");
@@ -2067,6 +2094,32 @@ async fn daemon_and_cli_keep_a_toy_service() {
         restarts,
         "nothing runs before the answer"
     );
+    // A daemon restart keeps the failing goal and its open escalation: the new daemon
+    // replays the journal, raises nothing again and runs nothing before the answer.
+    phase("6c daemon restart");
+    let asks = b.lines("ask", |_| true).len();
+    let checks = b.lines("check", |l| l["goal"] == "running").len();
+    b.restart_daemon(&mock_url).await;
+    b.until("the new daemon's first check", 20, || {
+        (b.lines("check", |l| l["goal"] == "running").len() > checks).then_some(())
+    })
+    .await;
+    let st = b.status();
+    assert_eq!(st["states"]["running"]["state"], "fails", "{st}");
+    assert_eq!(st["asks"], json!([n]), "{st}");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        b.lines("ask", |_| true).len(),
+        asks,
+        "the restart raised an escalation again"
+    );
+    assert_eq!(b.goal("running"), "fails");
+    assert_eq!(b.open_ask("running").map(|(m, _)| m), Some(n));
+    assert_eq!(
+        b.passes("restart"),
+        restarts,
+        "nothing runs before the answer, after a restart either"
+    );
     std::fs::write(dir.join("scene"), "calm").unwrap();
     let o = b.sw(&["answer", &n.to_string(), "reboot"]).await;
     assert!(
@@ -2125,12 +2178,11 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .unwrap();
     assert!(started_by_hand.success());
     let withdrawn = b
-        .until("the withdrawn answer", 30, || {
-            b.lines("answer", |l| l["n"] == n).into_iter().next()
+        .until("the withdraw", 30, || {
+            b.lines("withdraw", |l| l["n"] == n).into_iter().next()
         })
         .await;
-    assert_eq!(withdrawn["text"], "withdrawn", "{withdrawn}");
-    assert_eq!(withdrawn["by"], "daemon: running holds again", "{withdrawn}");
+    assert_eq!(withdrawn["text"], "running holds again", "{withdrawn}");
     mock.hold_summary.store(false, Ordering::SeqCst);
     b.until("the withdrawn ask's summary", 20, || {
         b.lines("note", |l| {
@@ -2156,6 +2208,30 @@ async fn daemon_and_cli_keep_a_toy_service() {
             .find(|h| h["title"] == format!("#{n} withdrawn"))
     })
     .await;
+    // An answer after the withdraw settles nothing: the journal keeps it as refused.
+    let restarts = b.passes("restart");
+    let o = b.sw(&["answer", &n.to_string(), "restart"]).await;
+    assert!(
+        !o.status.success() && both(&o).contains(&format!("#{n} was withdrawn at ")),
+        "{}",
+        both(&o)
+    );
+    let refused = b
+        .until("the refused answer", 10, || {
+            b.lines("refused", |l| l["refused"]["n"] == n).into_iter().next()
+        })
+        .await;
+    assert_eq!(refused["refused"]["kind"], "answer", "{refused}");
+    assert_eq!(refused["refused"]["text"], "restart", "{refused}");
+    assert!(
+        refused["text"]
+            .as_str()
+            .is_some_and(|t| t.starts_with(&format!("#{n} was withdrawn at ")) && t.ends_with(": running holds again")),
+        "{refused}"
+    );
+    assert!(refused["by"].as_str().is_some_and(|by| by.starts_with("cli:")), "{refused}");
+    assert!(b.lines("answer", |l| l["n"] == n).is_empty(), "#{n} took a late answer");
+    assert_eq!(b.passes("restart"), restarts, "a refused answer runs nothing");
     b.holds(&["installed", "running", "rotated"], 15).await;
     // An ask a person caused stays until a person answers, though its goal holds.
     b.ok(&["do", "toy", "rotate"]).await;
@@ -2170,7 +2246,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
     );
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(
-        b.lines("answer", |l| l["n"] == n).is_empty(),
+        b.lines("withdraw", |l| l["n"] == n).is_empty(),
         "a person's ask is not withdrawn"
     );
 
@@ -2411,7 +2487,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
         !journal_text.contains(SECRET),
         "the journal holds the secret"
     );
-    for f in ["status.json", "learned.json", "service.json"] {
+    for f in ["state.json", "learned.json", "service.json"] {
         let text = std::fs::read_to_string(b.service().join(f)).unwrap();
         assert!(!text.contains(SECRET), "{f} holds the secret");
     }
@@ -2523,7 +2599,6 @@ async fn daemon_and_cli_keep_a_toy_service() {
     let size = std::fs::metadata(b.service().join("journal.jsonl"))
         .unwrap()
         .len();
-    let status_t = b.status()["t"].clone();
     let pid = b.pid();
     let requests = mock.seen().requests.len();
     kill_pidfile(&dir.join("toy.pid"));
@@ -2536,7 +2611,6 @@ async fn daemon_and_cli_keep_a_toy_service() {
         size,
         "the journal grew after stop"
     );
-    assert_eq!(b.status()["t"], status_t, "status.json changed after stop");
     assert_eq!(b.pid(), pid, "a stopped service restarted its server");
     assert_eq!(
         mock.seen().requests.len(),

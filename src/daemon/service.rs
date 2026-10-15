@@ -1,6 +1,6 @@
 //! One service's loop: due goals → the facts they read → code conditions in code,
-//! quoted ones in one decider request → journal and `status.json` → the first failing
-//! goal starts a repair. Checks go on while a repair runs.
+//! quoted ones in one decider request → journal, whose fold is the goals' state → the
+//! first failing goal starts a repair. Checks go on while a repair runs.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -16,9 +16,7 @@ use crate::model::ModelRef;
 use crate::model::coder::Coder;
 use crate::model::decider::Decider;
 use crate::paths;
-use crate::service::{
-    self as svc, GoalState, GoalStatus, Kind, Learned, Line, Spec, Status, TASK, WEAVE,
-};
+use crate::service::{self as svc, Learned, Spec, TASK, WEAVE};
 use crate::weave::{self, Condition, Weave, expr, graph};
 
 use super::asks::{self, AskReq};
@@ -27,7 +25,8 @@ use super::facts::{self, Follower, Values};
 use super::goals::{self, Scope};
 use super::journal::Journal;
 use super::repair::{self, Forced, Job, Outcome, Repair, TaskJob};
-use super::{Shared, learned, now, save_json};
+use super::state::{Event, GoalState, Kind};
+use super::{Shared, learned, lock, now, save_json};
 
 /// A check line is written when the result or the facts change, or after this long.
 const LINE_EVERY: Duration = Duration::from_secs(3600);
@@ -63,14 +62,13 @@ fn recheck(g: &weave::Goal) -> Duration {
     if prev { every(g) } else { RECHECK.min(every(g)) }
 }
 
-/// What the daemon hands a service's loop; `by` says who asked. An answer's `note`
-/// follows its answer line as a note by `by`.
+/// What the daemon hands a service's loop; `by` says who asked. An answer is in the
+/// journal already, sent while the daemon still held it: the loop acts on it.
 pub(crate) enum Ctl {
     Answer {
         n: u64,
         word: String,
         by: String,
-        note: Option<String>,
     },
     Do { action: String, by: String },
     Task { text: String, by: String },
@@ -119,17 +117,11 @@ pub(crate) struct Ctx {
     prev: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
     pub learning: tokio::sync::Mutex<()>,
     pub learn_wait: Mutex<BTreeMap<String, Instant>>,
-    /// `restart for running` while it runs.
-    pub repair: Mutex<Option<String>>,
     /// The person whose job runs now (`do`, a task, an answer's re-run): the asks it
     /// raises carry it, and only a person answers them.
     pub by: Mutex<Option<String>>,
     /// The action whose WITHIN wait runs, and when its steps ended.
     pub ran: Mutex<Option<(String, Instant)>>,
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// What every command of a service runs with: its ARGs, slots and SECRETs as the
@@ -181,11 +173,12 @@ impl Ctx {
             )
         })?;
         let (env, secrets) = command_env(name, &spec);
-        let mut journal = Journal::open(name, secrets.clone());
+        let journal = shared.journal(name);
+        lock(&journal).set_secrets(secrets.clone());
         let decider = match ModelRef::parse(&spec.decide).and_then(Decider::new) {
             Ok(d) => Some(d),
             Err(e) => {
-                journal.note(None, format!("no decider: {e:#}"));
+                lock(&journal).note(None, format!("no decider: {e:#}"));
                 None
             }
         };
@@ -198,7 +191,7 @@ impl Ctx {
         {
             Ok(c) => Some(Arc::new(c)),
             Err(e) => {
-                journal.note(None, format!("no coder: {e:#}"));
+                lock(&journal).note(None, format!("no coder: {e:#}"));
                 None
             }
         };
@@ -221,13 +214,12 @@ impl Ctx {
             coder,
             boxinfo,
             misfit,
-            journal: Arc::new(Mutex::new(journal)),
+            journal,
             learned: Mutex::new(learned),
             follow: Mutex::new(BTreeMap::new()),
             prev: Mutex::new(BTreeMap::new()),
             learning: tokio::sync::Mutex::new(()),
             learn_wait: Mutex::new(BTreeMap::new()),
-            repair: Mutex::new(None),
             by: Mutex::new(None),
             ran: Mutex::new(None),
         })
@@ -275,11 +267,10 @@ impl Ctx {
         facts: BTreeMap<String, String>,
     ) {
         let title = self.redact(&title);
-        self.journal().add(Line {
-            kind: Kind::Message,
+        self.journal().add(Kind::Message {
             goal: goal.clone(),
-            text: Some(format!("{}: {title}", kind.as_str())),
-            ..Default::default()
+            action: None,
+            text: format!("{}: {title}", kind.as_str()),
         });
         let msg = Message {
             kind,
@@ -298,25 +289,23 @@ impl Ctx {
         super::notify(msg, None);
     }
 
-    pub fn ask(&self, req: AskReq) -> u64 {
+    pub fn ask(&self, req: AskReq) -> Option<u64> {
         asks::raise(self, req)
     }
 }
 
+/// When the loop checks a goal and what it said about it last; where the goal stands is
+/// the journal's fold.
+#[derive(Default)]
 struct Track {
-    state: GoalState,
-    since: Option<String>,
+    /// `None`: checked at once, as a goal blocked by one it comes AFTER is once they hold.
     last_check: Option<Instant>,
-    /// Off or waiting because of a goal it comes AFTER: checked as soon as they hold.
-    blocked: bool,
     /// The last check line written: its result, facts and when.
     line: Option<(Option<bool>, BTreeMap<String, String>, Instant)>,
     warned: bool,
     recovered: Option<Instant>,
     wait_until: Option<Instant>,
-    /// Failed checks in a row: the goal fails at the second.
-    fails: u32,
-    /// When a first failed check is checked again.
+    /// When a goal whose check failed once is checked again.
     again: Option<Instant>,
 }
 
@@ -330,52 +319,43 @@ struct Loop {
     task: Option<TaskJob>,
     pending: VecDeque<Job>,
     tasks: Tasks,
-    status_at: Option<Instant>,
-    dirty: bool,
+    ctl: mpsc::UnboundedReceiver<Ctl>,
 }
 
 pub(crate) async fn run(
     shared: Arc<Shared>,
     name: String,
-    mut ctl: mpsc::UnboundedReceiver<Ctl>,
+    ctl: mpsc::UnboundedReceiver<Ctl>,
     announce: bool,
     tasks: Tasks,
 ) {
-    let ctx = match Ctx::load(shared, &name) {
+    let ctx = match Ctx::load(shared.clone(), &name) {
         Ok(c) => Arc::new(c),
         Err(e) => {
-            super::journal::note(&name, &format!("cannot start: {e:#}"), "");
+            shared.note(&name, &format!("cannot start: {e:#}"), "");
             tracing::error!(service = %name, error = %format!("{e:#}"), "cannot start");
             return;
         }
     };
-    let old: BTreeMap<String, GoalStatus> = svc::status(&name)
-        .ok()
-        .flatten()
-        .map(|s| s.goals.into_iter().map(|g| (g.name.clone(), g)).collect())
-        .unwrap_or_default();
+    {
+        let mut j = ctx.journal();
+        // What ran when the daemon stopped runs no more.
+        for e in j.state().interrupted("the daemon stopped") {
+            j.add(e);
+        }
+        let goals: Vec<String> = graph::order(&ctx.w)
+            .iter()
+            .map(|g| g.name.clone())
+            .collect();
+        if !j.state().goals.keys().eq(goals.iter()) {
+            j.add(Kind::Goals { goals });
+        }
+    }
     let tracks = ctx
         .w
         .goals
         .iter()
-        .map(|g| {
-            let since = old.get(&g.name).and_then(|o| o.since.clone());
-            (
-                g.name.clone(),
-                Track {
-                    state: old.get(&g.name).map_or(GoalState::Unknown, |o| o.state),
-                    since,
-                    last_check: None,
-                    blocked: false,
-                    line: None,
-                    warned: false,
-                    recovered: None,
-                    wait_until: None,
-                    fails: 0,
-                    again: None,
-                },
-            )
-        })
+        .map(|g| (g.name.clone(), Track::default()))
         .collect();
     let mut l = Loop {
         ctx,
@@ -386,15 +366,14 @@ pub(crate) async fn run(
         task: None,
         pending: VecDeque::new(),
         tasks,
-        status_at: None,
-        dirty: true,
+        ctl,
     };
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _ = tick.tick() => l.tick().await,
-            Some(c) = ctl.recv() => l.control(c),
+            Some(c) = l.ctl.recv() => l.control(c),
             Some(r) = l.repairs.join_next(), if !l.repairs.is_empty() => l.repaired(r),
         }
         l.keep_tasks();
@@ -424,23 +403,21 @@ impl Loop {
         let w = &ctx.w;
         let order = graph::order(w);
         let now = Instant::now();
-        let due: BTreeSet<&str> = order
-            .iter()
-            .filter(|g| {
-                let t = &self.tracks[&g.name];
-                let parents_hold = g.after.iter().all(|a| {
-                    self.tracks
-                        .get(a)
-                        .is_some_and(|p| p.state == GoalState::Holds)
-                });
-                parents_hold
-                    && (t.blocked
-                        || t.again.is_some_and(|at| now >= at)
-                        || t.last_check
-                            .is_none_or(|at| now.duration_since(at) >= every(g)))
-            })
-            .map(|g| g.name.as_str())
-            .collect();
+        let due: BTreeSet<&str> = {
+            let j = ctx.journal();
+            let st = j.state();
+            order
+                .iter()
+                .filter(|g| {
+                    let t = &self.tracks[&g.name];
+                    g.after.iter().all(|a| st.clears(a))
+                        && (t.again.is_some_and(|at| now >= at)
+                            || t.last_check
+                                .is_none_or(|at| now.duration_since(at) >= every(g)))
+                })
+                .map(|g| g.name.as_str())
+                .collect()
+        };
         if !due.is_empty() {
             let mut needed = BTreeSet::new();
             for g in order.iter().filter(|g| due.contains(g.name.as_str())) {
@@ -451,22 +428,19 @@ impl Loop {
             let read_ms = super::ms(read_start);
             let mut quoted = Vec::new();
             for g in &order {
-                let after = |s: GoalState| {
-                    g.after
-                        .iter()
-                        .any(|a| self.tracks.get(a).is_some_and(|p| p.state == s))
+                let (off, waiting) = {
+                    let j = ctx.journal();
+                    let st = j.state();
+                    let off = g.after.iter().find(|a| st.goal(a).is_some_and(GoalState::off));
+                    let waiting = g.after.iter().find(|a| !st.clears(a));
+                    (off.cloned(), waiting.cloned())
                 };
-                if after(GoalState::Off) {
-                    self.set(&g.name, GoalState::Off, true);
+                if let Some(a) = off {
+                    self.off(&g.name, format!("it comes after {a}, which is off"), true);
                     continue;
                 }
-                let parents_hold = g.after.iter().all(|a| {
-                    self.tracks
-                        .get(a)
-                        .is_some_and(|p| p.state == GoalState::Holds)
-                });
-                if !parents_hold {
-                    self.set(&g.name, GoalState::Waiting, true);
+                if let Some(a) = waiting {
+                    self.waiting(&g.name, a);
                     continue;
                 }
                 if !due.contains(g.name.as_str()) {
@@ -492,7 +466,7 @@ impl Loop {
                     continue;
                 }
                 if g.when.as_ref().is_some_and(|e| !expr::holds(e, &scope)) {
-                    self.set(&g.name, GoalState::Off, false);
+                    self.off(&g.name, "its IF is false".into(), false);
                     continue;
                 }
                 match &g.cond {
@@ -511,15 +485,12 @@ impl Loop {
                     self.record(g, results.get(&g.name).copied().flatten(), &values, took);
                 }
             }
-            self.dirty = true;
         }
-        if self.announce
-            && self
-                .tracks
-                .values()
-                .all(|t| matches!(t.state, GoalState::Holds | GoalState::Off))
-            && self.running.is_none()
-        {
+        let settled = {
+            let j = ctx.journal();
+            j.state().goals.values().all(|g| g.holds() || g.off())
+        };
+        if self.announce && settled && self.running.is_none() {
             self.announce = false;
             ctx.message(
                 channel::Kind::Info,
@@ -530,34 +501,47 @@ impl Loop {
             );
         }
         self.start_repair();
-        if self.dirty
-            || self
-                .status_at
-                .is_none_or(|at| at.elapsed() >= Duration::from_secs(30))
-        {
-            self.write_status();
-        }
     }
 
-    /// Sets a goal's state without a check (off, waiting): a failed check before it no
-    /// longer counts toward two in a row.
-    fn set(&mut self, goal: &str, state: GoalState, blocked: bool) {
+    /// A goal that does not apply now, for `why`; `blocked` when a goal it comes AFTER is
+    /// off.
+    fn off(&mut self, goal: &str, why: String, blocked: bool) {
+        let state = GoalState::Off { why: why.clone() };
+        let e = Kind::Off {
+            goal: goal.to_string(),
+            why,
+        };
+        self.unchecked(goal, state, e, blocked);
+        self.withdraw(goal, "no longer applies: its IF, or a parent's, is false");
+    }
+
+    /// A goal that waits `on` a goal it comes AFTER.
+    fn waiting(&mut self, goal: &str, on: String) {
+        let state = GoalState::Waiting { on: on.clone() };
+        let e = Kind::Waiting {
+            goal: goal.to_string(),
+            on,
+        };
+        self.unchecked(goal, state, e, true);
+    }
+
+    /// A goal not checked now, journaled as `e` when it was not in `state` yet: a failed
+    /// check before it no longer counts toward two in a row. One `blocked` by a goal it
+    /// comes AFTER is checked as soon as they hold.
+    fn unchecked(&mut self, goal: &str, state: GoalState, e: Kind, blocked: bool) {
         let t = self.tracks.get_mut(goal).expect("a track per goal");
-        t.blocked = blocked;
-        t.fails = 0;
-        t.again = None;
-        if t.state != state {
-            t.state = state;
-            t.since = Some(now());
-            self.dirty = true;
+        if blocked {
+            t.last_check = None;
         }
-        if state == GoalState::Off {
-            self.withdraw(goal, "no longer applies: its IF, or a parent's, is false");
+        t.again = None;
+        let mut j = self.ctx.journal();
+        if j.state().goal(goal) != Some(&state) {
+            j.add(e);
         }
     }
 
-    /// A check's result: journal line when it says something new, messages on change.
-    /// `ms`: how long its facts (and a quoted goal's decider) took.
+    /// A check's result: an event when it changes the goal's state or says something new,
+    /// messages on change. `ms`: how long its facts (and a quoted goal's decider) took.
     fn record(&mut self, g: &weave::Goal, ok: Option<bool>, values: &Values, ms: Option<u64>) {
         let ctx = self.ctx.clone();
         let read: Values = goals::needs(&ctx.w, g)
@@ -572,49 +556,38 @@ impl Loop {
                 .collect(),
         );
         let t = self.tracks.get_mut(&g.name).expect("a track per goal");
-        t.blocked = false;
-        let write = match &t.line {
-            None => true,
-            Some((was, facts, at)) => *was != ok || *facts != shown || at.elapsed() >= LINE_EVERY,
-        };
-        if write {
-            ctx.journal().add(Line {
-                kind: Kind::Check,
-                goal: Some(g.name.clone()),
-                ok,
-                facts: Some(shown.clone()),
-                ms,
-                ..Default::default()
-            });
-            t.line = Some((ok, shown, Instant::now()));
-        }
-        // One failed check is not yet a failing goal: no warning, repair or ask until a
-        // second check fails too. A check with no answer neither counts nor resets.
-        t.again = None;
-        match ok {
-            Some(false) => {
-                t.fails += 1;
-                if t.fails < 2 && t.state != GoalState::Fails {
-                    t.again = Some(Instant::now() + recheck(g));
-                    return;
+        let (was, state) = {
+            let mut j = ctx.journal();
+            let was = j.state().goal(&g.name).cloned().unwrap_or(GoalState::Unknown);
+            let changes = was.after_check(ok, &now()) != was;
+            let says_new = match &t.line {
+                None => true,
+                Some((said, facts, at)) => {
+                    *said != ok || *facts != shown || at.elapsed() >= LINE_EVERY
                 }
+            };
+            if changes || says_new {
+                j.add(Event {
+                    ms,
+                    ..Kind::Check {
+                        goal: g.name.clone(),
+                        ok,
+                        facts: shown.clone(),
+                    }
+                    .into()
+                });
+                t.line = Some((ok, shown, Instant::now()));
             }
-            Some(true) => t.fails = 0,
-            None => {}
-        }
-        let state = match ok {
-            Some(true) => GoalState::Holds,
-            Some(false) => GoalState::Fails,
-            None => GoalState::Unknown,
+            let state = j.state().goal(&g.name).cloned().unwrap_or(GoalState::Unknown);
+            (was, state)
         };
-        let was = t.state;
-        if was != state {
-            t.state = state;
-            t.since = Some(now());
-        }
-        if state == GoalState::Holds && was != GoalState::Holds {
+        // One failed check is not yet a failing goal: no warning, repair or ask until a
+        // second check fails too, soon after.
+        t.again = (ok == Some(false) && matches!(state, GoalState::Suspect { .. }))
+            .then(|| Instant::now() + recheck(g));
+        if state.holds() && !was.holds() {
             t.wait_until = None;
-            if was == GoalState::Fails {
+            if was.fails() {
                 t.recovered = Some(Instant::now());
             }
             if t.warned {
@@ -628,31 +601,26 @@ impl Loop {
                 );
             }
         }
-        if state == GoalState::Holds {
+        if state.holds() {
             self.withdraw(&g.name, "holds again");
         }
     }
 
-    /// Asks for `goal` the loop raised are moot once it holds or turns off (`why`): each
-    /// gets a `withdrawn` answer, its channel message loses its buttons, and the
-    /// channels hear it. Checked on every pass, not only on the change, so an ask left
-    /// open by an older daemon closes too.
+    /// Escalations for `goal` the loop raised are moot once it holds or turns off (`why`):
+    /// each is withdrawn, its channel messages lose their buttons, and the channels hear
+    /// it. Checked on every pass, not only on the change.
     fn withdraw(&self, goal: &str, why: &str) {
         let ctx = &self.ctx;
-        let open = ctx.journal().open_for(goal);
+        let open = ctx.journal().state().open_for(goal);
         for n in open {
-            if !lock(&ctx.shared.answered).insert(n) {
+            let withdraw = Kind::Withdraw {
+                n,
+                goal: Some(goal.to_string()),
+                why: format!("{goal} {why}"),
+            };
+            if !asks::settle(&ctx.shared, &mut ctx.journal(), withdraw.into()) {
                 continue;
             }
-            ctx.journal().add(Line {
-                kind: Kind::Answer,
-                goal: Some(goal.to_string()),
-                text: Some(svc::WITHDRAWN.to_string()),
-                n: Some(n),
-                by: Some(format!("daemon: {goal} {why}")),
-                ..Default::default()
-            });
-            asks::withdraw(&ctx.shared, n);
             ctx.message(
                 channel::Kind::Info,
                 Some(goal.to_string()),
@@ -663,29 +631,13 @@ impl Loop {
         }
     }
 
-    /// Goals the loop leaves alone now: an open ask, a recent `no` (`no_park`), a `wait`.
+    /// Goals the loop leaves alone now: an open escalation, a recent `no` (`no_park`), a
+    /// `wait`.
     fn parked(&self) -> (BTreeSet<String>, bool) {
-        let j = self.ctx.journal();
-        let nowe = super::epoch();
-        let mut goals = BTreeSet::new();
-        let mut box_parked = false;
-        for (goal, (_, answer)) in j.latest_asks() {
-            let park = match &answer {
-                None => true,
-                Some((word, at)) => {
-                    let g = goal.as_deref().and_then(|g| self.ctx.w.goal(g));
-                    word == "no" && nowe - at < no_park(g).as_secs() as i64
-                }
-            };
-            if park {
-                match goal {
-                    Some(g) => {
-                        goals.insert(g);
-                    }
-                    None => box_parked = true,
-                }
-            }
-        }
+        let w = &self.ctx.w;
+        let (mut goals, box_parked) = self.ctx.journal().state().parked(super::epoch(), |g| {
+            no_park(g.and_then(|g| w.goal(g))).as_secs() as i64
+        });
         for (name, t) in &self.tracks {
             if t.wait_until.is_some_and(|u| u > Instant::now()) {
                 goals.insert(name.clone());
@@ -700,9 +652,24 @@ impl Loop {
         }
         let ctx = self.ctx.clone();
         let (parked, box_parked) = self.parked();
+        let failing = {
+            let j = ctx.journal();
+            graph::order(&ctx.w)
+                .into_iter()
+                .find(|g| {
+                    j.state().goal(&g.name).is_some_and(GoalState::fails)
+                        && !parked.contains(&g.name)
+                })
+                .map(|g| g.name.clone())
+        };
+        // The daemon queues an answer before the journal shows it: one the state read
+        // above shows is queued now, and its job goes before the loop's own repair.
+        while let Ok(c) = self.ctl.try_recv() {
+            self.control(c);
+        }
         // One person's task at a time: a queued one waits while another waits for its
         // answer, so a task's lines run from its start line to its end.
-        let task_waits = ctx.journal().task_waits();
+        let task_waits = ctx.journal().state().task_waits();
         let next = self
             .pending
             .iter()
@@ -710,20 +677,19 @@ impl Loop {
         let mut job = match next.and_then(|i| self.pending.remove(i)) {
             Some(j) => j,
             None => {
-                let Some(g) = graph::order(&ctx.w).into_iter().find(|g| {
-                    self.tracks[&g.name].state == GoalState::Fails && !parked.contains(&g.name)
-                }) else {
+                let Some(goal) = failing else {
                     return;
                 };
                 Job::Repair(Repair {
-                    goal: g.name.clone(),
+                    goal,
                     forced: None,
                     ignore_tries: false,
                     by: None,
                 })
             }
         };
-        if !ctx.misfit.is_empty() && !ctx.journal().box_approved() {
+        let box_approved = ctx.journal().state().box_approved();
+        if !ctx.misfit.is_empty() && !box_approved {
             if !box_parked {
                 ctx.journal().note(
                     None,
@@ -753,14 +719,13 @@ impl Loop {
             }
             Job::Task(t) => {
                 if !t.again {
-                    ctx.journal().add(t.line(None, t.text.clone()));
+                    ctx.journal().add(t.start());
                     t.again = true;
                 }
                 self.task = Some(t.clone());
                 TASK.to_string()
             }
         });
-        self.dirty = true;
         self.repairs.spawn(repair::run(ctx, job));
         // Before any await: a halt must see the start line just written.
         self.keep_tasks();
@@ -790,7 +755,6 @@ impl Loop {
     fn repaired(&mut self, r: Result<(Option<String>, Outcome), tokio::task::JoinError>) {
         self.running = None;
         self.task = None;
-        self.dirty = true;
         match r {
             Ok((goal, outcome)) => {
                 if let Some(t) = goal.as_ref().and_then(|g| self.tracks.get_mut(g)) {
@@ -815,40 +779,24 @@ impl Loop {
     fn control(&mut self, c: Ctl) {
         let ctx = self.ctx.clone();
         match c {
-            Ctl::Answer { n, word, by, note } => {
-                let (ask, rule) = {
-                    let j = ctx.journal();
-                    if j.answered(n) {
-                        // Withdrawn while the answer was on its way.
-                        return;
-                    }
-                    (j.ask(n).cloned(), j.gate(n).and_then(|g| g.text.clone()))
+            Ctl::Answer { n, word, by } => {
+                let esc = ctx.journal().state().escalations.get(&n).cloned();
+                let Some(esc) = esc else { return };
+                if esc.action.as_deref() == Some(TASK) {
+                    self.answer_task(n, &word);
+                    return;
+                }
+                if esc.action.as_deref() == Some(WEAVE) {
+                    // Any word but the yes the daemon applies drops the change.
+                    let _ = std::fs::remove_file(paths::change(&ctx.name, n));
+                    ctx.journal()
+                        .note(None, format!("weave change #{n} dropped: answered {word}"));
+                    return;
+                }
+                let Some(goal) = esc.goal.clone() else {
+                    return;
                 };
-                let Some(ask) = ask else { return };
-                if ask.action.as_deref() == Some(TASK) {
-                    self.answer_task(n, &word, &by, note);
-                    return;
-                }
-                if ask.action.as_deref() == Some(WEAVE) {
-                    self.answer_change(n, &word, &by, note);
-                    return;
-                }
                 let action = ctx.w.action(&word).map(|a| a.name.clone());
-                ctx.journal().add(Line {
-                    kind: Kind::Answer,
-                    goal: ask.goal.clone(),
-                    action: action.clone(),
-                    text: Some(word.clone()),
-                    n: Some(n),
-                    by: Some(by.clone()),
-                    ..Default::default()
-                });
-                if let Some(text) = note {
-                    ctx.journal().note_by(ask.goal.as_deref(), text, &by);
-                }
-                let Some(goal) = ask.goal.clone() else {
-                    return;
-                };
                 let by = Some(by);
                 let job = match (word.as_str(), action) {
                     (_, Some(a)) => Some(Repair {
@@ -861,13 +809,13 @@ impl Loop {
                         ignore_tries: true,
                         by,
                     }),
-                    ("yes" | "always", None) => Some(match ask.action.clone() {
+                    ("yes" | "always", None) => Some(match esc.action.clone() {
                         Some(a) => Repair {
                             goal,
                             forced: Some(Forced {
                                 action: a,
                                 approved: true,
-                                rules_ok: rule.into_iter().collect(),
+                                rules_ok: esc.rule.into_iter().collect(),
                             }),
                             ignore_tries: true,
                             by,
@@ -897,21 +845,23 @@ impl Loop {
                     ctx.journal().note(None, format!("do: no action {action}"));
                     return;
                 };
-                let state = |g: &str| self.tracks.get(g).map(|t| t.state);
-                let order = graph::order(&ctx.w);
-                let goal = a
-                    .for_goals
-                    .iter()
-                    .find(|g| state(g) == Some(GoalState::Fails))
-                    .or(a.for_goals.first())
-                    .cloned()
-                    .or_else(|| {
-                        order
-                            .iter()
-                            .find(|g| state(&g.name) == Some(GoalState::Fails))
-                            .or(order.first())
-                            .map(|g| g.name.clone())
-                    });
+                let goal = {
+                    let j = ctx.journal();
+                    let fails = |g: &str| j.state().goal(g).is_some_and(GoalState::fails);
+                    let order = graph::order(&ctx.w);
+                    a.for_goals
+                        .iter()
+                        .find(|g| fails(g))
+                        .or(a.for_goals.first())
+                        .cloned()
+                        .or_else(|| {
+                            order
+                                .iter()
+                                .find(|g| fails(&g.name))
+                                .or(order.first())
+                                .map(|g| g.name.clone())
+                        })
+                };
                 let Some(goal) = goal else {
                     ctx.journal()
                         .note(None, format!("do {action}: the weave has no goal"));
@@ -950,7 +900,7 @@ impl Loop {
                 );
             }
             Ctl::Change { pending, change } => {
-                let n = ctx.ask(AskReq {
+                let raised = ctx.ask(AskReq {
                     goal: None,
                     action: Some(WEAVE.to_string()),
                     rule: None,
@@ -958,6 +908,7 @@ impl Loop {
                     facts: BTreeMap::new(),
                     signed: true,
                 });
+                let Some(n) = raised else { return };
                 // What a signed yes applies.
                 let path = paths::change(&ctx.name, n);
                 let kept = path
@@ -973,76 +924,32 @@ impl Loop {
         }
     }
 
-    /// The person's signed answer to a weave change, other than the yes the daemon
-    /// applies itself: it drops the change.
-    fn answer_change(&mut self, n: u64, word: &str, by: &str, note: Option<String>) {
+    /// An answer to an escalation a person's task raised, journaled already: yes runs the
+    /// task again with every rule the person passed for it and what its earlier runs did;
+    /// any other word ends it.
+    fn answer_task(&mut self, n: u64, word: &str) {
         let ctx = self.ctx.clone();
         let mut j = ctx.journal();
-        j.add(Line {
-            kind: Kind::Answer,
-            action: Some(WEAVE.to_string()),
-            text: Some(word.to_string()),
-            n: Some(n),
-            by: Some(by.to_string()),
-            ..Default::default()
-        });
-        if let Some(text) = note {
-            j.note_by(None, text, by);
-        }
-        let _ = std::fs::remove_file(paths::change(&ctx.name, n));
-        j.note(None, format!("weave change #{n} dropped: answered {word}"));
-    }
-
-    /// An answer to an ask a person's task raised: yes runs the task again with every
-    /// rule the person passed for it and what its earlier runs did; any other word ends
-    /// it.
-    fn answer_task(&mut self, n: u64, word: &str, by: &str, note: Option<String>) {
-        let ctx = self.ctx.clone();
-        let mut j = ctx.journal();
-        j.add(Line {
-            kind: Kind::Answer,
-            action: Some(TASK.to_string()),
-            text: Some(word.to_string()),
-            n: Some(n),
-            by: Some(by.to_string()),
-            ..Default::default()
-        });
-        if let Some(text) = note {
-            j.note_by(None, text, by);
-        }
-        let Some(lines) = j.task_lines(n) else { return };
-        let mut job = TaskJob::new(
-            lines[0].text.clone().unwrap_or_default(),
-            lines[0].by.clone().unwrap_or_default(),
-            lines[0].ep.clone().unwrap_or_else(super::episode::new_id),
-        );
+        let Some((ep, task)) = j.state().task_of(n).map(|(ep, t)| (ep.to_string(), t.clone()))
+        else {
+            return;
+        };
+        let mut job = TaskJob::new(task.text, task.by.unwrap_or_default(), ep);
         job.again = true;
         if !matches!(word, "yes" | "always") {
-            let end = job.line(Some(false), format!("ended: #{n} answered {word}"));
-            j.add(end);
+            j.add(job.end(false, format!("ended: #{n} answered {word}")));
             return;
         }
-        for l in lines {
-            match l.kind {
-                Kind::Answer if l.action.as_deref() == Some(TASK) => {
-                    if matches!(l.text.as_deref(), Some("yes" | "always")) {
-                        if let Some(rule) = l.n.and_then(|m| j.gate(m)).and_then(|g| g.text.clone()) {
-                            job.rules_ok.push(rule);
-                        }
-                    }
-                }
-                Kind::Command if l.action.as_deref() == Some(TASK) => {
-                    let cmd = l.text.as_deref().unwrap_or_default();
-                    let state = if l.ok == Some(true) { "passed" } else { "failed" };
-                    job.prior.push_str(&format!(
-                        "$ {cmd}\n{}\n[{state}]\n",
-                        l.output.as_deref().unwrap_or_default()
-                    ));
-                    if l.ok == Some(true) {
-                        job.done.push(cmd.to_string());
-                    }
-                }
-                _ => {}
+        job.rules_ok = task.approved;
+        for ran in &task.commands {
+            let state = if ran.ok { "passed" } else { "failed" };
+            job.prior.push_str(&format!(
+                "$ {}\n{}\n[{state}]\n",
+                ran.command,
+                ran.output.as_deref().unwrap_or_default()
+            ));
+            if ran.ok {
+                job.done.push(ran.command.clone());
             }
         }
         if !job.prior.is_empty() {
@@ -1050,39 +957,5 @@ impl Loop {
         }
         drop(j);
         self.pending.push_front(Job::Task(job));
-    }
-
-    fn write_status(&mut self) {
-        let ctx = &self.ctx;
-        let (asks, spend) = {
-            let j = ctx.journal();
-            (j.open_asks(), j.month_spend())
-        };
-        let status = Status {
-            service: ctx.name.clone(),
-            t: now(),
-            goals: graph::order(&ctx.w)
-                .iter()
-                .map(|g| {
-                    let t = &self.tracks[&g.name];
-                    GoalStatus {
-                        name: g.name.clone(),
-                        state: t.state,
-                        since: t.since.clone(),
-                    }
-                })
-                .collect(),
-            repair: lock(&ctx.repair).clone(),
-            asks,
-            spend_month_usd: spend,
-            decide: ctx.spec.decide.clone(),
-            code: ctx.spec.code.clone(),
-            stopped: false,
-        };
-        if let Err(e) = save_json(&paths::status(&ctx.name), &status) {
-            tracing::error!(service = %ctx.name, error = %format!("{e:#}"), "cannot write status.json");
-        }
-        self.status_at = Some(Instant::now());
-        self.dirty = false;
     }
 }

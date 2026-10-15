@@ -2,23 +2,19 @@
 //! escalation on stdin. It settles the ask as any agent does, with `subweave answer`.
 
 use std::process::Stdio;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncWriteExt;
 
 use crate::channel::{self, Channel, Message, escalation};
 use crate::paths;
-use crate::service::{Kind, Line};
 
-use super::{Out, Shared, drain, journal, kill_group, ms, now, redact};
+use super::state::{Event, Kind};
+use super::{Out, Shared, drain, kill_group, lock, ms, redact};
 
 /// An agent still running after this long is killed.
 const LIMIT: Duration = Duration::from_secs(30 * 60);
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// Runs the channel's command for the escalation `msg`, once the service's earlier
 /// agent, if any, has exited. Env: `SUBWEAVE_SERVICE`, `SUBWEAVE_ASK` and `SUBWEAVE_BY`
@@ -44,8 +40,14 @@ pub(crate) fn start(
         .clone();
     tokio::spawn(async move {
         let _turn = turn.lock().await;
+        let journal = shared.journal(&service);
         // Settled or withdrawn while it waited for its turn.
-        if lock(&shared.answered).contains(&n) {
+        let open = lock(&journal)
+            .state()
+            .escalations
+            .get(&n)
+            .is_some_and(|e| e.is_open());
+        if !open {
             return;
         }
         let dir = paths::service(&service);
@@ -61,11 +63,23 @@ pub(crate) fn start(
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .process_group(0);
+        let note = |text: String| {
+            lock(&journal).add(Event {
+                by: Some(name.clone()),
+                ms: ms(started),
+                ..Kind::Note {
+                    goal: None,
+                    action: None,
+                    n: Some(n),
+                    text,
+                }
+                .into()
+            });
+        };
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                let text = format!("escalated #{n} to {name}: cannot start sh: {e}");
-                note(&service, n, &name, text, started);
+                note(format!("escalated #{n} to {name}: cannot start sh: {e}"));
                 return;
             }
         };
@@ -112,13 +126,7 @@ pub(crate) fn start(
             Ok(()) => format!("output in escalations/{n}.log"),
             Err(e) => format!("its output was not kept: {e:#}"),
         };
-        note(
-            &service,
-            n,
-            &name,
-            format!("escalated #{n} to {name}: {ended}; {kept}"),
-            started,
-        );
+        note(format!("escalated #{n} to {name}: {ended}; {kept}"));
     });
 }
 
@@ -127,19 +135,4 @@ pub(crate) fn kill(shared: &Shared, n: u64) {
     if let Some(pid) = lock(&shared.agents).get(&n) {
         kill_group(*pid);
     }
-}
-
-fn note(service: &str, n: u64, by: &str, text: String, started: Instant) {
-    journal::append(
-        service,
-        &Line {
-            t: now(),
-            kind: Kind::Note,
-            text: Some(text),
-            n: Some(n),
-            by: Some(by.to_owned()),
-            ms: ms(started),
-            ..Default::default()
-        },
-    );
 }

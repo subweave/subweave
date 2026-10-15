@@ -15,7 +15,8 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 use super::{act, inbox, ps, task, weavefile};
-use crate::{paths, service};
+use crate::daemon::journal::{self, Ask};
+use crate::paths;
 
 const PROTOCOL: &str = "2025-06-18";
 const INSTRUCTIONS: &str = "This box escalates to you what its ladder (code, the decider, the coder) could not settle. Read the `skill` tool first: it says how to settle an escalation, how to fix the weave with `weave_change`, and what never to do. Then read `inbox`, and call `wait_ask` to block until a new escalation comes. Answer only with one of its `answers`; a signed escalation is the person's alone.";
@@ -246,7 +247,7 @@ fn tools() -> Vec<Value> {
 
 async fn call(name: &str, args: Value, by: &str) -> Result<Value> {
     Ok(match name {
-        "inbox" => serde_json::to_value(service::all_asks()?)?,
+        "inbox" => serde_json::to_value(journal::all_asks()?)?,
         "wait_ask" => serde_json::to_value(wait_ask(parse(args)?).await?)?,
         "answer" => answer(parse(args)?, by)?,
         "status" => serde_json::to_value(ps::rows()?)?,
@@ -309,14 +310,14 @@ struct Seen {
     n: u64,
 }
 
-async fn wait_ask(a: WaitArgs) -> Result<Vec<service::Ask>> {
+async fn wait_ask(a: WaitArgs) -> Result<Vec<Ask>> {
     if !(1..=3600).contains(&a.timeout_secs) {
         bail!("timeout_secs is 1 to 3600, not {}", a.timeout_secs);
     }
     let end = Instant::now() + Duration::from_secs(a.timeout_secs);
     loop {
-        let asks = service::all_asks()?;
-        let new = |ask: &service::Ask| {
+        let asks = journal::all_asks()?;
+        let new = |ask: &Ask| {
             !a.seen
                 .iter()
                 .any(|s| s.n == ask.n && s.service == ask.service)
@@ -341,15 +342,11 @@ struct AnswerArgs {
 }
 
 fn answer(a: AnswerArgs, by: &str) -> Result<Value> {
-    let open = service::all_asks()?;
-    if !open.iter().any(|ask| ask.n == a.n && ask.service == a.service) {
-        bail!("{} has no open escalation #{}: inbox lists them", a.service, a.n);
-    }
     let note = a
         .note
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
-    inbox::send_answer(a.n, &a.word, by.to_string(), note.clone())?;
+    inbox::send_answer(Some(&a.service), a.n, &a.word, by.to_string(), note.clone())?;
     Ok(json!({"service": a.service, "n": a.n, "word": a.word, "by": by, "note": note}))
 }
 
@@ -375,7 +372,7 @@ fn log(a: LogArgs) -> Result<Value> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
     };
-    let all: Vec<&str> = service::numbered_lines(&text).collect();
+    let all: Vec<&str> = journal::numbered_lines(&text).collect();
     let newest = &all[all.len().saturating_sub(a.lines)..];
     Ok(Value::Array(
         newest

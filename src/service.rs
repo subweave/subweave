@@ -14,8 +14,6 @@ use crate::paths;
 pub const TASK: &str = "task";
 /// The `action` of the ask and answer lines of a weave change; no ACTION may take the name.
 pub const WEAVE: &str = "weave";
-/// The `text` of the `answer` line that closes an ask whose goal holds again.
-pub const WITHDRAWN: &str = "withdrawn";
 
 /// `services/<name>/service.json`: how a service was asked for, as the daemon keeps it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,117 +125,6 @@ pub enum Command {
     },
 }
 
-/// One line of `journal.jsonl`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Line {
-    /// RFC 3339, UTC.
-    pub t: String,
-    pub kind: Kind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub goal: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ok: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    /// `check`: the facts the goal read. `ask`: the facts shown to the person.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub facts: Option<BTreeMap<String, String>>,
-    /// `decide`: the probability of each choice.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub p: Option<BTreeMap<String, f64>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost_usd: Option<f64>,
-    /// `ask`, `answer`, and the `note` of an ask's card summary or of its agent's run:
-    /// the ask's number.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub n: Option<u64>,
-    /// `ask`: the words that answer it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub answers: Option<Vec<String>>,
-    /// `ask`: each answer word's button label, where it has one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub labels: Option<BTreeMap<String, String>>,
-    /// `ask`: what it says beyond its title, as the channels get it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body: Option<String>,
-    /// `ask`: only the person's signed answer on a Steery card settles it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signed: Option<bool>,
-    /// `command`: stdout and stderr, secrets redacted, the last 4 KB.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<String>,
-    /// Who acted, on lines the person causes: `cli:<user>`, `dash@<ip>`, a channel's.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub by: Option<String>,
-    /// The episode the line belongs to: one job run (a repair or a person's task) or one
-    /// learn outside a job. Lines outside every episode have none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ep: Option<String>,
-    /// What a model conversation used, on the line that ends it: a coder's note, a
-    /// decider's `decide`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<Usage>,
-    /// Wall time in milliseconds of the step the line ends: a command, a check's fact
-    /// reads, a decision, a learn, a coder conversation, an action, a task's run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ms: Option<u64>,
-    /// On an episode's first line: the job it runs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub job: Option<JobKind>,
-}
-
-/// What an episode runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum JobKind {
-    /// A failing goal's repair.
-    Repair,
-    /// A person's task in words.
-    Task,
-    /// A quoted fact learned outside a job.
-    Learn,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Usage {
-    /// `id[@provider]`.
-    pub model: String,
-    pub calls: u32,
-    /// Input tokens over every call; `cached` of them read from the provider's cache.
-    pub input: u64,
-    pub cached: u64,
-    pub output: u64,
-    /// Output tokens the model spent reasoning, part of `output`.
-    #[serde(default)]
-    pub reasoning: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Kind {
-    /// A goal checked: `ok` holds or not; no `ok` is unknown.
-    #[default]
-    Check,
-    /// The decider chose: `text` the choice, `p` the probabilities.
-    Decide,
-    /// A rule refused or held an action: `text` the rule.
-    Gate,
-    /// An action ended: `ok` the goal held within its time.
-    Action,
-    /// One shell command: `text` the command, `ok` exit 0.
-    Command,
-    /// A fact command or steps learned: `text` what.
-    Learn,
-    Ask,
-    /// `text` the word, `action` set when the word named one.
-    Answer,
-    /// A message sent to the channels: `text` its title.
-    Message,
-    Note,
-}
-
 /// `services/<name>/learned.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Learned {
@@ -263,44 +150,6 @@ pub struct LearnedSteps {
     pub t: String,
 }
 
-/// `services/<name>/status.json`, rewritten by the daemon after every tick.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Status {
-    pub service: String,
-    pub t: String,
-    /// Graph order.
-    pub goals: Vec<GoalStatus>,
-    /// The action running now and its goal, as `restart for running`.
-    pub repair: Option<String>,
-    /// Open asks, by number.
-    pub asks: Vec<u64>,
-    pub spend_month_usd: f64,
-    pub decide: String,
-    pub code: Vec<String>,
-    pub stopped: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GoalStatus {
-    pub name: String,
-    pub state: GoalState,
-    /// When the goal last changed state.
-    pub since: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum GoalState {
-    Holds,
-    Fails,
-    /// Not checked yet, or a quoted goal the decider could not answer.
-    Unknown,
-    /// Its IF is false, or a goal it comes AFTER is off.
-    Off,
-    /// A goal it comes AFTER does not hold.
-    Waiting,
-}
-
 /// Drop a command into the daemon's inbox, atomically.
 pub fn put(cmd: &Command) -> Result<()> {
     let dir = paths::inbox();
@@ -312,118 +161,6 @@ pub fn put(cmd: &Command) -> Result<()> {
     f.sync_all()?;
     std::fs::rename(&tmp, dir.join(format!("{id}.json")))?;
     Ok(())
-}
-
-/// Every line of a service's journal; lines that do not parse are skipped.
-pub fn journal(service: &str) -> Result<Vec<Line>> {
-    read_lines(&paths::journal(service))
-}
-
-fn read_lines(path: &Path) -> Result<Vec<Line>> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
-    };
-    Ok(text
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect())
-}
-
-/// Asks in a journal that no `answer` line settled yet, oldest first.
-pub fn open_asks(lines: &[Line]) -> Vec<&Line> {
-    let answered: std::collections::BTreeSet<u64> = lines
-        .iter()
-        .filter(|l| l.kind == Kind::Answer)
-        .filter_map(|l| l.n)
-        .collect();
-    lines
-        .iter()
-        .filter(|l| l.kind == Kind::Ask && l.n.is_some_and(|n| !answered.contains(&n)))
-        .collect()
-}
-
-/// Every line of a service's journal with its index among the file's non-blank lines;
-/// lines that do not parse are skipped, and keep their index.
-pub fn journal_numbered(service: &str) -> Result<Vec<(u64, Line)>> {
-    let path = paths::journal(service);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
-    };
-    Ok(numbered_lines(&text)
-        .enumerate()
-        .filter_map(|(i, l)| Some((i as u64, serde_json::from_str(l).ok()?)))
-        .collect())
-}
-
-/// The lines of a journal that count: every line but blank ones. A line's index among
-/// them is its `i` in the dashboard.
-pub fn numbered_lines(text: &str) -> impl Iterator<Item = &str> {
-    text.lines().filter(|l| !l.trim().is_empty())
-}
-
-/// An open ask, as `subweave inbox` and the dashboard show it.
-#[derive(Debug, Clone, Serialize)]
-pub struct Ask {
-    pub n: u64,
-    pub service: String,
-    pub goal: Option<String>,
-    pub action: Option<String>,
-    /// The rule that holds the action, from the ask's `gate` line.
-    pub rule: Option<String>,
-    pub title: String,
-    pub text: String,
-    pub facts: BTreeMap<String, String>,
-    pub answers: Vec<String>,
-    /// Answer word → button label.
-    pub labels: BTreeMap<String, String>,
-    /// Only the person's signed answer on a Steery card settles it.
-    pub signed: bool,
-    pub t: String,
-}
-
-/// A service's open asks, oldest first. The rule reads as the box reads it, `$name`
-/// replaced; the gate line keeps it as written, the key of `always` and `never`.
-pub fn asks(service: &str, lines: &[Line]) -> Vec<Ask> {
-    let args = spec(service).map(|s| s.args).unwrap_or_default();
-    open_asks(lines)
-        .into_iter()
-        .filter_map(|l| {
-            let n = l.n?;
-            let rule = lines
-                .iter()
-                .find(|g| g.kind == Kind::Gate && g.n == Some(n))
-                .and_then(|g| g.text.as_deref())
-                .map(|t| crate::weave::subst(t, &args));
-            Some(Ask {
-                n,
-                service: service.to_string(),
-                goal: l.goal.clone(),
-                action: l.action.clone(),
-                rule,
-                title: l.text.clone().unwrap_or_default(),
-                text: l.body.clone().unwrap_or_default(),
-                facts: l.facts.clone().unwrap_or_default(),
-                answers: l.answers.clone().unwrap_or_default(),
-                labels: l.labels.clone().unwrap_or_default(),
-                signed: l.signed == Some(true),
-                t: l.t.clone(),
-            })
-        })
-        .collect()
-}
-
-/// Every open ask on this box, by number.
-pub fn all_asks() -> Result<Vec<Ask>> {
-    let mut out = Vec::new();
-    for name in names()? {
-        out.extend(asks(&name, &journal(&name)?));
-    }
-    out.sort_by_key(|a| a.n);
-    Ok(out)
 }
 
 /// Every service the daemon keeps, by name.
@@ -447,14 +184,6 @@ pub fn names() -> Result<Vec<String>> {
 
 pub fn spec(service: &str) -> Result<Spec> {
     read_json(&paths::service_json(service))
-}
-
-pub fn status(service: &str) -> Result<Option<Status>> {
-    let p = paths::status(service);
-    if !p.exists() {
-        return Ok(None);
-    }
-    read_json(&p).map(Some)
 }
 
 pub fn learned(service: &str) -> Result<Learned> {

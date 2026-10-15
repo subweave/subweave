@@ -2,7 +2,8 @@ use std::process::ExitCode;
 
 use anyhow::{Result, bail};
 
-use crate::service::{self, Ask, Command};
+use crate::daemon::journal;
+use crate::service::{self, Command};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -26,7 +27,7 @@ pub struct AnswerArgs {
 }
 
 pub fn run() -> Result<ExitCode> {
-    let asks = service::all_asks()?;
+    let asks = journal::all_asks()?;
     if asks.is_empty() {
         println!("no open escalations");
         return Ok(ExitCode::SUCCESS);
@@ -59,31 +60,41 @@ pub fn run() -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The open ask `n`, when `word` answers it and an answer from here may settle it.
-pub(crate) fn check_answer(n: u64, word: &str) -> Result<Ask> {
-    let Some(ask) = service::all_asks()?.into_iter().find(|a| a.n == n) else {
-        bail!("no open escalation #{n}: subweave inbox lists them");
+/// Hands the daemon `word` for escalation `n` of service `of` (of any, when `None`),
+/// when `word` answers it and an answer from here may settle it; `note` goes in the
+/// journal after the answer. The escalation's service, or why the answer settles
+/// nothing: one to an escalation settled already still goes, and the daemon journals it
+/// as refused.
+pub(crate) fn send_answer(
+    of: Option<&str>,
+    n: u64,
+    word: &str,
+    by: String,
+    note: Option<String>,
+) -> Result<String> {
+    let found = journal::escalation(n)?.filter(|(s, _)| of.is_none_or(|want| want == s));
+    let Some((owner, esc)) = found else {
+        match of {
+            Some(s) => bail!("{s} has no escalation #{n}: subweave inbox lists the open ones"),
+            None => bail!("no escalation #{n}: subweave inbox lists the open ones"),
+        }
     };
-    if ask.signed {
+    if esc.signed {
         bail!("#{n}: only a signed answer on Steery settles this");
     }
-    if !ask.answers.iter().any(|a| a == word) {
-        bail!("#{n} takes {}, not {word:?}", ask.answers.join(", "));
+    if !esc.card.answers.iter().any(|a| a == word) {
+        bail!("#{n} takes {}, not {word:?}", esc.card.answers.join(", "));
     }
-    Ok(ask)
-}
-
-/// Hands the daemon `word` for open ask `n`, when `word` answers it; `note` goes in the
-/// journal after the answer.
-pub(crate) fn send_answer(n: u64, word: &str, by: String, note: Option<String>) -> Result<Ask> {
-    let ask = check_answer(n, word)?;
     service::put(&Command::Answer {
         n,
         word: word.to_string(),
         by,
         note,
     })?;
-    Ok(ask)
+    if let Some(why) = esc.settled() {
+        bail!("{why}; the journal keeps this answer as refused");
+    }
+    Ok(owner)
 }
 
 pub fn answer(args: AnswerArgs) -> Result<ExitCode> {
@@ -91,7 +102,7 @@ pub fn answer(args: AnswerArgs) -> Result<ExitCode> {
         .note
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
-    let ask = send_answer(args.n, &args.word, super::by(), note)?;
-    println!("answered #{} for {}: {}", args.n, ask.service, args.word);
+    let service = send_answer(None, args.n, &args.word, super::by(), note)?;
+    println!("answered #{} for {service}: {}", args.n, args.word);
     Ok(ExitCode::SUCCESS)
 }

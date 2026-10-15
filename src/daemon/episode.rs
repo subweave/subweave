@@ -4,7 +4,7 @@
 
 use std::cell::Cell;
 
-use crate::service::JobKind;
+use super::state::JobKind;
 
 struct Ep {
     id: String,

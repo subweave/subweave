@@ -1,7 +1,8 @@
-// The dashboard API (see the server's /api routes). Shapes follow src/service.rs and the
-// parsed weave of `subweave plan --json`.
+// The dashboard API (see the server's /api routes). Shapes follow src/daemon/state.rs,
+// src/dash/read.rs and the parsed weave of `subweave plan --json`.
 
-export type GoalState = "holds" | "fails" | "unknown" | "off" | "waiting";
+/** `suspect`: one check failed; a second in a row makes the goal fail. */
+export type GoalState = "holds" | "suspect" | "fails" | "unknown" | "off" | "waiting";
 
 export interface GoalStatus {
   name: string;
@@ -11,7 +12,6 @@ export interface GoalStatus {
 
 export interface Status {
   service: string;
-  t: string;
   goals: GoalStatus[];
   repair: string | null;
   asks: number[];
@@ -33,7 +33,10 @@ export interface Spec {
 }
 
 export type Kind =
+  | "goals"
   | "check"
+  | "off"
+  | "waiting"
   | "decide"
   | "gate"
   | "action"
@@ -41,9 +44,15 @@ export type Kind =
   | "learn"
   | "ask"
   | "answer"
+  | "withdraw"
+  | "sent"
+  | "watch"
+  | "unwatch"
+  | "refused"
   | "message"
   | "note";
 
+/** One journal event. For `off`, `withdraw` and `refused`, `text` says why. */
 export interface Line {
   i: number;
   t: string;
@@ -61,7 +70,19 @@ export interface Line {
   output?: string;
   /** `ask`: the ask's explanation. */
   body?: string;
-  /** The episode the line belongs to: one job run or one learn. Older lines have none. */
+  /** `ask`: the rule that holds its action, as written. */
+  rule?: string;
+  /** `waiting`: the goal it comes AFTER that does not hold. */
+  on?: string;
+  /** `sent`, `watch`, `unwatch`. */
+  channel?: string;
+  /** `refused`: the event the state did not allow. */
+  refused?: Omit<Line, "i" | "t">;
+  /** `action`: why an action was cut off before its WITHIN said whether it worked. */
+  stopped?: string;
+  /** `goals`: the weave's goals in graph order. */
+  goals?: string[];
+  /** The episode the line belongs to: one job run or one learn. */
   ep?: string;
   /** What a model conversation used, on the line that ends it: a coder note, a decide. */
   usage?: Usage;

@@ -10,7 +10,7 @@ use serde_json::json;
 
 use crate::channel;
 use crate::model::decider::Question;
-use crate::service::{JobKind, Kind, LearnedSteps, Line, TASK};
+use crate::service::{LearnedSteps, TASK};
 use crate::weave::{self, Action, Goal, Rule, Step, expr, show_duration};
 
 use super::asks::AskReq;
@@ -19,7 +19,8 @@ use super::coder_task::{self, DoResult, Work};
 use super::facts::{self, Values};
 use super::goals::{self, Scope};
 use super::service::Ctx;
-use super::{Out, cap, last, learned, ms, now, sh};
+use super::state::{Act, Event, JobKind, Kind};
+use super::{Out, cap, epoch, last, learned, lock, ms, now, sh};
 
 const RUN_LIMIT: Duration = Duration::from_secs(30 * 60);
 const WITHIN: Duration = Duration::from_secs(300);
@@ -104,18 +105,34 @@ impl TaskJob {
         }
     }
 
-    /// An `action: "task"` line of this task; with no `ok`, its start line, which begins
-    /// its episode.
-    pub fn line(&self, ok: Option<bool>, text: String) -> Line {
-        Line {
-            kind: Kind::Action,
-            action: Some(TASK.to_string()),
+    /// The start of this task, which begins its episode.
+    pub fn start(&self) -> Event {
+        Event {
+            job: Some(JobKind::Task),
+            ..self.event(Act::Started {
+                goal: None,
+                action: TASK.to_string(),
+                text: Some(self.text.clone()),
+                within: None,
+            })
+        }
+    }
+
+    /// The end of this task: `text` the coder's summary or why it ended.
+    pub fn end(&self, ok: bool, text: String) -> Event {
+        self.event(Act::Ended {
+            goal: None,
+            action: TASK.to_string(),
             ok,
             text: Some(text),
+        })
+    }
+
+    fn event(&self, act: Act) -> Event {
+        Event {
             by: Some(self.by.clone()).filter(|b| !b.is_empty()),
             ep: Some(self.ep.clone()),
-            job: ok.is_none().then_some(JobKind::Task),
-            ..Default::default()
+            ..Kind::Action(act).into()
         }
     }
 }
@@ -143,7 +160,7 @@ enum Pick {
 
 /// The goal the job was for, and how it ended.
 pub(crate) async fn run(ctx: Arc<Ctx>, job: Job) -> (Option<String>, Outcome) {
-    *ctx.by.lock().unwrap_or_else(|e| e.into_inner()) = job.by().map(str::to_string);
+    *lock(&ctx.by) = job.by().map(str::to_string);
     let work = async {
         match &job {
             Job::Repair(r) => repair(&ctx, r).await,
@@ -154,8 +171,7 @@ pub(crate) async fn run(ctx: Arc<Ctx>, job: Job) -> (Option<String>, Outcome) {
         Job::Repair(_) => super::episode::scope(JobKind::Repair, work).await,
         Job::Task(t) => super::episode::task(t.ep.clone(), work).await,
     };
-    *ctx.repair.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    *ctx.by.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *lock(&ctx.by) = None;
     match job {
         Job::Repair(r) => (Some(r.goal), out),
         Job::Task(_) => (None, out),
@@ -167,21 +183,15 @@ pub(crate) async fn run(ctx: Arc<Ctx>, job: Job) -> (Option<String>, Outcome) {
 /// and ends with the coder's summary or why it failed. An ask leaves it open until the
 /// answer.
 async fn task(ctx: &Ctx, t: &TaskJob) -> Outcome {
-    let short: String = t.text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let short = match short.char_indices().nth(80) {
-        Some((i, _)) => format!("{}…", &short[..i]),
-        None => short,
-    };
-    *ctx.repair.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("task: {short}"));
     let work = Work {
         goal: None,
         action: TASK,
     };
     let mut prior = t.prior.clone();
     let start = Instant::now();
-    let end = |ok: bool, text: String| Line {
+    let end = |ok: bool, text: String| Event {
         ms: ms(start),
-        ..t.line(Some(ok), text)
+        ..t.end(ok, text)
     };
     match coder_task::do_task(ctx, work, &t.text, &mut prior, &t.rules_ok, &t.done).await {
         DoResult::Pass { summary, .. } => {
@@ -235,7 +245,8 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                 return Outcome::Nothing;
             }
             let (n, per) = goal.tries.unwrap_or(TRIES);
-            if !job.ignore_tries && ctx.journal().tries(&goal.name, per) >= n {
+            let from = epoch() - per.as_secs() as i64;
+            if !job.ignore_tries && ctx.journal().state().tries(&goal.name, from) >= n {
                 ctx.ask(AskReq {
                     goal: Some(goal.name.clone()),
                     action: None,
@@ -420,17 +431,17 @@ fn gate<'a>(
             continue;
         }
         let text = rule_text(r);
-        let kept = ctx.journal().kept(&text, action);
+        let kept = ctx.journal().state().kept(&text, action);
         match kept {
             Some("never") => return Gate::Refused(r, true),
             Some(_) => {
-                ctx.journal().add(Line {
-                    kind: Kind::Gate,
+                ctx.journal().add(Kind::Gate {
                     goal: Some(goal.name.clone()),
-                    action: Some(action.to_string()),
-                    ok: Some(true),
-                    text: Some(text),
-                    ..Default::default()
+                    action: action.to_string(),
+                    text,
+                    ok: true,
+                    p: BTreeMap::new(),
+                    n: None,
                 });
                 continue;
             }
@@ -444,12 +455,13 @@ fn gate<'a>(
 }
 
 fn refused(ctx: &Ctx, goal: &Goal, action: &str, rule: &str) {
-    ctx.journal().add(Line {
-        kind: Kind::Gate,
+    ctx.journal().add(Kind::Gate {
         goal: Some(goal.name.clone()),
-        action: Some(action.to_string()),
-        text: Some(rule.to_string()),
-        ..Default::default()
+        action: action.to_string(),
+        text: rule.to_string(),
+        ok: false,
+        p: BTreeMap::new(),
+        n: None,
     });
 }
 
@@ -492,7 +504,7 @@ async fn decide(ctx: &Ctx, goal: &Goal, cands: &[&Action], values: &Values) -> P
         },
     );
     let (f, o) = facts::for_decider(values);
-    let journal = ctx.journal().recent(&goal.name, 10);
+    let journal = ctx.journal().state().recent(&goal.name, 10);
     let state = json!({
         "service": ctx.name,
         "failing_goal": goals::describe(ctx, goal),
@@ -516,15 +528,17 @@ async fn decide(ctx: &Ctx, goal: &Goal, cands: &[&Action], values: &Values) -> P
     };
     let mut p: BTreeMap<String, f64> = probs.iter().map(|(k, v)| (k.clone(), *v)).collect();
     p.insert("steered".into(), steered);
-    ctx.journal().add(Line {
-        kind: Kind::Decide,
-        goal: Some(goal.name.clone()),
-        text: Some(choice.to_string()),
-        p: Some(p),
+    ctx.journal().add(Event {
         cost_usd: Some(answers.cost_usd),
         usage: Some(decider.usage(&answers)),
         ms: ms(start),
-        ..Default::default()
+        ..Kind::Decide {
+            goal: Some(goal.name.clone()),
+            action: None,
+            text: choice.to_string(),
+            p,
+        }
+        .into()
     });
     if steered >= 0.5 {
         return Pick::Ask(format!(
@@ -547,9 +561,13 @@ async fn decide(ctx: &Ctx, goal: &Goal, cands: &[&Action], values: &Values) -> P
 
 /// The steps: learned ones first, then RUN, ADD and DO in order; then the WITHIN wait.
 async fn run_action(ctx: &Ctx, goal: &Goal, a: &Action, rules_ok: &[String]) {
-    *ctx.repair.lock().unwrap_or_else(|e| e.into_inner()) =
-        Some(format!("{} for {}", a.name, goal.name));
     let within = a.within.unwrap_or(WITHIN);
+    ctx.journal().add(Kind::Action(Act::Started {
+        goal: Some(goal.name.clone()),
+        action: a.name.clone(),
+        text: None,
+        within: Some(within.as_secs()),
+    }));
     let key = learned::steps_key(ctx, a);
     let slot = format!("{}/{}", a.name, goal.name);
     let mut prior = String::new();
@@ -581,16 +599,16 @@ async fn run_action(ctx: &Ctx, goal: &Goal, a: &Action, rules_ok: &[String]) {
             l.steps.remove(&slot);
             learned::save(&ctx.name, &l);
         }
-        ctx.journal().add(Line {
-            kind: Kind::Learn,
+        ctx.journal().add(Kind::Learn {
             goal: Some(goal.name.clone()),
             action: Some(a.name.clone()),
-            text: Some(format!(
+            ok: true,
+            text: format!(
                 "dropped the learned steps of {slot}: {} did not hold within {}",
                 goal.name,
                 show_duration(within)
-            )),
-            ..Default::default()
+            ),
+            output: None,
         });
         prior = format!("Learned steps ran and the goal did not hold:\n{prior}");
     }
@@ -650,12 +668,12 @@ async fn run_action(ctx: &Ctx, goal: &Goal, a: &Action, rules_ok: &[String]) {
             );
             learned::save(&ctx.name, &l);
         }
-        ctx.journal().add(Line {
-            kind: Kind::Learn,
+        ctx.journal().add(Kind::Learn {
             goal: Some(goal.name.clone()),
             action: Some(a.name.clone()),
-            text: Some(format!("steps for {slot}: {n} commands")),
-            ..Default::default()
+            ok: true,
+            text: format!("steps for {slot}: {n} commands"),
+            output: None,
         });
         ctx.message(
             channel::Kind::Info,
@@ -671,13 +689,15 @@ async fn run_action(ctx: &Ctx, goal: &Goal, a: &Action, rules_ok: &[String]) {
 }
 
 fn action_line(ctx: &Ctx, goal: &Goal, a: &Action, ok: bool, start: Instant) {
-    ctx.journal().add(Line {
-        kind: Kind::Action,
-        goal: Some(goal.name.clone()),
-        action: Some(a.name.clone()),
-        ok: Some(ok),
+    ctx.journal().add(Event {
         ms: ms(start),
-        ..Default::default()
+        ..Kind::Action(Act::Ended {
+            goal: Some(goal.name.clone()),
+            action: a.name.clone(),
+            ok,
+            text: None,
+        })
+        .into()
     });
 }
 
@@ -687,15 +707,16 @@ pub(crate) async fn command(ctx: &Ctx, work: Work<'_>, script: &str, prior: &mut
     let start = Instant::now();
     let o = sh(script, &ctx.env, RUN_LIMIT).await;
     let shown = ctx.redact(&cap(&o.both(), OUTPUT_CAP));
-    ctx.journal().add(Line {
-        kind: Kind::Command,
-        goal: work.goal_name(),
-        action: Some(work.action.to_string()),
-        text: Some(script.to_string()),
-        ok: Some(o.ok()),
-        output: command_output(ctx, &o),
+    ctx.journal().add(Event {
         ms: ms(start),
-        ..Default::default()
+        ..Kind::Command {
+            goal: work.goal_name(),
+            action: work.action.to_string(),
+            text: script.to_string(),
+            ok: o.ok(),
+            output: command_output(ctx, &o),
+        }
+        .into()
     });
     let code = o.code.map_or("killed".to_string(), |c| format!("exit {c}"));
     prior.push_str(&format!("$ {script}\n{shown}\n[{code}]\n"));
@@ -731,17 +752,19 @@ async fn add(ctx: &Ctx, goal: &Goal, a: &Action, path: &str, content: &str) -> b
         tokio::fs::write(p, content).await
     }
     .await;
-    ctx.journal().add(Line {
-        kind: Kind::Command,
-        goal: Some(goal.name.clone()),
-        action: Some(a.name.clone()),
-        text: Some(match &r {
-            Ok(()) => format!("ADD {path}"),
-            Err(e) => format!("ADD {path}: {e}"),
-        }),
-        ok: Some(r.is_ok()),
+    ctx.journal().add(Event {
         ms: ms(start),
-        ..Default::default()
+        ..Kind::Command {
+            goal: Some(goal.name.clone()),
+            action: a.name.clone(),
+            text: match &r {
+                Ok(()) => format!("ADD {path}"),
+                Err(e) => format!("ADD {path}: {e}"),
+            },
+            ok: r.is_ok(),
+            output: None,
+        }
+        .into()
     });
     r.is_ok()
 }

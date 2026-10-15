@@ -170,7 +170,7 @@ async fn local(command: Command) -> Result<ExitCode> {
         Command::Plan(args) => plan::run(args).await,
         Command::Run(args) => run::run(args).await,
         Command::Tell(args) => tell::run(args).await,
-        Command::Ps(_) => ps::run(),
+        Command::Ps(args) => ps::run(&args),
         Command::Log(args) => log::run(args).await,
         Command::Stats(args) => stats::run(args),
         Command::Inbox(_) => inbox::run(),

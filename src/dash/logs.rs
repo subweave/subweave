@@ -19,8 +19,9 @@ use tokio::sync::mpsc;
 
 use super::read::spec;
 use super::{ApiError, App, Svc, auth};
+use crate::daemon::state::Kind;
 use crate::daemon::{bash, command_env, kill_group, now, redact};
-use crate::service::{self, Kind};
+use crate::service;
 use crate::weave::{FactSource, Weave};
 use crate::paths;
 
@@ -221,10 +222,13 @@ pub(crate) async fn stream(
                     ApiError::conflict(format!("this box has not learned the command of {name} yet"))
                 })?,
         };
-        let lines = service::journal(&s).map_err(ApiError::internal)?;
+        let lines = crate::daemon::journal::events(&s);
         let mut recent: Vec<(String, String)> = Vec::new();
-        for l in lines.iter().filter(|l| l.kind == Kind::Check) {
-            if let Some(v) = l.facts.as_ref().and_then(|f| f.get(&name)) {
+        for l in &lines {
+            let Kind::Check { facts, .. } = &l.kind else {
+                continue;
+            };
+            if let Some(v) = facts.get(&name) {
                 recent.extend(
                     v.lines()
                         .filter(|x| !x.trim().is_empty())

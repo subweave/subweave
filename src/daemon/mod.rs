@@ -1,5 +1,6 @@
 //! `subweave daemon`: consumes the inbox, keeps one loop task per service and polls the
-//! answering channels for open asks. `WEAVEFILE.md` "The loop" says what a loop does.
+//! answering channels for open escalations. `WEAVEFILE.md` "The loop" says what a loop
+//! does.
 
 mod agent;
 mod asks;
@@ -9,15 +10,16 @@ mod episode;
 mod facts;
 mod goals;
 mod inbox;
-mod journal;
+pub(crate) mod journal;
 mod learned;
 mod repair;
 mod service;
+pub(crate) mod state;
 mod trace;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -27,24 +29,63 @@ use tokio::task::JoinHandle;
 
 use crate::channel::{self, Message};
 use crate::paths;
-use crate::service::{self as svc, Command, Kind, Line, TASK};
+use crate::service::{self as svc, Command, TASK};
 
+use journal::Journal;
 use service::{Ctl, PendingChange, Tasks};
+use state::{Act, Event, Kind};
 
 pub(crate) use service::command_env;
 
-/// What every service task shares: the ask counter, where each ask was sent and the
-/// agent channels' processes.
+/// What every service task shares: the ask counter, the journals and the agent channels'
+/// processes.
 pub(crate) struct Shared {
     pub host: String,
     ask_lock: Mutex<()>,
-    sent: Mutex<BTreeMap<u64, asks::SentAsk>>,
-    /// Asks settled in this run, so a second answer is ignored.
-    answered: Mutex<BTreeSet<u64>>,
-    /// The agent process working on each escalation, by ask: a withdrawn ask kills it.
+    /// Each service's journal with its fold, opened on first use: every writer goes
+    /// through it.
+    journals: Mutex<BTreeMap<String, Arc<Mutex<Journal>>>>,
+    /// The agent process working on each escalation, by number: a withdrawn one kills it.
     agents: Mutex<BTreeMap<u64, u32>>,
     /// Per service, held while its agent runs: one agent at a time.
     agent_turns: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl Shared {
+    /// A service's journal, replayed on first use.
+    pub fn journal(&self, service: &str) -> Arc<Mutex<Journal>> {
+        lock(&self.journals)
+            .entry(service.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(Journal::open(service))))
+            .clone()
+    }
+
+    /// The service that raised escalation `n`, and its journal.
+    pub fn find(&self, n: u64) -> Option<(String, Arc<Mutex<Journal>>)> {
+        svc::names().ok()?.into_iter().find_map(|name| {
+            let j = self.journal(&name);
+            let has = lock(&j).state().escalations.contains_key(&n);
+            has.then_some((name, j))
+        })
+    }
+
+    /// A note in a service's journal; `by`, when not empty, says who caused it.
+    pub fn note(&self, service: &str, text: &str, by: &str) {
+        lock(&self.journal(service)).note_by(None, text, by);
+    }
+
+    /// A removed service's journal is gone with it: a task that still holds it writes
+    /// nothing more, and one made again starts afresh.
+    fn forget(&self, service: &str) {
+        let gone = lock(&self.journals).remove(service);
+        if let Some(j) = gone {
+            lock(&j).close();
+        }
+    }
+}
+
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 struct Task {
@@ -81,8 +122,7 @@ pub async fn run() -> Result<()> {
     let shared = Arc::new(Shared {
         host: hostname(),
         ask_lock: Mutex::new(()),
-        sent: Mutex::new(asks::load_sent()),
-        answered: Mutex::new(BTreeSet::new()),
+        journals: Mutex::new(BTreeMap::new()),
         agents: Mutex::new(BTreeMap::new()),
         agent_turns: Mutex::new(BTreeMap::new()),
     });
@@ -222,23 +262,28 @@ impl Daemon {
         );
     }
 
-    /// Ends a service's loop. Each person's task it ran or had queued gets an end line
-    /// saying `why`; with no `why` (rm) the journal goes anyway.
+    /// Ends a service's loop, if one runs. What the journal says runs gets an end line
+    /// saying `why`, and so does each person's task the loop had queued; with no `why`
+    /// (rm) the journal goes anyway.
     async fn halt(&mut self, name: &str, why: Option<&str>) {
-        let Some(t) = self.tasks.remove(name) else { return };
-        t.handle.abort();
-        let _ = t.handle.await;
-        let Some(why) = why else { return };
-        let open = std::mem::take(&mut *t.tasks.lock().unwrap_or_else(|e| e.into_inner()));
-        for job in open {
-            if !job.again {
-                let mut start = job.line(None, job.text.clone());
-                start.t = now();
-                journal::append(name, &start);
+        let queued = match self.tasks.remove(name) {
+            Some(t) => {
+                t.handle.abort();
+                let _ = t.handle.await;
+                std::mem::take(&mut *lock(&t.tasks))
             }
-            let mut end = job.line(Some(false), format!("ended: {why}"));
-            end.t = now();
-            journal::append(name, &end);
+            None => Default::default(),
+        };
+        let Some(why) = why else { return };
+        let journal = self.shared.journal(name);
+        let mut j = lock(&journal);
+        // A task the slot never took has no start line yet.
+        for job in queued.iter().filter(|job| !job.again) {
+            j.add(job.start());
+            j.add(job.end(false, format!("ended: {why}")));
+        }
+        for e in j.state().interrupted(why) {
+            j.add(e);
         }
     }
 
@@ -255,7 +300,7 @@ impl Daemon {
             tracing::error!(service = %name, error = %format!("{e:#}"), "run: cannot write the service");
             return;
         }
-        journal::note(&name, note, by);
+        self.shared.note(&name, note, by);
         self.broken.remove(&name);
         self.start(&name, true);
     }
@@ -273,7 +318,8 @@ impl Daemon {
         let (bundle, change) = match rebase(&name, &pending) {
             Ok(r) => r,
             Err(why) => {
-                journal::note(&name, &format!("weave change by {by} dropped: {why}"), &by);
+                let text = format!("weave change by {by} dropped: {why}");
+                self.shared.note(&name, &text, &by);
                 return;
             }
         };
@@ -288,33 +334,18 @@ impl Daemon {
             }
             None => {
                 let text = format!("weave change by {by} dropped: the service is stopped");
-                journal::note(&name, &text, &by);
+                self.shared.note(&name, &text, &by);
             }
         }
     }
 
-    /// The signed yes to weave change `n`, by `by`: the loop stops, the answer is
-    /// journaled, and the change the loop kept applies to the service as it is now. One
-    /// that no longer fits is dropped, and the loop starts again.
-    async fn apply_change(&mut self, service: &str, n: u64, by: &str, note: Option<String>) {
+    /// The signed yes to weave change `n`, journaled, by `by`: the loop stops, and the
+    /// change the loop kept applies to the service as it is now. One that no longer fits
+    /// is dropped, and the loop starts again.
+    async fn apply_change(&mut self, service: &str, n: u64, by: &str) {
         let running = self.tasks.contains_key(service);
         self.halt(service, Some("the service restarted for new settings"))
             .await;
-        journal::append(
-            service,
-            &Line {
-                t: now(),
-                kind: Kind::Answer,
-                action: Some(svc::WEAVE.to_string()),
-                text: Some("yes".to_string()),
-                n: Some(n),
-                by: Some(by.to_string()),
-                ..Default::default()
-            },
-        );
-        if let Some(text) = note {
-            journal::note(service, &text, by);
-        }
         let path = paths::change(service, n);
         let kept: Option<PendingChange> = std::fs::read(&path)
             .ok()
@@ -337,7 +368,8 @@ impl Daemon {
                 Err(why) => why,
             },
         };
-        journal::note(service, &format!("weave change #{n} dropped: {dropped}"), by);
+        let text = format!("weave change #{n} dropped: {dropped}");
+        self.shared.note(service, &text, by);
         if running {
             self.start(service, false);
         }
@@ -395,7 +427,7 @@ impl Daemon {
                     tracing::error!(service = %service, error = %format!("{e:#}"), "tell: cannot save");
                     return;
                 }
-                journal::note(&service, &format!("tell: {request}"), &by);
+                self.shared.note(&service, &format!("tell: {request}"), &by);
                 self.broken.remove(&service);
                 if !spec.stopped {
                     self.start(&service, true);
@@ -409,22 +441,20 @@ impl Daemon {
                 Some(t) => {
                     let _ = t.ctl.send(Ctl::Do { action, by });
                 }
-                None if svc::spec(&service).is_ok() => journal::note(
-                    &service,
-                    &format!("do {action}: the service is stopped"),
-                    &by,
-                ),
+                None if svc::spec(&service).is_ok() => {
+                    let text = format!("do {action}: the service is stopped");
+                    self.shared.note(&service, &text, &by);
+                }
                 None => tracing::warn!(service = %service, action = %action, "do: no such service"),
             },
             Command::Task { service, text, by } => match self.tasks.get(&service) {
                 Some(t) => {
                     let _ = t.ctl.send(Ctl::Task { text, by });
                 }
-                None if svc::spec(&service).is_ok() => journal::note(
-                    &service,
-                    &format!("task {text:?}: the service is stopped"),
-                    &by,
-                ),
+                None if svc::spec(&service).is_ok() => {
+                    let text = format!("task {text:?}: the service is stopped");
+                    self.shared.note(&service, &text, &by);
+                }
                 None => tracing::warn!(service = %service, "task: no such service"),
             },
             Command::Answer { n, word, by, note } => self.answer(n, &word, &by, note, None).await,
@@ -434,7 +464,7 @@ impl Daemon {
                     tracing::error!(service = %service, error = %format!("{e:#}"), "stop failed");
                     return;
                 }
-                journal::note(&service, "stopped", &by);
+                self.shared.note(&service, "stopped", &by);
             }
             Command::Start { service, by } => {
                 if let Err(e) = set_stopped(&service, false) {
@@ -442,7 +472,7 @@ impl Daemon {
                     return;
                 }
                 self.broken.remove(&service);
-                journal::note(&service, "started", &by);
+                self.shared.note(&service, "started", &by);
             }
             Command::Rm { service, by: _ } => {
                 self.halt(&service, None).await;
@@ -451,6 +481,7 @@ impl Daemon {
                     if let Err(e) = std::fs::remove_dir_all(paths::service(&service)) {
                         tracing::error!(service = %service, error = %e, "rm failed");
                     }
+                    self.shared.forget(&service);
                 }
             }
             Command::Forget { service, name, by } => match self.tasks.get(&service) {
@@ -458,20 +489,21 @@ impl Daemon {
                     let _ = t.ctl.send(Ctl::Forget { name, by });
                 }
                 None => match learned::forget_file(&service, &name) {
-                    Ok(true) => journal::note(&service, &format!("forgot {name}"), &by),
-                    Ok(false) => journal::note(
-                        &service,
-                        &format!("forget: nothing learned for {name}"),
-                        &by,
-                    ),
+                    Ok(true) => self.shared.note(&service, &format!("forgot {name}"), &by),
+                    Ok(false) => {
+                        let text = format!("forget: nothing learned for {name}");
+                        self.shared.note(&service, &text, &by);
+                    }
                     Err(e) => tracing::error!(service = %service, error = %format!("{e:#}"), "forget failed"),
                 },
             },
         }
     }
 
-    /// The first answer to an open ask wins; `from` is the channel it came on. `note`, when
-    /// given, follows the answer line as a note by `by`.
+    /// The first answer to an open escalation settles it; an answer it does not take,
+    /// after it settled or unsigned where it needs a signature, is journaled as refused.
+    /// `from` is the channel it came on; `note`, when given, follows the answer as a note
+    /// by `by`.
     async fn answer(
         &mut self,
         n: u64,
@@ -480,107 +512,87 @@ impl Daemon {
         note: Option<String>,
         from: Option<String>,
     ) {
-        if self
-            .shared
-            .answered
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(&n)
-        {
-            return;
-        }
-        let Some((service, ask)) = find_ask(n) else {
-            tracing::warn!(ask = n, "answer: no open ask");
+        let Some((service, journal)) = self.shared.find(n) else {
+            tracing::warn!(ask = n, "answer: no such escalation");
             return;
         };
-        let answers = ask.answers.clone().unwrap_or_default();
-        if !answers.iter().any(|a| a == word) {
-            tracing::warn!(ask = n, word, answers = %answers.join(", "), "answer: not one of the ask's words");
-            return;
-        }
-        let on_steery = from.as_deref().is_some_and(|name| {
+        // A Steery channel reads only answers signed by a pinned signer.
+        let signed = from.as_deref().is_some_and(|name| {
             channel::ls()
                 .unwrap_or_default()
                 .iter()
                 .any(|c| c.name == name && c.kind() == channel::ChannelKind::Steery)
         });
-        if ask.signed == Some(true) && !on_steery {
-            tracing::warn!(ask = n, by, "answer: only a signed answer on Steery settles this ask");
-            return;
-        }
-        self.shared
-            .answered
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(n);
-        asks::forget_sent(&self.shared, n);
-        let weave = ask.action.as_deref() == Some(svc::WEAVE);
         let ctl = self.tasks.get(&service).map(|t| t.ctl.clone());
-        match ctl {
-            // A signed yes to a weave change: the daemon applies what the loop kept.
-            _ if weave && word == "yes" && ask.signed == Some(true) => {
-                self.apply_change(&service, n, by, note).await;
+        let esc = {
+            let mut j = lock(&journal);
+            let Some(esc) = j.state().escalations.get(&n).cloned() else {
+                return;
+            };
+            let action = match esc.action.as_deref() {
+                Some(a @ (TASK | svc::WEAVE)) => Some(a.to_string()),
+                _ => answers_action(&service, word),
+            };
+            let answer = Kind::Answer {
+                n,
+                goal: esc.goal.clone(),
+                action,
+                text: word.to_string(),
+                signed,
+            };
+            let answered = asks::settle(
+                &self.shared,
+                &mut j,
+                Event {
+                    by: Some(by.to_string()),
+                    ..answer.into()
+                },
+            );
+            if !answered {
+                return;
             }
-            Some(ctl) => {
+            if let Some(text) = note {
+                j.note_by(esc.goal.as_deref(), text, by);
+            }
+            // Sent before the loop can read the escalation settled: it takes the answer
+            // before it starts a repair of its own for the goal.
+            let weave_yes = esc.action.as_deref() == Some(svc::WEAVE) && word == "yes";
+            if let Some(ctl) = ctl.as_ref().filter(|_| !weave_yes) {
                 let _ = ctl.send(Ctl::Answer {
                     n,
                     word: word.to_string(),
                     by: by.to_string(),
-                    note,
                 });
             }
+            esc
+        };
+        let weave = esc.action.as_deref() == Some(svc::WEAVE);
+        match ctl {
+            // A signed yes to a weave change: the daemon applies what the loop kept.
+            _ if weave && word == "yes" => self.apply_change(&service, n, by).await,
+            // The loop has the answer.
+            Some(_) => {}
+            None if weave => {
+                let _ = std::fs::remove_file(paths::change(&service, n));
+            }
+            // No loop runs the task again: it ends here.
             None => {
-                let task = ask.action.as_deref() == Some(TASK);
-                journal::append(
-                    &service,
-                    &Line {
-                        t: now(),
-                        kind: Kind::Answer,
-                        goal: ask.goal.clone(),
-                        action: match ask.action.as_deref() {
-                            Some(a @ (TASK | svc::WEAVE)) => Some(a.to_string()),
-                            _ => answers_action(&service, word),
-                        },
-                        text: Some(word.to_string()),
-                        n: Some(n),
-                        by: Some(by.to_string()),
-                        ..Default::default()
-                    },
-                );
-                if let Some(text) = note {
-                    journal::append(
-                        &service,
-                        &Line {
-                            t: now(),
-                            kind: Kind::Note,
-                            goal: ask.goal.clone(),
-                            text: Some(text),
-                            by: Some(by.to_string()),
-                            ..Default::default()
-                        },
-                    );
-                }
-                if weave {
-                    let _ = std::fs::remove_file(paths::change(&service, n));
-                }
-                // No loop runs the task again: it ends here.
-                if task {
-                    let lines = svc::journal(&service).unwrap_or_default();
-                    let start_by = journal::task_lines(&lines, n).and_then(|l| l[0].by.clone());
-                    journal::append(
-                        &service,
-                        &Line {
-                            t: now(),
-                            kind: Kind::Action,
-                            action: Some(TASK.to_string()),
-                            ok: Some(false),
-                            text: Some(format!(
-                                "ended: #{n} answered {word} while the service was stopped"
-                            )),
-                            by: start_by,
-                            ..Default::default()
-                        },
-                    );
+                let mut j = lock(&journal);
+                let ended = j.state().task_of(n).map(|(ep, t)| Event {
+                    by: t.by.clone(),
+                    ep: Some(ep.to_string()),
+                    ..Kind::Action(Act::Ended {
+                        goal: None,
+                        action: TASK.to_string(),
+                        ok: false,
+                        text: Some(format!(
+                            "ended: #{n} answered {word} while the service was stopped"
+                        )),
+                    })
+                    .into()
+                });
+                if let Some(e) = ended {
+                    j.add(e);
                 }
             }
         }
@@ -588,7 +600,7 @@ impl Daemon {
             kind: channel::Kind::Info,
             host: self.shared.host.clone(),
             service: service.clone(),
-            goal: ask.goal.clone(),
+            goal: esc.goal.clone(),
             title: format!("#{n} answered {word} by {by}"),
             text: format!("Ask #{n} is settled: {word}, by {by}."),
             summary: Vec::new(),
@@ -597,17 +609,6 @@ impl Daemon {
         };
         notify(msg, from);
     }
-}
-
-/// The service and ask line of open ask `n`.
-fn find_ask(n: u64) -> Option<(String, Line)> {
-    for name in svc::names().ok()? {
-        let lines = svc::journal(&name).unwrap_or_default();
-        if let Some(ask) = svc::open_asks(&lines).into_iter().find(|l| l.n == Some(n)) {
-            return Some((name, ask.clone()));
-        }
-    }
-    None
 }
 
 /// `word` when it names an action of the service's weave.
@@ -694,14 +695,7 @@ fn write_secrets(service: &str, secrets: &BTreeMap<String, String>) -> Result<()
 fn set_stopped(service: &str, stopped: bool) -> Result<()> {
     let mut spec = svc::spec(service)?;
     spec.stopped = stopped;
-    save_json(&paths::service_json(service), &spec)?;
-    if let Ok(Some(mut status)) = svc::status(service) {
-        status.stopped = stopped;
-        status.repair = None;
-        status.t = now();
-        save_json(&paths::status(service), &status)?;
-    }
-    Ok(())
+    save_json(&paths::service_json(service), &spec)
 }
 
 /// Writes JSON atomically: a temporary file, then a rename.

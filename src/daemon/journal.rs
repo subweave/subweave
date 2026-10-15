@@ -1,83 +1,201 @@
-//! A service's journal: one JSON line per event, kept in memory while its loop runs.
+//! A service's journal, `journal.jsonl`: one event per line, the only record of its
+//! state. The daemon writes it through `Journal`, which folds each event as it writes
+//! it; readers fold it with `Follower`. `state.json` caches a fold with the part of the
+//! journal it covers.
 
 use std::collections::BTreeMap;
-use std::io::Write;
-use std::time::Duration;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::paths;
-use crate::service::{self as svc, Kind, Line, TASK, WEAVE};
 
-use super::{epoch, epoch_of, now, redact};
+use super::state::{self, Escalation, Event, Kind, ServiceState};
+use super::{now, redact, save_json};
 
+/// The daemon writes `state.json` again after this many lines.
+const SNAPSHOT_EVERY: u64 = 1000;
+
+/// `state.json`: the fold of the journal's first `lines` lines, its first `offset`
+/// bytes, by the daemon of `version`. Another version's is not read: its fold may differ.
+#[derive(Serialize, Deserialize)]
+struct Snapshot {
+    version: String,
+    offset: u64,
+    lines: u64,
+    state: ServiceState,
+}
+
+/// The journal the daemon writes, with the fold of every line in it.
 pub(crate) struct Journal {
     service: String,
-    lines: Vec<Line>,
+    state: ServiceState,
+    /// Bytes and lines of the journal file the state covers.
+    offset: u64,
+    lines: u64,
+    /// Lines since `state.json` was written.
+    unsaved: u64,
     /// Model spend not yet on a line; the next line carries it.
     pending: f64,
     secrets: Vec<(String, String)>,
+    /// The service was removed: a writer still holding its journal writes nothing.
+    closed: bool,
 }
 
 impl Journal {
-    pub fn open(service: &str, secrets: Vec<(String, String)>) -> Journal {
-        let lines = svc::journal(service).unwrap_or_else(|e| {
-            tracing::error!(service, error = %format!("{e:#}"), "cannot read the journal");
-            Vec::new()
-        });
-        Journal {
+    /// The journal replayed from its first line: a snapshot of an older daemon may fold
+    /// differently. A line a crash cut short is ended first, so the daemon folds it as
+    /// readers do and the next line starts on its own.
+    pub fn open(service: &str) -> Journal {
+        end_partial(&paths::journal(service));
+        let mut f = Follower::start(service);
+        f.read();
+        let mut j = Journal {
             service: service.to_string(),
-            lines,
+            state: f.state,
+            offset: f.tail.pos,
+            lines: f.tail.count,
+            unsaved: f.tail.count,
             pending: 0.0,
-            secrets,
+            secrets: Vec::new(),
+            closed: false,
+        };
+        if j.unsaved > 0 {
+            j.save();
         }
+        j
     }
 
-    /// Writes a line: the time and the running episode set (and its job, on its first
-    /// line), secrets redacted, pending spend added.
-    pub fn add(&mut self, mut l: Line) -> Line {
-        if l.t.is_empty() {
-            l.t = now();
+    /// The service is gone: nothing more is written for it.
+    pub fn close(&mut self) {
+        self.closed = true;
+    }
+
+    pub fn state(&self) -> &ServiceState {
+        &self.state
+    }
+
+    /// The values each line's text is redacted of, as (name, value), longest first.
+    pub fn set_secrets(&mut self, secrets: Vec<(String, String)>) {
+        self.secrets = secrets;
+    }
+
+    /// Journals `e` and folds it: the time and the running episode set (and its job, on
+    /// its first line), secrets redacted, pending spend added. An event the state does
+    /// not allow is journaled as refused, with why. `false`: refused, or not written.
+    pub fn add(&mut self, e: impl Into<Event>) -> bool {
+        if self.closed {
+            return false;
         }
-        if l.ep.is_none() {
+        let mut e = e.into();
+        if e.t.is_empty() {
+            e.t = now();
+        }
+        if e.ep.is_none() {
             if let Some((ep, job)) = super::episode::for_line() {
-                l.ep = Some(ep);
-                l.job = l.job.or(job);
+                e.ep = Some(ep);
+                e.job = e.job.or(job);
             }
         }
-        for s in [&mut l.text, &mut l.body, &mut l.output].into_iter().flatten() {
-            *s = redact(s, &self.secrets);
-        }
-        if let Some(f) = &mut l.facts {
-            for v in f.values_mut() {
-                *v = redact(v, &self.secrets);
-            }
-        }
+        let secrets = &self.secrets;
+        e.kind.redact(&|s| redact(s, secrets));
         // A line with a model's usage keeps that model's cost alone.
-        if self.pending > 0.0 && l.usage.is_none() {
-            l.cost_usd = Some(l.cost_usd.unwrap_or(0.0) + self.pending);
+        if self.pending > 0.0 && e.usage.is_none() {
+            e.cost_usd = Some(e.cost_usd.unwrap_or(0.0) + self.pending);
             self.pending = 0.0;
         }
-        append(&self.service, &l);
-        self.lines.push(l.clone());
-        l
+        let applied = match state::apply(&mut self.state, &e) {
+            Ok(()) => true,
+            Err(why) => {
+                e = Event {
+                    kind: Kind::Refused {
+                        why,
+                        refused: Box::new(e.kind),
+                    },
+                    ..e
+                };
+                // A refusal changes nothing but the spend it carries.
+                let _ = state::apply(&mut self.state, &e);
+                false
+            }
+        };
+        if !self.write(&e) {
+            // The fold holds only what the file holds.
+            *self = Journal {
+                secrets: std::mem::take(&mut self.secrets),
+                pending: self.pending,
+                ..Journal::open(&self.service)
+            };
+            return false;
+        }
+        applied
+    }
+
+    fn write(&mut self, e: &Event) -> bool {
+        let path = paths::journal(&self.service);
+        let written = (|| -> anyhow::Result<u64> {
+            let mut bytes = serde_json::to_vec(e)?;
+            bytes.push(b'\n');
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)?
+                .write_all(&bytes)?;
+            Ok(bytes.len() as u64)
+        })();
+        let len = match written {
+            Ok(len) => len,
+            Err(err) => {
+                tracing::error!(path = %path.display(), error = %format!("{err:#}"), "cannot write a journal line");
+                return false;
+            }
+        };
+        self.offset += len;
+        self.lines += 1;
+        self.unsaved += 1;
+        if self.unsaved >= SNAPSHOT_EVERY {
+            self.save();
+        }
+        super::trace::line(&self.service, e);
+        true
+    }
+
+    /// `state.json`, from the fold.
+    fn save(&mut self) {
+        let snap = Snapshot {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            offset: self.offset,
+            lines: self.lines,
+            state: self.state.clone(),
+        };
+        match save_json(&paths::snapshot(&self.service), &snap) {
+            Ok(()) => self.unsaved = 0,
+            Err(e) => {
+                tracing::error!(service = %self.service, error = %format!("{e:#}"), "cannot write state.json")
+            }
+        }
     }
 
     pub fn note(&mut self, goal: Option<&str>, text: impl Into<String>) {
-        self.add(Line {
-            kind: Kind::Note,
-            goal: goal.map(str::to_string),
-            text: Some(text.into()),
-            ..Default::default()
-        });
+        self.note_by(goal, text, "");
     }
 
-    /// A note the person caused; `by` says who.
+    /// A note someone caused; `by`, when not empty, says who.
     pub fn note_by(&mut self, goal: Option<&str>, text: impl Into<String>, by: &str) {
-        self.add(Line {
-            kind: Kind::Note,
-            goal: goal.map(str::to_string),
-            text: Some(text.into()),
+        self.add(Event {
             by: Some(by.to_string()).filter(|b| !b.is_empty()),
-            ..Default::default()
+            ..Kind::Note {
+                goal: goal.map(str::to_string),
+                action: None,
+                n: None,
+                text: text.into(),
+            }
+            .into()
         });
     }
 
@@ -85,215 +203,241 @@ impl Journal {
     pub fn spend(&mut self, cost: f64) {
         self.pending += cost;
     }
-
-    /// The sum of `cost_usd` in this month's lines, and the spend not written yet.
-    pub fn month_spend(&self) -> f64 {
-        let month = &now()[..7];
-        self.lines
-            .iter()
-            .filter(|l| l.t.starts_with(month))
-            .filter_map(|l| l.cost_usd)
-            .sum::<f64>()
-            + self.pending
-    }
-
-    /// Time since `action` last passed.
-    pub fn since_pass(&self, action: &str) -> Option<Duration> {
-        let l = self.lines.iter().rev().find(|l| {
-            l.kind == Kind::Action && l.ok == Some(true) && l.action.as_deref() == Some(action)
-        })?;
-        let secs = epoch() - epoch_of(&l.t)?;
-        Some(Duration::from_secs(secs.max(0) as u64))
-    }
-
-    /// `action` lines for `goal` within the last `per`.
-    pub fn tries(&self, goal: &str, per: Duration) -> u32 {
-        let from = epoch() - per.as_secs() as i64;
-        self.lines
-            .iter()
-            .filter(|l| l.kind == Kind::Action && l.goal.as_deref() == Some(goal))
-            .filter(|l| epoch_of(&l.t).is_some_and(|t| t >= from))
-            .count() as u32
-    }
-
-    pub fn ask(&self, n: u64) -> Option<&Line> {
-        self.lines
-            .iter()
-            .find(|l| l.kind == Kind::Ask && l.n == Some(n))
-    }
-
-    /// The rule an ask was raised for: its `gate` line.
-    pub fn gate(&self, n: u64) -> Option<&Line> {
-        self.lines
-            .iter()
-            .find(|l| l.kind == Kind::Gate && l.n == Some(n))
-    }
-
-    /// The lines of the person's task that raised ask `n`, from its start line on.
-    pub fn task_lines(&self, n: u64) -> Option<&[Line]> {
-        task_lines(&self.lines, n)
-    }
-
-    pub fn answered(&self, n: u64) -> bool {
-        self.lines
-            .iter()
-            .any(|l| l.kind == Kind::Answer && l.n == Some(n))
-    }
-
-    /// Whether a person's task waits for the answer to its ask.
-    pub fn task_waits(&self) -> bool {
-        svc::open_asks(&self.lines)
-            .iter()
-            .any(|l| l.action.as_deref() == Some(TASK))
-    }
-
-    /// The open asks for `goal` the loop raised on its own: none a person's job raised,
-    /// which carry `by`.
-    pub fn open_for(&self, goal: &str) -> Vec<u64> {
-        svc::open_asks(&self.lines)
-            .iter()
-            .filter(|l| l.goal.as_deref() == Some(goal) && l.by.is_none())
-            .filter_map(|l| l.n)
-            .collect()
-    }
-
-    /// The newest `always` or `never` the person gave for this rule and action.
-    pub fn kept(&self, rule: &str, action: &str) -> Option<&'static str> {
-        self.lines.iter().rev().find_map(|l| {
-            if l.kind != Kind::Answer {
-                return None;
-            }
-            let word = match l.text.as_deref() {
-                Some("always") => "always",
-                Some("never") => "never",
-                _ => return None,
-            };
-            let g = self.gate(l.n?)?;
-            (g.text.as_deref() == Some(rule) && g.action.as_deref() == Some(action)).then_some(word)
-        })
-    }
-
-    pub fn open_asks(&self) -> Vec<u64> {
-        svc::open_asks(&self.lines)
-            .iter()
-            .filter_map(|l| l.n)
-            .collect()
-    }
-
-    /// Per goal (`None`: the box), its newest ask and that ask's answer with its time.
-    pub fn latest_asks(&self) -> BTreeMap<Option<String>, (u64, Option<(String, i64)>)> {
-        let mut out: BTreeMap<Option<String>, (u64, Option<(String, i64)>)> = BTreeMap::new();
-        let mut answers: BTreeMap<u64, (String, i64)> = BTreeMap::new();
-        for l in &self.lines {
-            match l.kind {
-                // A person's task or a weave change parks no goal and not the box.
-                Kind::Ask if !matches!(l.action.as_deref(), Some(TASK | WEAVE)) => {
-                    if let Some(n) = l.n {
-                        out.insert(l.goal.clone(), (n, None));
-                    }
-                }
-                Kind::Answer => {
-                    if let (Some(n), Some(w)) = (l.n, &l.text) {
-                        answers
-                            .entry(n)
-                            .or_insert((w.clone(), epoch_of(&l.t).unwrap_or(0)));
-                    }
-                }
-                _ => {}
-            }
-        }
-        for (n, a) in out.values_mut() {
-            *a = answers.get(n).cloned();
-        }
-        out
-    }
-
-    /// Whether the person said yes to a box that does not fit the weave.
-    pub fn box_approved(&self) -> bool {
-        self.lines.iter().any(|l| {
-            l.kind == Kind::Answer
-                && l.goal.is_none()
-                && matches!(l.text.as_deref(), Some("yes" | "always"))
-                && l.n.is_some_and(|n| {
-                    self.ask(n)
-                        .is_some_and(|a| a.goal.is_none() && a.action.is_none())
-                        && self.gate(n).is_none()
-                })
-        })
-    }
-
-    /// The newest action outcomes for `goal`, short, for the decider. Only outcomes:
-    /// with the failed checks and the asks beside them, the decider (jev-1.13) chose
-    /// `ask` over a fitting restart after one recurrence, and repeat failures are TRIES'
-    /// job, counted in code.
-    pub fn recent(&self, goal: &str, k: usize) -> Vec<String> {
-        let mut out: Vec<String> = self
-            .lines
-            .iter()
-            .rev()
-            .filter(|l| l.kind == Kind::Action && l.goal.as_deref() == Some(goal))
-            .filter_map(|l| {
-                let hm = l.t.get(11..16).unwrap_or("");
-                let outcome = if l.ok == Some(true) {
-                    "passed"
-                } else {
-                    "failed"
-                };
-                Some(format!("{hm} {}: {outcome}", l.action.as_deref()?))
-            })
-            .take(k)
-            .collect();
-        out.reverse();
-        out
-    }
 }
 
-/// The lines from the start of the person's task that raised ask `n` (the newest start
-/// line before it) to the end. Tasks do not interleave: a queued task waits while one
-/// waits for its answer.
-pub(crate) fn task_lines(lines: &[Line], n: u64) -> Option<&[Line]> {
-    let at = lines
-        .iter()
-        .position(|l| l.kind == Kind::Ask && l.n == Some(n))?;
-    let start = lines[..at].iter().rposition(|l| {
-        l.kind == Kind::Action && l.action.as_deref() == Some(TASK) && l.ok.is_none()
-    })?;
-    Some(&lines[start..])
-}
-
-/// Appends one line to a service's journal; the one place lines are written, so the trace
-/// of the line's episode gets it too.
-pub(crate) fn append(service: &str, l: &Line) {
-    let path = paths::journal(service);
-    let write = || -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+/// Ends the file's last line when a crash cut it before its newline.
+fn end_partial(path: &Path) {
+    let cut = (|| -> std::io::Result<bool> {
+        let mut f = std::fs::File::open(path)?;
+        let len = f.metadata()?.len();
+        if len == 0 {
+            return Ok(false);
         }
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
+        f.seek(SeekFrom::Start(len - 1))?;
+        let mut last = [0u8; 1];
+        f.read_exact(&mut last)?;
+        Ok(last[0] != b'\n')
+    })();
+    let ended = match cut {
+        Ok(false) => return,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Ok(true) => std::fs::OpenOptions::new()
             .append(true)
-            .open(&path)?;
-        let mut bytes = serde_json::to_vec(l)?;
-        bytes.push(b'\n');
-        f.write_all(&bytes)
+            .open(path)
+            .and_then(|mut f| f.write_all(b"\n")),
+        Err(e) => Err(e),
     };
-    if let Err(e) = write() {
-        tracing::error!(path = %path.display(), error = %e, "cannot write a journal line");
+    if let Err(e) = ended {
+        tracing::error!(path = %path.display(), error = %e, "cannot end a cut journal line");
     }
-    super::trace::line(service, l);
 }
 
-/// A note in the journal of a service whose loop is not running; `by`, when not empty,
-/// says who caused it.
-pub(crate) fn note(service: &str, text: &str, by: &str) {
-    append(
-        service,
-        &Line {
-            t: now(),
-            kind: Kind::Note,
-            text: Some(text.to_string()),
-            by: Some(by.to_string()).filter(|b| !b.is_empty()),
-            ..Default::default()
-        },
-    );
+/// A service's journal as a reader follows it: the fold of every line read so far.
+pub(crate) struct Follower {
+    tail: Tail,
+    pub state: ServiceState,
+}
+
+impl Follower {
+    /// Nothing read yet: the journal from its first line.
+    pub fn start(service: &str) -> Follower {
+        Follower {
+            tail: Tail::start(paths::journal(service)),
+            state: ServiceState::default(),
+        }
+    }
+
+    /// The journal read to its end now, from the daemon's `state.json` on when it covers
+    /// a part of this journal.
+    pub fn open(service: &str) -> Follower {
+        let path = paths::journal(service);
+        let len = std::fs::metadata(&path).map_or(0, |m| m.len());
+        let snap = std::fs::read(paths::snapshot(service))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Snapshot>(&b).ok())
+            .filter(|s| s.version == env!("CARGO_PKG_VERSION") && s.offset <= len);
+        let mut f = match snap {
+            Some(s) => Follower {
+                tail: Tail {
+                    path,
+                    pos: s.offset,
+                    count: s.lines,
+                },
+                state: s.state,
+            },
+            None => Follower::start(service),
+        };
+        f.read();
+        f
+    }
+
+    /// The lines written since the last read, each event with its index, folded into
+    /// `state`. `true`: the journal was cut shorter, and is read again from its first
+    /// line into a fresh state.
+    pub fn read(&mut self) -> (bool, Vec<(u64, Event)>) {
+        let expected = self.tail.count;
+        let (first, lines) = self.tail.numbered();
+        let cut = first < expected;
+        if cut {
+            self.state = ServiceState::default();
+        }
+        let mut out = Vec::with_capacity(lines.len());
+        for (k, raw) in lines.iter().enumerate() {
+            let Ok(e) = serde_json::from_str::<Event>(raw) else {
+                continue;
+            };
+            // The daemon journaled what it refused: replayed, it changes nothing.
+            let _ = state::apply(&mut self.state, &e);
+            out.push((first + k as u64, e));
+        }
+        (cut, out)
+    }
+}
+
+/// A service's state now, folded from its journal.
+pub(crate) fn read(service: &str) -> ServiceState {
+    Follower::open(service).state
+}
+
+/// An open escalation as readers show it. Its rule reads as the box reads it, `$name`
+/// replaced; the escalation keeps it as written, the key of `always` and `never`.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct Ask {
+    pub n: u64,
+    pub service: String,
+    pub goal: Option<String>,
+    pub action: Option<String>,
+    pub rule: Option<String>,
+    pub title: String,
+    pub text: String,
+    pub facts: BTreeMap<String, String>,
+    pub answers: Vec<String>,
+    /// Answer word → button label.
+    pub labels: BTreeMap<String, String>,
+    /// Only the person's signed answer on a Steery card settles it.
+    pub signed: bool,
+    pub t: String,
+}
+
+/// A service's open escalations, oldest first.
+pub(crate) fn asks(service: &str, st: &ServiceState) -> Vec<Ask> {
+    let args = crate::service::spec(service)
+        .map(|s| s.args)
+        .unwrap_or_default();
+    st.open()
+        .map(|e| Ask {
+            n: e.n,
+            service: service.to_string(),
+            goal: e.goal.clone(),
+            action: e.action.clone(),
+            rule: e.rule.as_deref().map(|r| crate::weave::subst(r, &args)),
+            title: e.card.title.clone(),
+            text: e.card.body.clone(),
+            facts: e.card.facts.clone(),
+            answers: e.card.answers.clone(),
+            labels: e.card.labels.clone(),
+            signed: e.signed,
+            t: e.raised.clone(),
+        })
+        .collect()
+}
+
+/// Every open escalation on this box, by number.
+pub(crate) fn all_asks() -> Result<Vec<Ask>> {
+    let mut out = Vec::new();
+    for name in crate::service::names()? {
+        out.extend(asks(&name, &read(&name)));
+    }
+    out.sort_by_key(|a| a.n);
+    Ok(out)
+}
+
+/// Escalation `n` on this box, open or settled, with its service.
+pub(crate) fn escalation(n: u64) -> Result<Option<(String, Escalation)>> {
+    for name in crate::service::names()? {
+        if let Some(e) = read(&name).escalations.remove(&n) {
+            return Ok(Some((name, e)));
+        }
+    }
+    Ok(None)
+}
+
+/// Every event of a service's journal with its index among the file's non-blank lines;
+/// lines that do not parse are skipped, and keep their index.
+pub(crate) fn numbered(service: &str) -> Vec<(u64, Event)> {
+    Follower::start(service).read().1
+}
+
+/// Every event of a service's journal; lines that do not parse are skipped.
+pub(crate) fn events(service: &str) -> Vec<Event> {
+    numbered(service).into_iter().map(|(_, e)| e).collect()
+}
+
+/// The lines of a journal that count: every line but blank ones. A line's index among
+/// them is its `i` in the dashboard.
+pub(crate) fn numbered_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().filter(|l| !l.trim().is_empty())
+}
+
+/// Complete new lines of a growing file.
+pub(crate) struct Tail {
+    path: PathBuf,
+    pos: u64,
+    /// Lines read so far, when read from the start: the index of the next line.
+    count: u64,
+}
+
+impl Tail {
+    pub fn start(path: PathBuf) -> Tail {
+        Tail {
+            path,
+            pos: 0,
+            count: 0,
+        }
+    }
+
+    /// From the file's end now: only lines written later.
+    pub fn end(path: PathBuf) -> Tail {
+        let pos = std::fs::metadata(&path).map_or(0, |m| m.len());
+        Tail {
+            path,
+            pos,
+            count: 0,
+        }
+    }
+
+    pub fn lines(&mut self) -> Vec<String> {
+        self.numbered().1
+    }
+
+    /// The new lines and the 0-based index of the first, for a tail made by `start`.
+    pub fn numbered(&mut self) -> (u64, Vec<String>) {
+        let lines = self.read().unwrap_or_default();
+        let first = self.count;
+        self.count += lines.len() as u64;
+        (first, lines)
+    }
+
+    fn read(&mut self) -> Result<Vec<String>> {
+        let mut f = match std::fs::File::open(&self.path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e).with_context(|| format!("read {}", self.path.display())),
+        };
+        if f.metadata()?.len() < self.pos {
+            self.pos = 0;
+            self.count = 0;
+        }
+        f.seek(SeekFrom::Start(self.pos))?;
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf)?;
+        // A line still being written waits for its newline.
+        let Some(end) = buf.iter().rposition(|&b| b == b'\n') else {
+            return Ok(Vec::new());
+        };
+        self.pos += end as u64 + 1;
+        Ok(numbered_lines(&String::from_utf8_lossy(&buf[..end]))
+            .map(String::from)
+            .collect())
+    }
 }

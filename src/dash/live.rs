@@ -1,5 +1,5 @@
-//! `/api/events`: one tailer reads every service's `journal.jsonl` and `status.json`
-//! every 500 ms (as `log -f` does) and fans each change out to every client.
+//! `/api/events`: one tailer folds every service's `journal.jsonl` every 500 ms (as
+//! `log -f` reads it) and fans each new line and status change out to every client.
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -13,11 +13,10 @@ use serde_json::json;
 use tokio::sync::broadcast;
 
 use super::App;
-use super::read::Numbered;
-use crate::cli::log::Tail;
+use super::read::{self, Numbered};
+use crate::daemon::journal::Follower;
 use crate::daemon::now;
-use crate::paths;
-use crate::service::{self, Line, Status};
+use crate::service;
 
 const EVERY: Duration = Duration::from_millis(500);
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
@@ -45,8 +44,9 @@ impl Live {
 }
 
 struct Watched {
-    journal: Tail,
-    status: Option<Vec<u8>>,
+    journal: Follower,
+    /// The status as last sent.
+    status: Option<String>,
 }
 
 /// Services there at the start are read from their end; a service that appears later,
@@ -61,36 +61,35 @@ pub(crate) async fn tail(app: Arc<App>) {
         let names = service::names().unwrap_or_default();
         watched.retain(|n, _| names.contains(n));
         for name in names {
+            let Ok(spec) = service::spec(&name) else {
+                continue;
+            };
             let w = watched.entry(name.clone()).or_insert_with(|| {
-                let mut journal = Tail::start(paths::journal(&name));
-                let mut status = None;
-                if first {
-                    journal.numbered();
-                    status = std::fs::read(paths::status(&name)).ok();
-                }
+                let journal = if first {
+                    Follower::open(&name)
+                } else {
+                    Follower::start(&name)
+                };
+                let status = first
+                    .then(|| read::status(&name, &spec, &journal.state))
+                    .map(|s| serde_json::to_string(&s).unwrap_or_default());
                 Watched { journal, status }
             });
-            let (from, lines) = w.journal.numbered();
-            for (k, raw) in lines.iter().enumerate() {
-                let Ok(line) = serde_json::from_str::<Line>(raw) else {
-                    continue;
-                };
-                let i = from + k as u64;
+            let (_, events) = w.journal.read();
+            for (i, line) in &events {
                 app.live.send(
                     "journal",
-                    &json!({"service": name, "line": Numbered { i, line: &line }}),
+                    &json!({"service": name, "line": Numbered { i: *i, line }}),
                 );
             }
-            let bytes = std::fs::read(paths::status(&name)).ok();
-            if bytes != w.status {
-                if let Some(status) = bytes
-                    .as_deref()
-                    .and_then(|b| serde_json::from_slice::<Status>(b).ok())
-                {
+            let status = read::status(&name, &spec, &w.journal.state);
+            let text = serde_json::to_string(&status).unwrap_or_default();
+            if w.status.as_ref() != Some(&text) {
+                if status.is_some() {
                     app.live
                         .send("status", &json!({"service": name, "status": status}));
                 }
-                w.status = bytes;
+                w.status = Some(text);
             }
         }
         first = false;

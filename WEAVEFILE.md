@@ -554,7 +554,7 @@ The daemon sends two kinds of message:
 | warning | a goal starts failing, and the loop acts | — |
 | info | a goal holds again; an escalation is withdrawn; `run` or `tell` finished; a command was learned | — |
 
-A goal that fails again within 10 minutes of holding sends nothing new. An escalation the loop raised on its own for a goal is withdrawn when the goal holds again: the journal gets an `answer` line with `text: "withdrawn"`, and the goal is no longer parked. An escalation a person caused (a `do`, a task, an answer that runs an action) carries their `by` and waits for its answer.
+A goal that fails again within 10 minutes of holding sends nothing new. An escalation the loop raised on its own for a goal is withdrawn when the goal holds again: the journal gets a `withdraw` line, and the goal is no longer parked. An answer that comes after that settles nothing: the journal keeps it as `refused`, and `subweave answer` says why and exits 1. An escalation a person caused (a `do`, a task, an answer that runs an action) carries their `by` and waits for its answer.
 
 A channel is where messages go. Channels belong to the daemon, not to the weave: every service on the box uses them.
 
@@ -688,16 +688,22 @@ An agent changes a service's weave only through the daemon, never in place.
 {"t":"2026-10-13T10:02:11Z","goal":"running","kind":"decide","text":"restart","p":{"restart":0.98,"fix":0.01},"cost_usd":0.00003}
 ```
 
-- `kind`: `check`, `decide`, `gate`, `action`, `command`, `learn`, `ask`, `answer`, `message`, `note`.
-- A `check` line holds the facts the goal read.
+The journal is the service's state. The daemon folds each line into that state as it writes the line, and replays the journal when it starts; `ps`, `inbox`, `stats`, the dashboard and MCP read the same fold. `state.json` caches a fold with the part of the journal it covers.
+
+- `kind`: `goals`, `check`, `off`, `waiting`, `decide`, `gate`, `action`, `command`, `learn`, `ask`, `answer`, `withdraw`, `sent`, `watch`, `unwatch`, `refused`, `message`, `note`.
+- A `goals` line names the weave's goals, in graph order, when they change. An `off` line says why a goal does not apply; a `waiting` line names the goal it comes AFTER that does not hold (`on`).
+- A `check` line holds the facts the goal read. A goal fails at its second failed check in a row; after one it is `suspect`.
 - A `command` line holds `output`: stdout and stderr, secrets redacted, the last 4 KB.
-- An `ask` line holds `text`, its title, and `body`, what the channels got with it.
+- An `ask` line holds `text`, its title, `body`, what the channels got with it, `answers`, and `rule`, the rule that holds its action. The `gate` line before it names the rule and the escalation, `n`.
+- `answer` settles escalation `n` with the word in `text`; `withdraw` closes it with no answer, `text` saying why. `sent` says which channel it went to and what that channel reads the answer by; `watch`, a Steery connect the daemon reads whatever becomes of the escalation; `unwatch`, that a channel has nothing more to read for it.
+- A `refused` line keeps an event the state did not allow under `refused`, and why in `text`: an answer to an escalation answered or withdrawn already, an unsigned answer to a signed one.
+- An action's run starts with an `action` line with no `ok`, `within` the seconds its goal has to hold, and ends with one whose `ok` says whether the goal held within them. A run its loop's stop cut off ends with `stopped`, saying why, instead: it counts toward no `TRIES`.
 - `by` says who acted, on lines a person causes: `answer`, a task, `do`, `tell`, `stop`, `start`, `forget`, and the `ask` and `gate` lines of a job a person asked for. `cli:<user>` at a terminal, `dash@<ip>` from the dashboard, `mcp:<client name>` from an [agent](#agents), an agent channel's name from its command, the channel's answerer for an answer from a channel.
 - An `ask` line of a signed escalation has `signed: true`. A weave change's `ask` and `answer` lines have `action: "weave"`.
 - An answer's note follows it as a `note` line with the same `by`.
 - Every line of a person's task has `action: "task"`. It starts with `{"kind":"action","action":"task","text":"<the task>","by":"…"}`, with no `ok`, when the task starts, and ends with an `action` line whose `ok` says whether it was done and whose `text` is the coder's summary, or why it failed: `ended: the service stopped` when a stop or new settings cut it off.
 - A task that asks waits for the answer; other tasks wait behind it. `yes` runs it again with every rule passed so far and what its earlier runs did.
-- The decider reads the newest journal lines for the failing goal. `SINCE()`, `PREV()` and `TRIES` read the journal in code.
+- The decider reads the newest action outcomes for the failing goal. `SINCE()` and `TRIES` read the service's state in code.
 
 ## The daemon and the CLI
 
@@ -755,7 +761,7 @@ Files, as root on Linux. Elsewhere, `~/.config/subweave` and `~/.local/state/sub
 | `/etc/subweave/providers.json` | added providers |
 | `/etc/subweave/channels.json` | channels, mode 600 |
 | `/var/lib/subweave/inbox/` | commands from the CLI; the daemon applies and deletes them |
-| `/var/lib/subweave/services/<service>/` | `Weavefile`, `README.md`, `service.json`, `secrets.json` (mode 600), `journal.jsonl`, `learned.json`, `status.json`, `escalation.json` (the Steery conversation), `escalations/<n>.log`, `changes/<n>.json` (a weave change waiting for its signed answer) |
+| `/var/lib/subweave/services/<service>/` | `Weavefile`, `README.md`, `service.json`, `secrets.json` (mode 600), `journal.jsonl`, `state.json` (a cache of the journal's fold), `learned.json`, `escalation.json` (the Steery conversation), `escalations/<n>.log`, `changes/<n>.json` (a weave change waiting for its signed answer) |
 | `/etc/subweave/dash.json` | the dashboard's address, port and password hash, mode 600 |
 | `/var/lib/subweave/dash/vitals.jsonl` | the box's vitals, one line a minute, 30 days |
 | `/var/lib/subweave/daemon.json` | the running daemon's pid and start time |

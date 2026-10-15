@@ -7,12 +7,27 @@ pub mod provider;
 use std::fmt;
 
 use anyhow::{Result, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::weave::ModelHint;
 
 pub const DEFAULT_DECIDE: &str = "typesafe/jev-1.13";
 pub const DEFAULT_CODE: &str = "deepseek/deepseek-v4-flash-0731";
+
+/// What a conversation with a model used, as the journal keeps it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Usage {
+    /// `id[@provider]`.
+    pub model: String,
+    pub calls: u32,
+    /// Input tokens over every call; `cached` of them read from the provider's cache.
+    pub input: u64,
+    pub cached: u64,
+    pub output: u64,
+    /// Output tokens the model spent reasoning, part of `output`.
+    #[serde(default)]
+    pub reasoning: u64,
+}
 
 /// `id[@provider]`; the provider defaults to `openrouter`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

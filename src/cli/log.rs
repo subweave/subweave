@@ -1,15 +1,15 @@
 use std::fmt::Write as _;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
+use crate::daemon::journal::Tail;
+use crate::daemon::state::{Event, Kind};
 use crate::paths;
-use crate::service::{self, Kind, Line};
+use crate::service;
 
 /// Lines `log -f` shows before it follows.
 const BACKLOG: usize = 20;
@@ -92,18 +92,18 @@ pub async fn run(args: Args) -> Result<ExitCode> {
 struct Entry<'a> {
     service: &'a str,
     raw: String,
-    line: Option<Line>,
+    event: Option<Event>,
     t: Option<Timestamp>,
 }
 
 impl<'a> Entry<'a> {
     fn new(service: &'a str, raw: String) -> Entry<'a> {
-        let line: Option<Line> = serde_json::from_str(&raw).ok();
-        let t = line.as_ref().and_then(|l| l.t.parse().ok());
+        let event: Option<Event> = serde_json::from_str(&raw).ok();
+        let t = event.as_ref().and_then(|e| e.t.parse().ok());
         Entry {
             service,
             raw,
-            line,
+            event,
             t,
         }
     }
@@ -111,12 +111,8 @@ impl<'a> Entry<'a> {
     fn print(&self, tag: bool, json: bool) {
         if json {
             println!("{}", tagged_json(tag.then_some(self.service), &self.raw));
-        } else if let Some(l) = &self.line {
-            if tag {
-                println!("{}", human(Some(self.service), l));
-            } else {
-                println!("{}", human(None, l));
-            }
+        } else if let Some(e) = &self.event {
+            println!("{}", human(tag.then_some(self.service), e));
         }
     }
 }
@@ -148,28 +144,13 @@ pub(crate) fn clock(t: &str) -> String {
     }
 }
 
-pub(crate) fn kind_str(k: Kind) -> &'static str {
-    match k {
-        Kind::Check => "check",
-        Kind::Decide => "decide",
-        Kind::Gate => "gate",
-        Kind::Action => "action",
-        Kind::Command => "command",
-        Kind::Learn => "learn",
-        Kind::Ask => "ask",
-        Kind::Answer => "answer",
-        Kind::Message => "message",
-        Kind::Note => "note",
-    }
-}
-
 /// `HH:MM:SS [service] goal  kind  ok  text  facts/p/cost`, one line.
-pub(crate) fn human(service: Option<&str>, l: &Line) -> String {
-    let mut out = clock(&l.t);
+pub(crate) fn human(service: Option<&str>, e: &Event) -> String {
+    let mut out = clock(&e.t);
     if let Some(s) = service {
         let _ = write!(out, " {s:12}");
     }
-    let ok = match l.ok {
+    let ok = match e.ok() {
         Some(true) => "ok",
         Some(false) => "fail",
         None => "-",
@@ -177,23 +158,37 @@ pub(crate) fn human(service: Option<&str>, l: &Line) -> String {
     let _ = write!(
         out,
         " {:12} {:7} {:4}",
-        l.goal.as_deref().unwrap_or("-"),
-        kind_str(l.kind),
+        e.goal().unwrap_or("-"),
+        e.kind.name(),
         ok
     );
     let mut text = String::new();
-    if let Some(n) = l.n {
+    if let Some(n) = e.n() {
         let _ = write!(text, "#{n} ");
     }
-    if let Some(a) = &l.action {
+    if let Some(a) = e.action() {
         text.push_str(a);
         text.push(' ');
     }
-    if let Some(t) = &l.text {
-        text.push_str(&one_line(t, 100));
+    match &e.kind {
+        // What was refused, then why.
+        Kind::Refused { why, refused } => {
+            let _ = write!(
+                text,
+                "{} {}: {}",
+                refused.name(),
+                one_line(refused.text().unwrap_or_default(), 40),
+                one_line(why, 100)
+            );
+        }
+        _ => {
+            if let Some(t) = e.text() {
+                text.push_str(&one_line(t, 100));
+            }
+        }
     }
-    if let Some(a) = &l.answers {
-        let _ = write!(text, " [{}]", a.join(" "));
+    if let Kind::Ask { answers, .. } = &e.kind {
+        let _ = write!(text, " [{}]", answers.join(" "));
     }
     let text = text.trim();
     if !text.is_empty() {
@@ -201,7 +196,7 @@ pub(crate) fn human(service: Option<&str>, l: &Line) -> String {
         out.push_str(text);
     }
     let mut extra = Vec::new();
-    if let Some(f) = &l.facts {
+    if let Some(f) = e.kind.facts() {
         let facts: Vec<String> = f
             .iter()
             .map(|(k, v)| format!("{k}={}", one_line(v, 24)))
@@ -210,18 +205,20 @@ pub(crate) fn human(service: Option<&str>, l: &Line) -> String {
             extra.push(facts.join(" "));
         }
     }
-    if let Some(p) = &l.p {
-        let mut p: Vec<(&String, &f64)> = p.iter().collect();
-        p.sort_by(|a, b| b.1.total_cmp(a.1));
-        let p: Vec<String> = p.iter().map(|(k, v)| format!("{k} {v:.2}")).collect();
-        extra.push(p.join(" "));
+    if let Kind::Decide { p, .. } | Kind::Gate { p, .. } = &e.kind {
+        if !p.is_empty() {
+            let mut p: Vec<(&String, &f64)> = p.iter().collect();
+            p.sort_by(|a, b| b.1.total_cmp(a.1));
+            let p: Vec<String> = p.iter().map(|(k, v)| format!("{k} {v:.2}")).collect();
+            extra.push(p.join(" "));
+        }
     }
-    if let Some(c) = l.cost_usd {
+    if let Some(c) = e.cost_usd {
         extra.push(format!("${c:.5}"));
     }
-    for e in extra {
+    for x in extra {
         out.push_str("  ");
-        out.push_str(&e);
+        out.push_str(&x);
     }
     out.trim_end().to_string()
 }
@@ -240,67 +237,4 @@ fn one_line(s: &str, max: usize) -> String {
         return cut + "…";
     }
     out
-}
-
-/// Complete new lines of a growing file.
-pub(crate) struct Tail {
-    path: PathBuf,
-    pos: u64,
-    /// Lines read so far, when read from the start: the index of the next line.
-    count: u64,
-}
-
-impl Tail {
-    pub fn start(path: PathBuf) -> Tail {
-        Tail {
-            path,
-            pos: 0,
-            count: 0,
-        }
-    }
-
-    /// From the file's end now: only lines written later.
-    pub fn end(path: PathBuf) -> Tail {
-        let pos = std::fs::metadata(&path).map_or(0, |m| m.len());
-        Tail {
-            path,
-            pos,
-            count: 0,
-        }
-    }
-
-    pub fn lines(&mut self) -> Vec<String> {
-        self.numbered().1
-    }
-
-    /// The new lines and the 0-based index of the first, for a tail made by `start`.
-    pub fn numbered(&mut self) -> (u64, Vec<String>) {
-        let lines = self.read().unwrap_or_default();
-        let first = self.count;
-        self.count += lines.len() as u64;
-        (first, lines)
-    }
-
-    fn read(&mut self) -> Result<Vec<String>> {
-        let mut f = match std::fs::File::open(&self.path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e).with_context(|| format!("read {}", self.path.display())),
-        };
-        if f.metadata()?.len() < self.pos {
-            self.pos = 0;
-            self.count = 0;
-        }
-        f.seek(SeekFrom::Start(self.pos))?;
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf)?;
-        // A line still being written waits for its newline.
-        let Some(end) = buf.iter().rposition(|&b| b == b'\n') else {
-            return Ok(Vec::new());
-        };
-        self.pos += end as u64 + 1;
-        Ok(service::numbered_lines(&String::from_utf8_lossy(&buf[..end]))
-            .map(String::from)
-            .collect())
-    }
 }

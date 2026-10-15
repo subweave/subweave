@@ -119,9 +119,9 @@ function VitalsStrip() {
 
 export function StateBar({ s }: { s: ServiceSummary }) {
   const c = counts(s.status);
-  const total = c.holds + c.fails + c.waiting + c.unknown + c.off;
+  const total = c.holds + c.suspect + c.fails + c.waiting + c.unknown + c.off;
   if (!total) return <div className="statebar statebar-empty" />;
-  const parts = (["fails", "waiting", "unknown", "holds", "off"] as const).filter((k) => c[k]);
+  const parts = (["fails", "suspect", "waiting", "unknown", "holds", "off"] as const).filter((k) => c[k]);
   return (
     <div className="statebar" role="img" aria-label={parts.map((k) => `${c[k]} ${k}`).join(", ")}>
       {parts.map((k) => (
@@ -131,7 +131,7 @@ export function StateBar({ s }: { s: ServiceSummary }) {
   );
 }
 
-function ServiceCard({ s, now }: { s: ServiceSummary; now: number }) {
+function ServiceCard({ s }: { s: ServiceSummary }) {
   const c = counts(s.status);
   const { holds, total } = holdsOf(s.status);
   const weave = s.weave.split("/").pop();
@@ -154,9 +154,6 @@ function ServiceCard({ s, now }: { s: ServiceSummary; now: number }) {
         )}
         {!!s.status?.asks.length && <span className="t-amber">{s.status.asks.length} open {s.status.asks.length === 1 ? "escalation" : "escalations"}</span>}
         {s.status && <span className="t-muted num">{usd(s.status.spend_month_usd)} this month</span>}
-        {s.status && !s.stopped && now - ms(s.status.t) > 120_000 && (
-          <span className="t-amber">no status for {dur(now - ms(s.status.t))}</span>
-        )}
       </div>
     </a>
   );
@@ -258,7 +255,7 @@ export function BoxView() {
       {services?.length === 0 && <p className="empty">No services on this box yet. Start one with <code>subweave run</code>.</p>}
       <div className="cards">
         {services?.map((s) => (
-          <ServiceCard key={s.name} s={s} now={now} />
+          <ServiceCard key={s.name} s={s} />
         ))}
       </div>
       {services && services.length > 0 && <Recent services={services} now={now} />}

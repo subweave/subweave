@@ -87,8 +87,8 @@ impl Tally {
     }
 
     /// The journal's record of this conversation with `model`.
-    pub fn usage(&self, model: String) -> crate::service::Usage {
-        crate::service::Usage {
+    pub fn usage(&self, model: String) -> super::Usage {
+        super::Usage {
             model,
             calls: self.calls,
             input: self.input,

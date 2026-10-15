@@ -7,8 +7,8 @@ use jiff::Timestamp;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use super::log::human;
+use crate::daemon::state::{Event, Kind};
 use crate::remote;
-use crate::service::{Kind, Line};
 
 /// Follows every box in `boxes.json` and shows its asks and warnings as notifications.
 pub async fn run() -> Result<ExitCode> {
@@ -56,29 +56,28 @@ async fn follow_once(host: &str, since: Timestamp) -> Result<()> {
             continue;
         };
         let service = value["service"].as_str().unwrap_or("-").to_string();
-        let Ok(line) = serde_json::from_value::<Line>(value) else {
+        let Ok(e) = serde_json::from_value::<Event>(value) else {
             continue;
         };
-        if line.t.parse::<Timestamp>().is_ok_and(|t| t < since) {
+        if e.t.parse::<Timestamp>().is_ok_and(|t| t < since) {
             continue;
         }
-        let text = line.text.as_deref().unwrap_or("").trim();
-        let note = match line.kind {
-            Kind::Ask => {
-                let n = line.n.unwrap_or_default();
-                let words = line.answers.as_deref().unwrap_or_default().join("|");
+        let text = e.text().unwrap_or("").trim();
+        let note = match &e.kind {
+            Kind::Ask { n, answers, .. } => {
+                let words = answers.join("|");
                 Some((
                     format!("ask #{n}: {service} on {host}"),
                     format!("{text} — subweave answer {n} <{words}>"),
                 ))
             }
-            Kind::Message => text
+            Kind::Message { .. } => text
                 .strip_prefix("warning: ")
                 .map(|title| (format!("warning: {service} on {host}"), title.to_string())),
             _ => None,
         };
         if let Some((title, body)) = note {
-            println!("{host}  {}", human(Some(&service), &line));
+            println!("{host}  {}", human(Some(&service), &e));
             notify(&title, &body).await;
         }
     }

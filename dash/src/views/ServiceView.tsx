@@ -3,7 +3,6 @@ import { api, type Line, type ServiceDetail, type Status, type Weave } from "../
 import { useAppData } from "../App";
 import { TaskComposer } from "../components/act";
 import { ErrorLine, Glyph, Skeleton } from "../components/ui";
-import { dur, ms, useNow } from "../format";
 import { useJournal, useLive } from "../live";
 import { counts } from "../model";
 import { useResource } from "../resource";
@@ -35,10 +34,9 @@ export interface ServiceProps {
 
 export function ServiceView({ service, tab }: { service: string; tab: Tab }) {
   const live = useLive();
-  const { services } = useAppData();
+  const { services, box } = useAppData();
   const [bump, setBump] = useState(0);
   const detail = useResource(`svc:${service}`, () => api.service(service), `${live.epoch}:${bump}`);
-  const now = useNow(10_000);
 
   // Asks, answers, learned commands and settings live in the detail: load it again when
   // a line says one changed.
@@ -46,7 +44,7 @@ export function ServiceView({ service, tab }: { service: string; tab: Tab }) {
   useJournal(
     service,
     useCallback((_s: string, l: Line) => {
-      if (!["ask", "answer", "learn", "note", "action"].includes(l.kind)) return;
+      if (!["ask", "answer", "withdraw", "learn", "note", "action"].includes(l.kind)) return;
       window.clearTimeout(timer.current);
       timer.current = window.setTimeout(() => setBump((b) => b + 1), 400);
     }, []),
@@ -68,7 +66,7 @@ export function ServiceView({ service, tab }: { service: string; tab: Tab }) {
 
   const c = counts(status);
   const stopped = status?.stopped ?? detail.data?.spec.stopped ?? false;
-  const staleFor = status && !stopped ? now - ms(status.t) : 0;
+  const down = !stopped && box?.daemon.active === false;
   const d = detail.data;
   // A Weavefile that does not parse still has the goals its status names.
   const weave: Weave | null = d
@@ -101,7 +99,7 @@ export function ServiceView({ service, tab }: { service: string; tab: Tab }) {
           )}
           {status && (
             <p className="svc-counts num">
-              {(["fails", "waiting", "unknown", "holds", "off"] as const)
+              {(["fails", "suspect", "waiting", "unknown", "holds", "off"] as const)
                 .filter((k) => c[k])
                 .map((k) => (
                   <span key={k}>
@@ -118,13 +116,13 @@ export function ServiceView({ service, tab }: { service: string; tab: Tab }) {
         </div>
         <HeadActions service={service} stopped={stopped} />
       </header>
-      {staleFor > 120_000 && (
+      {down && (
         <p className="stale" role="status">
-          The daemon has not written status for {dur(staleFor)}. Is <code>subweave daemon</code> running?
+          The daemon is not running: this is what it last journaled. Start it with <code>subweave daemon --install</code>.
         </p>
       )}
-      {d && !d.weave && <p className="stale">The Weavefile on this box does not parse. Goals show from the daemon's status only.</p>}
-      {!status && d && !stopped && <p className="stale">No status yet. The daemon writes it after its first check.</p>}
+      {d && !d.weave && <p className="stale">The Weavefile on this box does not parse. Goals show from the daemon's journal only.</p>}
+      {!status && d && !stopped && <p className="stale">No status yet. It shows once the daemon starts this service's loop.</p>}
       <nav className="tabs" aria-label={`${service} sections`}>
         {TABS.map((t) => (
           <a

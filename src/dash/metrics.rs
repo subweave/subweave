@@ -1,4 +1,4 @@
-//! `/metrics`: Prometheus text format 0.0.4, a view of each journal, `status.json` and the
+//! `/metrics`: Prometheus text format 0.0.4, a view of each journal and its fold, and the
 //! box's vitals. A scrape reads each journal on from where the last one stopped.
 
 use std::collections::BTreeMap;
@@ -12,10 +12,10 @@ use axum::response::{IntoResponse, Response};
 
 use super::vitals::Sample;
 use super::{ApiError, App, auth};
-use crate::cli::log::Tail;
+use crate::daemon::journal::Follower;
+use crate::daemon::state::{Act, Event, JobKind, Kind};
 use crate::daemon::{epoch, epoch_of};
-use crate::paths;
-use crate::service::{self, GoalState, JobKind, Kind, Line, Status, TASK, WITHDRAWN};
+use crate::service::{self, TASK};
 
 const ACTION_BUCKETS: [f64; 9] = [1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0];
 const RECOVERY_BUCKETS: [f64; 10] = [
@@ -30,9 +30,8 @@ pub(crate) struct Metrics {
 }
 
 struct Journal {
-    tail: Tail,
-    /// The index of the next line.
-    next: u64,
+    /// The journal read so far, folded.
+    follower: Follower,
     counts: Counts,
 }
 
@@ -87,48 +86,48 @@ struct Counts {
 
 impl Counts {
     /// `decider`: the service's decider, whose spend a line without `usage` carries.
-    fn add(&mut self, l: &Line, decider: &str) {
+    fn add(&mut self, l: &Event, decider: &str) {
         let t = epoch_of(&l.t);
+        let ended = match &l.kind {
+            Kind::Action(Act::Ended {
+                goal, action, ok, ..
+            }) if action != TASK => Some((goal, action, *ok)),
+            _ => None,
+        };
         if let Some(ms) = l.ms {
             let secs = ms as f64 / 1000.0;
-            match (l.kind, l.action.as_deref()) {
-                (Kind::Action, Some(a)) if a != TASK => self
+            match ended {
+                Some((_, a, _)) => self
                     .action_seconds
                     .entry(a.to_string())
                     .or_default()
                     .observe(&ACTION_BUCKETS, secs),
-                _ => {
+                None => {
                     let s = self.steps.entry(step(l)).or_default();
                     s.0 += secs;
                     s.1 += 1;
                 }
             }
         }
-        match l.kind {
-            Kind::Check => self.check(l, t),
-            Kind::Action => {
-                if let (Some(a), Some(ok)) = (&l.action, l.ok) {
-                    if a != TASK {
-                        let goal = l.goal.clone().unwrap_or_default();
-                        *self.actions.entry((a.clone(), goal, ok)).or_default() += 1;
-                    }
-                }
-            }
-            Kind::Ask => self.asks += 1,
-            Kind::Answer => {
-                let by = if l.text.as_deref() == Some(WITHDRAWN) {
-                    "withdrawn"
-                } else {
-                    "person"
-                };
-                *self.answers.entry(by).or_default() += 1;
-            }
-            Kind::Gate if l.ok == Some(true) => *self.answers.entry("always").or_default() += 1,
+        if let Some((goal, a, ok)) = ended {
+            let goal = goal.clone().unwrap_or_default();
+            *self.actions.entry((a.clone(), goal, ok)).or_default() += 1;
+        }
+        match &l.kind {
+            Kind::Check { .. } => self.check(l, t),
+            Kind::Ask { .. } => self.asks += 1,
+            Kind::Answer { .. } => *self.answers.entry("person").or_default() += 1,
+            Kind::Withdraw { .. } => *self.answers.entry("withdrawn").or_default() += 1,
+            Kind::Gate { ok: true, .. } => *self.answers.entry("always").or_default() += 1,
             _ => {}
         }
         match &l.usage {
             Some(u) => {
-                let role = if l.kind == Kind::Decide { "decider" } else { "coder" };
+                let role = if matches!(l.kind, Kind::Decide { .. }) {
+                    "decider"
+                } else {
+                    "coder"
+                };
                 if let Some(c) = l.cost_usd {
                     *self.cost.entry((u.model.clone(), role)).or_default() += c;
                 }
@@ -151,30 +150,31 @@ impl Counts {
         self.episode(l);
     }
 
-    fn check(&mut self, l: &Line, t: Option<i64>) {
-        if let Some(g) = &l.goal {
-            let ok = match l.ok {
-                Some(true) => "true",
-                Some(false) => "false",
-                None => "unknown",
-            };
-            *self.checks.entry((g.clone(), ok)).or_default() += 1;
-            match (l.ok, t) {
-                (Some(false), Some(t)) => {
-                    self.failing_since.entry(g.clone()).or_insert(t);
-                }
-                (Some(true), Some(t)) => {
-                    if let Some(from) = self.failing_since.remove(g) {
-                        self.recovery
-                            .entry(g.clone())
-                            .or_default()
-                            .observe(&RECOVERY_BUCKETS, (t - from) as f64);
-                    }
-                }
-                _ => {}
+    fn check(&mut self, l: &Event, t: Option<i64>) {
+        let Kind::Check { goal: g, ok, facts } = &l.kind else {
+            return;
+        };
+        let shown = match ok {
+            Some(true) => "true",
+            Some(false) => "false",
+            None => "unknown",
+        };
+        *self.checks.entry((g.clone(), shown)).or_default() += 1;
+        match (ok, t) {
+            (Some(false), Some(t)) => {
+                self.failing_since.entry(g.clone()).or_insert(t);
             }
+            (Some(true), Some(t)) => {
+                if let Some(from) = self.failing_since.remove(g) {
+                    self.recovery
+                        .entry(g.clone())
+                        .or_default()
+                        .observe(&RECOVERY_BUCKETS, (t - from) as f64);
+                }
+            }
+            _ => {}
         }
-        for (name, v) in l.facts.iter().flatten() {
+        for (name, v) in facts {
             match v.trim().parse::<f64>() {
                 Ok(x) if x.is_finite() => {
                     self.facts.insert(name.clone(), x);
@@ -187,7 +187,7 @@ impl Counts {
     }
 
     /// An episode counts once, on the line that ends it.
-    fn episode(&mut self, l: &Line) {
+    fn episode(&mut self, l: &Event) {
         let Some(ep) = &l.ep else { return };
         if let Some(job) = l.job {
             self.open.insert(ep.clone(), job);
@@ -204,30 +204,28 @@ impl Counts {
     }
 }
 
-/// The step a timed line ends.
-fn step(l: &Line) -> &'static str {
-    match l.kind {
-        Kind::Check => "check",
-        Kind::Decide => "decide",
-        Kind::Command => "command",
-        Kind::Learn => "learn",
-        Kind::Action => "task",
-        Kind::Note if l.usage.is_some() => "coder",
+/// The step a timed event ends.
+fn step(l: &Event) -> &'static str {
+    match &l.kind {
+        Kind::Check { .. } => "check",
+        Kind::Decide { .. } => "decide",
+        Kind::Command { .. } => "command",
+        Kind::Learn { .. } => "learn",
+        Kind::Action(_) => "task",
+        Kind::Note { .. } if l.usage.is_some() => "coder",
         _ => "other",
     }
 }
 
-/// How the line ends its episode, if it does: a job's action or task end line, a repair's
+/// How the event ends its episode, if it does: a job's action or task end, a repair's
 /// ask or `wait`, a learn's result. A task's ask leaves it open for the answer.
-fn outcome(job: JobKind, l: &Line) -> Option<&'static str> {
-    match (job, l.kind) {
-        (_, Kind::Action) => l.ok.map(|ok| if ok { "ok" } else { "failed" }),
-        (JobKind::Repair | JobKind::Learn, Kind::Ask) => Some("asked"),
-        (JobKind::Repair, Kind::Decide) if l.text.as_deref() == Some("wait") => Some("wait"),
-        (JobKind::Learn, Kind::Learn) if l.ok != Some(false) => Some("learned"),
-        (JobKind::Learn, Kind::Note)
-            if l.text.as_deref().is_some_and(|t| t.starts_with("cannot learn ")) =>
-        {
+fn outcome(job: JobKind, l: &Event) -> Option<&'static str> {
+    match (job, &l.kind) {
+        (_, Kind::Action(Act::Ended { ok, .. })) => Some(if *ok { "ok" } else { "failed" }),
+        (JobKind::Repair | JobKind::Learn, Kind::Ask { .. }) => Some("asked"),
+        (JobKind::Repair, Kind::Decide { text, .. }) if text == "wait" => Some("wait"),
+        (JobKind::Learn, Kind::Learn { ok: true, .. }) => Some("learned"),
+        (JobKind::Learn, Kind::Note { text, .. }) if text.starts_with("cannot learn ") => {
             Some("failed")
         }
         _ => None,
@@ -297,58 +295,42 @@ impl Metrics {
         let names = service::names().unwrap_or_default();
         let mut journals = self.journals.lock().unwrap_or_else(|e| e.into_inner());
         journals.retain(|n, _| names.contains(n));
-        let mut statuses: BTreeMap<String, Status> = BTreeMap::new();
         for name in &names {
             let j = journals.entry(name.clone()).or_insert_with(|| Journal {
-                tail: Tail::start(paths::journal(name)),
-                next: 0,
+                follower: Follower::start(name),
                 counts: Counts::default(),
             });
-            let (from, lines) = j.tail.numbered();
-            if from < j.next {
+            let (cut, events) = j.follower.read();
+            if cut {
                 // The file was cut: its counts start over.
                 j.counts = Counts::default();
             }
-            j.next = from + lines.len() as u64;
             let decider = service::spec(name).map(|s| s.decide).unwrap_or_default();
-            for raw in &lines {
-                if let Ok(l) = serde_json::from_str::<Line>(raw) {
-                    j.counts.add(&l, &decider);
-                }
-            }
-            if let Ok(Some(s)) = service::status(name) {
-                statuses.insert(name.clone(), s);
+            for (_, e) in &events {
+                j.counts.add(e, &decider);
             }
         }
         let now = epoch();
         let mut o = Out::default();
 
         o.family("subweave_goal_holds", "gauge", "1 when the goal holds, else 0.");
-        for (s, st) in &statuses {
-            for g in &st.goals {
-                let v = u8::from(g.state == GoalState::Holds);
-                let labels = [("service", s.as_str()), ("goal", g.name.as_str())];
-                o.put("subweave_goal_holds", &labels, v);
+        for (s, j) in journals.iter() {
+            for (goal, g) in &j.follower.state.goals {
+                let labels = [("service", s.as_str()), ("goal", goal.as_str())];
+                o.put("subweave_goal_holds", &labels, u8::from(g.holds()));
             }
         }
         o.family(
             "subweave_goal_state_seconds",
             "gauge",
-            "Seconds the goal has been in its current state.",
+            "Seconds the goal has been holding, suspect or failing.",
         );
-        for (s, st) in &statuses {
-            for g in &st.goals {
-                let Some(since) = g.since.as_deref().and_then(epoch_of) else {
+        for (s, j) in journals.iter() {
+            for (goal, g) in &j.follower.state.goals {
+                let Some(since) = g.since().and_then(epoch_of) else {
                     continue;
                 };
-                let state = match g.state {
-                    GoalState::Holds => "holds",
-                    GoalState::Fails => "fails",
-                    GoalState::Unknown => "unknown",
-                    GoalState::Off => "off",
-                    GoalState::Waiting => "waiting",
-                };
-                let labels = [("service", s.as_str()), ("goal", g.name.as_str()), ("state", state)];
+                let labels = [("service", s.as_str()), ("goal", goal.as_str()), ("state", g.name())];
                 o.put("subweave_goal_state_seconds", &labels, (now - since).max(0));
             }
         }
@@ -441,8 +423,9 @@ impl Metrics {
             }
         }
         o.family("subweave_asks_open", "gauge", "Asks waiting for an answer.");
-        for (s, st) in &statuses {
-            o.put("subweave_asks_open", &[("service", s.as_str())], st.asks.len());
+        for (s, j) in journals.iter() {
+            let open = j.follower.state.open().count();
+            o.put("subweave_asks_open", &[("service", s.as_str())], open);
         }
         o.family("subweave_asks_total", "counter", "Asks raised.");
         for (s, j) in journals.iter() {

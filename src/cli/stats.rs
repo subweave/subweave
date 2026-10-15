@@ -4,7 +4,9 @@ use std::process::ExitCode;
 use anyhow::Result;
 use jiff::Timestamp;
 
-use crate::service::{self, JobKind, Kind, Line, TASK, WITHDRAWN};
+use crate::daemon::journal::Follower;
+use crate::daemon::state::{Act, EscalationState, Event, JobKind, Kind, ServiceState};
+use crate::service::TASK;
 
 const HOURS: usize = 24;
 const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -29,15 +31,19 @@ pub(crate) struct Series {
     pub means: Vec<Option<f64>>,
 }
 
-/// The numeric fact values of `check` lines in the `steps` steps of `step` seconds that
+/// The numeric fact values of `check` events in the `steps` steps of `step` seconds that
 /// end at `now`, per fact. Step `k` starts at `now - (steps - k) * step`.
-pub(crate) fn series(lines: &[Line], now: i64, step: i64, steps: usize) -> BTreeMap<String, Series> {
+pub(crate) fn series(
+    events: &[Event],
+    now: i64,
+    step: i64,
+    steps: usize,
+) -> BTreeMap<String, Series> {
     let mut sums: BTreeMap<String, (Series, Vec<f64>, Vec<u32>)> = BTreeMap::new();
-    for l in lines {
-        if l.kind != Kind::Check {
+    for l in events {
+        let Kind::Check { facts: values, .. } = &l.kind else {
             continue;
-        }
-        let Some(values) = &l.facts else { continue };
+        };
         let Ok(t) = l.t.parse::<Timestamp>() else {
             continue;
         };
@@ -85,14 +91,15 @@ pub(crate) fn series(lines: &[Line], now: i64, step: i64, steps: usize) -> BTree
 pub fn run(args: Args) -> Result<ExitCode> {
     super::known(&args.service)?;
     let now = Timestamp::now().as_second();
-    let lines = service::journal(&args.service)?;
+    let mut journal = Follower::start(&args.service);
+    let lines: Vec<Event> = journal.read().1.into_iter().map(|(_, e)| e).collect();
     print!("{}", facts_table(&lines, now));
     println!();
-    print!("{}", ladder_table(&lines, now));
+    print!("{}", ladder_table(&lines, &journal.state, now));
     Ok(ExitCode::SUCCESS)
 }
 
-fn facts_table(lines: &[Line], now: i64) -> String {
+fn facts_table(lines: &[Event], now: i64) -> String {
     let facts = series(lines, now, 3600, HOURS);
     if facts.is_empty() {
         return "no numeric facts in the last 24 h\n".into();
@@ -137,14 +144,10 @@ struct Week {
     changes: u32,
 }
 
-/// Who settled an escalation, from its answer line: `withdrawn` when its goal held
-/// again, else the part of `by` before `:` or `@` (`cli`, `mcp`, `steery`, `telegram`,
-/// `dash`), or an agent channel's name.
-fn settler(l: &Line) -> String {
-    if l.text.as_deref() == Some(WITHDRAWN) {
-        return WITHDRAWN.into();
-    }
-    let by = l.by.as_deref().unwrap_or("unknown");
+/// Who settled an escalation by answering it: the part of the answer's `by` before `:`
+/// or `@` (`cli`, `mcp`, `steery`, `telegram`, `dash`), or an agent channel's name.
+fn settler(by: Option<&str>) -> String {
+    let by = by.unwrap_or("unknown");
     match by.find([':', '@']) {
         Some(i) => by[..i].to_owned(),
         None => by.to_owned(),
@@ -162,8 +165,9 @@ struct Rungs {
 /// The last `WEEKS` weeks from the journal, oldest first. A repair counts in the week
 /// its action passed, under the highest rung its episode used: the coder (a coder
 /// conversation), the decider (a `decide` line), else code (learned steps or `RUN`).
-/// A repair that escalated counts as an escalation, in the week of its answer.
-fn ladder(lines: &[Line], now: i64) -> Vec<Week> {
+/// A repair that escalated counts as an escalation, in the week it settled: by whoever
+/// answered it, or `withdrawn` when nobody needed to answer any more.
+fn ladder(lines: &[Event], st: &ServiceState, now: i64) -> Vec<Week> {
     let mut weeks: Vec<Week> = (0..WEEKS).map(|_| Week::default()).collect();
     let week = |t: &str| -> Option<usize> {
         let age = now - t.parse::<Timestamp>().ok()?.as_second();
@@ -182,18 +186,20 @@ fn ladder(lines: &[Line], now: i64) -> Vec<Week> {
             continue;
         };
         let r = rungs.entry(ep).or_default();
-        match l.kind {
-            Kind::Ask => r.escalated = true,
-            Kind::Decide => r.decider = true,
-            Kind::Note if l.usage.is_some() && l.n.is_none() => r.coder = true,
+        match &l.kind {
+            Kind::Ask { .. } => r.escalated = true,
+            Kind::Decide { .. } => r.decider = true,
+            Kind::Note { n: None, .. } if l.usage.is_some() => r.coder = true,
             _ => {}
         }
     }
     for l in lines {
         let Some(k) = week(&l.t) else { continue };
         let w = &mut weeks[k];
-        match l.kind {
-            Kind::Action if l.ok == Some(true) && l.action.as_deref() != Some(TASK) => {
+        match &l.kind {
+            Kind::Action(Act::Ended {
+                action, ok: true, ..
+            }) if action != TASK => {
                 let Some(r) = l.ep.as_deref().and_then(|ep| rungs.get(ep)) else {
                     continue;
                 };
@@ -208,19 +214,26 @@ fn ladder(lines: &[Line], now: i64) -> Vec<Week> {
                     w.code += 1;
                 }
             }
-            Kind::Answer if l.n.is_some() => {
-                *w.escalated.entry(settler(l)).or_default() += 1;
-            }
-            Kind::Note if l.text.as_deref().is_some_and(|t| t.starts_with("weave changed by ")) => {
+            Kind::Note { text, .. } if text.starts_with("weave changed by ") => {
                 w.changes += 1;
             }
             _ => {}
         }
     }
+    for e in st.escalations.values() {
+        let (t, who) = match &e.state {
+            EscalationState::Answered { by, t, .. } => (t, settler(by.as_deref())),
+            EscalationState::Withdrawn { t, .. } => (t, "withdrawn".into()),
+            EscalationState::Open { .. } => continue,
+        };
+        if let Some(k) = week(t) {
+            *weeks[k].escalated.entry(who).or_default() += 1;
+        }
+    }
     weeks
 }
 
-fn ladder_table(lines: &[Line], now: i64) -> String {
+fn ladder_table(lines: &[Event], st: &ServiceState, now: i64) -> String {
     let head = [
         "WEEK FROM",
         "CODE",
@@ -231,7 +244,7 @@ fn ladder_table(lines: &[Line], now: i64) -> String {
         "SETTLED BY",
     ]
     .map(String::from);
-    let rows: Vec<[String; 7]> = ladder(lines, now)
+    let rows: Vec<[String; 7]> = ladder(lines, st, now)
         .into_iter()
         .enumerate()
         .map(|(k, w)| {

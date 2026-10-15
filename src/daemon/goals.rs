@@ -44,7 +44,8 @@ impl Env for Scope<'_> {
                 return Some(at.elapsed());
             }
         }
-        self.ctx.journal().since_pass(action)
+        let t = super::epoch_of(self.ctx.journal().state().passed(action)?)?;
+        Some(Duration::from_secs((super::epoch() - t).max(0) as u64))
     }
 
     fn prev(&self, fact: &str) -> Option<Value> {
