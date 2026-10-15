@@ -238,7 +238,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                     ),
                     text: format!(
                         "{}\nAnswer yes to try again, no to leave it for an hour.",
-                        goals::failing(ctx, goal)
+                        goals::failing(ctx, goal, &shown)
                     ),
                     facts: shown,
                     answers: vec!["yes".into(), "no".into()],
@@ -261,7 +261,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                         title: format!("{} fails and {why}", goal.name),
                         text: format!(
                             "{}\nFix it, then answer yes to check again.",
-                            goals::failing(ctx, goal)
+                            goals::failing(ctx, goal, &shown)
                         ),
                         facts: shown,
                         answers: vec!["yes".into(), "no".into()],
@@ -285,7 +285,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                                 title: format!("{} fails: which action?", goal.name),
                                 text: format!(
                                     "{}\n{why}\nAnswer an action's name to run it, or no.",
-                                    goals::failing(ctx, goal)
+                                    goals::failing(ctx, goal, &shown)
                                 ),
                                 facts: shown,
                                 answers,
@@ -412,14 +412,31 @@ fn ask_gate(ctx: &Ctx, goal: &Goal, action: &str, rule: &str, shown: &BTreeMap<S
         goal: Some(goal.name.clone()),
         action: Some(action.to_string()),
         rule: Some(rule.to_string()),
-        title: format!("run {action} for {}?", goal.name),
+        title: format!("{} fails: run {action}?", goal.name),
         text: format!(
-            "{}\n{rule} holds. Answer yes to run {action} now, always or never to keep the answer.",
-            goals::failing(ctx, goal)
+            "{}\nSubweave wants to run `{action}`{}. The weave says to ask you first: {rule}.\n\
+             Answer yes to run it now; always or never to keep that answer.",
+            goals::failing(ctx, goal, shown),
+            plan(ctx, action)
         ),
         facts: shown.clone(),
         answers: vec!["yes".into(), "no".into(), "always".into(), "never".into()],
     });
+}
+
+/// What an action does, for a person: its DO steps, else nothing (RUN lines are code).
+fn plan(ctx: &Ctx, action: &str) -> String {
+    let dos: Vec<String> = ctx
+        .w
+        .action(action)
+        .into_iter()
+        .flat_map(|a| &a.steps)
+        .filter_map(|s| match s {
+            Step::Do { task, .. } => Some(weave::subst(task, &ctx.spec.args)),
+            _ => None,
+        })
+        .collect();
+    if dos.is_empty() { String::new() } else { format!(": {}", dos.join("; ")) }
 }
 
 /// One decider request: a choice over the candidates' WHENs, `wait` and `ask`, and

@@ -699,7 +699,7 @@ impl Loop {
         let what = ctx
             .w
             .goal(goal)
-            .map(|g| goals::failing(&ctx, g))
+            .map(|g| goals::failing(&ctx, g, &facts))
             .unwrap_or_default();
         ctx.message(
             channel::Kind::Warning,

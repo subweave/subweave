@@ -78,10 +78,22 @@ fn meaning(ctx: &Ctx, g: &Goal) -> String {
     }
 }
 
-/// A failing goal, for a person: its name and what it keeps true.
-pub(crate) fn failing(ctx: &Ctx, g: &Goal) -> String {
+/// A failing goal, for a person: its name, what it keeps true, and the values `now` of the
+/// facts it reads, so the message says what is wrong without its fact list.
+pub(crate) fn failing(ctx: &Ctx, g: &Goal, now: &BTreeMap<String, String>) -> String {
     let m = meaning(ctx, g);
-    format!("Goal `{}` no longer holds. It keeps true: {}.", g.name, m.trim_end_matches('.'))
+    let mut s = format!("Goal `{}` no longer holds. It keeps true: {}.", g.name, m.trim_end_matches('.'));
+    let read: Vec<String> = needs(&ctx.w, g)
+        .iter()
+        .filter_map(|f| {
+            let v = now.get(f)?.trim();
+            Some(format!("{f} = {}", super::cap(if v.is_empty() { "(nothing)" } else { v }, 300)))
+        })
+        .collect();
+    if !read.is_empty() {
+        s.push_str(&format!("\nNow: {}.", read.join("; ")));
+    }
+    s
 }
 
 /// One decider request for every quoted goal given: goal name → holds, or `None` with
