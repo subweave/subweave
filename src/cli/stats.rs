@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use jiff::Timestamp;
 
-use crate::service::{self, JobKind, Kind, Line, TASK};
+use crate::service::{self, JobKind, Kind, Line, TASK, WITHDRAWN};
 
 const HOURS: usize = 24;
 const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -137,17 +137,26 @@ struct Week {
     changes: u32,
 }
 
-/// Who settled an escalation, from its answer's `by`: the part before `:` or `@`
-/// (`cli`, `mcp`, `steery`, `telegram`, `dash`), an agent channel's name, or
-/// `withdrawn` when its goal held again.
-fn settler(by: &str) -> String {
-    if by.starts_with("daemon:") {
-        return "withdrawn".into();
+/// Who settled an escalation, from its answer line: `withdrawn` when its goal held
+/// again, else the part of `by` before `:` or `@` (`cli`, `mcp`, `steery`, `telegram`,
+/// `dash`), or an agent channel's name.
+fn settler(l: &Line) -> String {
+    if l.text.as_deref() == Some(WITHDRAWN) {
+        return WITHDRAWN.into();
     }
+    let by = l.by.as_deref().unwrap_or("unknown");
     match by.find([':', '@']) {
         Some(i) => by[..i].to_owned(),
         None => by.to_owned(),
     }
+}
+
+/// What a repair episode went through.
+#[derive(Default)]
+struct Rungs {
+    decider: bool,
+    coder: bool,
+    escalated: bool,
 }
 
 /// The last `WEEKS` weeks from the journal, oldest first. A repair counts in the week
@@ -167,31 +176,40 @@ fn ladder(lines: &[Line], now: i64) -> Vec<Week> {
         .filter(|l| l.job == Some(JobKind::Repair))
         .filter_map(|l| l.ep.as_deref())
         .collect();
-    let in_ep = |ep: &str, f: &dyn Fn(&Line) -> bool| {
-        lines.iter().any(|l| l.ep.as_deref() == Some(ep) && f(l))
-    };
+    let mut rungs: BTreeMap<&str, Rungs> = BTreeMap::new();
+    for l in lines {
+        let Some(ep) = l.ep.as_deref().filter(|ep| repairs.contains(ep)) else {
+            continue;
+        };
+        let r = rungs.entry(ep).or_default();
+        match l.kind {
+            Kind::Ask => r.escalated = true,
+            Kind::Decide => r.decider = true,
+            Kind::Note if l.usage.is_some() && l.n.is_none() => r.coder = true,
+            _ => {}
+        }
+    }
     for l in lines {
         let Some(k) = week(&l.t) else { continue };
         let w = &mut weeks[k];
         match l.kind {
             Kind::Action if l.ok == Some(true) && l.action.as_deref() != Some(TASK) => {
-                let Some(ep) = l.ep.as_deref().filter(|ep| repairs.contains(ep)) else {
+                let Some(r) = l.ep.as_deref().and_then(|ep| rungs.get(ep)) else {
                     continue;
                 };
-                if in_ep(ep, &|x| x.kind == Kind::Ask) {
+                if r.escalated {
                     continue;
                 }
-                if in_ep(ep, &|x| x.kind == Kind::Note && x.usage.is_some() && x.n.is_none()) {
+                if r.coder {
                     w.coder += 1;
-                } else if in_ep(ep, &|x| x.kind == Kind::Decide) {
+                } else if r.decider {
                     w.decider += 1;
                 } else {
                     w.code += 1;
                 }
             }
             Kind::Answer if l.n.is_some() => {
-                let who = settler(l.by.as_deref().unwrap_or("unknown"));
-                *w.escalated.entry(who).or_default() += 1;
+                *w.escalated.entry(settler(l)).or_default() += 1;
             }
             Kind::Note if l.text.as_deref().is_some_and(|t| t.starts_with("weave changed by ")) => {
                 w.changes += 1;
