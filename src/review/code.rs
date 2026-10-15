@@ -31,6 +31,15 @@ pub const CHECKS: &[&str] = &[
     "box-weave",
     "box-after",
     "box-vacuum",
+    "has-drill",
+    "break-keeps-data",
+];
+
+/// Commands and statements that delete stored data: a BREAK must never name one. A drill
+/// breaks a service so the loop repairs it; deleted data is not repaired.
+const DELETES: &[&str] = &[
+    "rm", "rmdir", "unlink", "shred", "truncate", "dd", "wipefs", "-delete", "drop", "delete",
+    "flushall", "flushdb", "prune",
 ];
 
 /// The library weave every box runs once, for what all its services share.
@@ -137,6 +146,12 @@ pub fn check(id: &str, w: &Weave, el: &Element) -> bool {
                 || w.goals.iter().flat_map(|g| &g.after).any(|a| a.service.as_deref() == Some(BOX))
         }
         "box-vacuum" => w.name == BOX || !el.str("script").contains("journalctl --vacuum"),
+        "has-drill" => w.goals.is_empty() || !w.drills.is_empty(),
+        "break-keeps-data" => !el
+            .str("break")
+            .split(|c: char| c.is_whitespace() || ";|&()`'\"".contains(c))
+            .map(str::to_ascii_lowercase)
+            .any(|t| DELETES.contains(&t.as_str()) || t.starts_with("mkfs")),
         _ => unreachable!("rules() checked every code id against CHECKS"),
     }
 }

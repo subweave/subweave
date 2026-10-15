@@ -8,7 +8,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use crate::model::coder::{Coder, Msg, Reply, Tool};
-use crate::weave::{self, Action, Condition, Goal, Rule, Step, show_duration};
+use crate::weave::{self, Action, Condition, Drill, Goal, Rule, Step, show_duration};
 
 use super::observe::Snapshot;
 use super::service::{Ctx, no_park};
@@ -483,5 +483,64 @@ pub(crate) fn weave_change(
         title: format!("Change the rules of {}?", ctx.name),
         lines,
         buttons: buttons(&[("yes", "Apply it"), ("no", "Keep the rules")]),
+    }
+}
+
+/// A drill failed: its goal did not notice what BREAK did (`missed`), or the loop did not
+/// make it hold again in time. `restored`: whether RESTORE passed; none when the drill
+/// has none. A weave defect, for whoever fixes the weave.
+pub(crate) fn drill_failed(
+    ctx: &Ctx,
+    d: &Drill,
+    missed: bool,
+    restored: Option<bool>,
+    now: &BTreeMap<String, String>,
+) -> Card {
+    let label = super::drill::label(ctx, d);
+    let mut lines = vec![format!(
+        "This was drill {}: Subweave broke the service on purpose with `{}`.",
+        d.name,
+        short(&d.breaks, COMMAND)
+    )];
+    if let Some(g) = ctx.w.goal(&d.expect) {
+        lines.push(match &g.cond {
+            Condition::Code(e) => format!("Goal `{}` ({}) checks `{e}`.", g.name, subject(ctx, g).trim_end_matches('.')),
+            Condition::Quoted(t) => format!(
+                "Goal `{}` ({}) asks a model: {}.",
+                g.name,
+                subject(ctx, g).trim_end_matches('.'),
+                weave::subst(t, &ctx.spec.args).trim_end_matches('.')
+            ),
+        });
+        for (f, v) in now {
+            lines.push(format!("`{f}` now: {}", cap(v.trim(), FACT)));
+        }
+    }
+    lines.push(if missed {
+        format!(
+            "It did not fail within {}: its check does not see this failure.",
+            show_duration(d.fails_within)
+        )
+    } else {
+        format!(
+            "It failed, but did not hold again within {} of the break: no action repaired it in time.",
+            show_duration(d.holds_within)
+        )
+    });
+    lines.push(match (&d.restore, restored) {
+        (Some(r), Some(true)) => format!("RESTORE `{}` put it back.", short(r, COMMAND)),
+        (Some(r), _) => format!("RESTORE `{}` failed: what BREAK did may still be in place.", short(r, COMMAND)),
+        (None, _) => "The drill has no RESTORE: what BREAK did may still be in place.".into(),
+    });
+    lines.push(if missed {
+        "This is a weave defect: fix the goal's check so it fails on this, then drill again.".into()
+    } else {
+        "This is a weave defect: fix the actions for this goal, or the drill's HOLDS WITHIN, then drill again.".into()
+    });
+    let verb = if missed { "did not notice" } else { "did not recover from" };
+    Card {
+        title: format!("Drill: `{}` {verb} `{}`. Drill again?", d.expect, short(&label, SUBJECT)),
+        lines,
+        buttons: buttons(&[("yes", "Drill again"), ("no", "Leave it")]),
     }
 }

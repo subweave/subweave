@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, type Line, type Series, type ServiceSummary, type Vitals } from "../api";
+import { api, type LastDrill, type Line, type Series, type ServiceSummary, type Vitals } from "../api";
 import { useAppData } from "../App";
 import { Sparkline } from "../components/charts";
 import { EpisodeRow, StepRow } from "../components/rows";
@@ -153,9 +153,22 @@ function ServiceCard({ s }: { s: ServiceSummary }) {
           </span>
         )}
         {!!s.status?.asks.length && <span className="t-amber">{s.status.asks.length} open {s.status.asks.length === 1 ? "escalation" : "escalations"}</span>}
+        {s.status?.drill && <DrillNote d={s.status.drill} />}
         {s.status && <span className="t-muted num">{usd(s.status.spend_month_usd)} this month</span>}
       </div>
     </a>
+  );
+}
+
+function DrillNote({ d }: { d: LastDrill }) {
+  const st = d.state;
+  if (st.state === "running") return <span className="t-model">Drill {d.name} runs</span>;
+  return st.ok ? (
+    <span className="t-muted">Drill {d.name} passed</span>
+  ) : (
+    <span className="t-red" title={st.text}>
+      Drill {d.name} failed: {st.text}
+    </span>
   );
 }
 

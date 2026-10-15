@@ -19,6 +19,15 @@ export interface Status {
   decide: string;
   code: string[];
   stopped: boolean;
+  drill: LastDrill | null;
+}
+
+/** A drill's newest run. */
+export interface LastDrill {
+  name: string;
+  goal: string;
+  started: string;
+  state: { state: "running"; step: string } | { state: "ended"; ok: boolean; text: string; t: string };
 }
 
 export interface Spec {

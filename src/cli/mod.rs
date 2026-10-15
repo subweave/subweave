@@ -6,6 +6,7 @@ pub(crate) mod act;
 mod channel;
 mod control;
 mod daemon;
+pub(crate) mod drill;
 mod dash;
 mod flow;
 pub(crate) mod inbox;
@@ -68,6 +69,8 @@ enum Command {
     Do(act::Args),
     /// Give the coder a task in words, through the same rules
     Task(task::Args),
+    /// Run one DRILL now: break the service on purpose and watch the loop repair it
+    Drill(drill::Args),
     /// The commands this box learned for a service
     Learned(learned::Args),
     /// Drop a learned fact command, or an action's learned steps
@@ -121,6 +124,7 @@ impl Command {
             Command::Answer(a) => (a.on.as_deref(), None),
             Command::Do(a) => (a.on.as_deref(), Some(&a.service)),
             Command::Task(a) => (a.on.as_deref(), Some(&a.service)),
+            Command::Drill(a) => (a.on.as_deref(), Some(&a.service)),
             Command::Learned(a) => (a.on.as_deref(), Some(&a.service)),
             Command::Forget(a) => (a.on.as_deref(), Some(&a.service)),
             Command::Known(a) => (a.on.as_deref(), Some(&a.service)),
@@ -184,6 +188,7 @@ async fn local(command: Command) -> Result<ExitCode> {
         Command::Answer(args) => inbox::answer(args),
         Command::Do(args) => act::run(args),
         Command::Task(args) => task::run(args),
+        Command::Drill(args) => drill::run(args),
         Command::Learned(args) => learned::run(args),
         Command::Forget(args) => learned::forget(args),
         Command::Known(args) => known::run(args),

@@ -5,7 +5,7 @@ use anyhow::Result;
 use jiff::Timestamp;
 
 use crate::daemon::journal::Follower;
-use crate::daemon::state::{Act, EscalationState, Event, JobKind, Kind, ServiceState};
+use crate::daemon::state::{Act, DrillStep, EscalationState, Event, JobKind, Kind, ServiceState};
 use crate::service::TASK;
 
 const HOURS: usize = 24;
@@ -134,7 +134,7 @@ fn facts_table(lines: &[Event], now: i64) -> String {
 }
 
 /// One week of the ladder: repairs each rung settled, escalations by who settled them,
-/// and weave changes.
+/// weave changes, and drills that ended and passed.
 #[derive(Default)]
 struct Week {
     code: u32,
@@ -142,6 +142,8 @@ struct Week {
     coder: u32,
     escalated: BTreeMap<String, u32>,
     changes: u32,
+    drills: u32,
+    drills_passed: u32,
 }
 
 /// Who settled an escalation by answering it: the part of the answer's `by` before `:`
@@ -217,6 +219,14 @@ fn ladder(lines: &[Event], st: &ServiceState, now: i64) -> Vec<Week> {
             Kind::Note { text, .. } if text.starts_with("weave changed by ") => {
                 w.changes += 1;
             }
+            Kind::Drill {
+                step: DrillStep::Ended,
+                ok,
+                ..
+            } => {
+                w.drills += 1;
+                w.drills_passed += u32::from(*ok == Some(true));
+            }
             _ => {}
         }
     }
@@ -241,10 +251,11 @@ fn ladder_table(lines: &[Event], st: &ServiceState, now: i64) -> String {
         "CODER",
         "ESCALATED",
         "WEAVE CHANGES",
+        "DRILLS PASSED",
         "SETTLED BY",
     ]
     .map(String::from);
-    let rows: Vec<[String; 7]> = ladder(lines, st, now)
+    let rows: Vec<[String; 8]> = ladder(lines, st, now)
         .into_iter()
         .enumerate()
         .map(|(k, w)| {
@@ -264,11 +275,16 @@ fn ladder_table(lines: &[Event], st: &ServiceState, now: i64) -> String {
                 w.coder.to_string(),
                 w.escalated.values().sum::<u32>().to_string(),
                 w.changes.to_string(),
+                if w.drills == 0 {
+                    "-".into()
+                } else {
+                    format!("{}/{}", w.drills_passed, w.drills)
+                },
                 if by.is_empty() { "-".into() } else { by.join(", ") },
             ]
         })
         .collect();
-    let mut widths = [0usize; 6];
+    let mut widths = [0usize; 7];
     for r in std::iter::once(&head).chain(&rows) {
         for (w, c) in widths.iter_mut().zip(r) {
             *w = (*w).max(c.chars().count());
@@ -277,10 +293,10 @@ fn ladder_table(lines: &[Event], st: &ServiceState, now: i64) -> String {
     let mut out = String::new();
     for r in std::iter::once(&head).chain(&rows) {
         out.push_str(&format!("{:w$}", r[0], w = widths[0]));
-        for (c, w) in r[1..6].iter().zip(&widths[1..]) {
+        for (c, w) in r[1..7].iter().zip(&widths[1..]) {
             out.push_str(&format!("  {c:>w$}"));
         }
-        out.push_str(&format!("  {}\n", r[6]));
+        out.push_str(&format!("  {}\n", r[7]));
     }
     out
 }

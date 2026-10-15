@@ -59,10 +59,23 @@ same tools.
 - The box checks the change first: it must parse, and the request check must pass
   with the service's ARGs.
 - FACT, GOAL, ACTION, SKILL and KNOWN changes apply at once. Every other change
-  (NEVER, ASK, ARG, SECRET, MODEL, NEEDS, FROM, ABOUT) is a rule change: it waits for
-  the person's signed answer. Propose it; do not insist.
+  (NEVER, ASK, DRILL, ARG, SECRET, MODEL, NEEDS, FROM, ABOUT) is a rule change: it
+  waits for the person's signed answer. Propose it; do not insist.
 - Write the general rule, not the incident. Leave out hostnames, versions and
   one-off strings unless the weave's job needs them.
+
+## 4a. Drill escalations
+
+- A drill breaks the service on purpose. Its escalation (action `drill`) says
+  "`<goal>` did not notice `<label>`" or "did not recover from `<label>`". The box
+  is not the problem: the weave is. RESTORE has already run, when the drill has one.
+- "Did not notice": fix the goal's check so it fails on what BREAK did (a fact it
+  does not read, a condition too loose, an EVERY too slow for FAILS WITHIN).
+- "Did not recover": fix or add the ACTION that repairs it, or its WHEN, so the
+  ladder picks it.
+- Propose the weave change (section 4), then answer `yes`: the drill runs again.
+  Answer `no` only when the drill itself is wrong, and say why in the note.
+- Never weaken a drill to pass it; never remove one without the person.
 
 ## 5. Upstream generic fixes
 

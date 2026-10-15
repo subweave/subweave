@@ -88,6 +88,8 @@ pub(crate) struct AskReq {
     /// Only the person's signed answer on a Steery card settles it: it goes to no other
     /// channel, and no inbox answer is taken.
     pub signed: bool,
+    /// The drill that failed, on a drill's escalation.
+    pub drill: Option<String>,
 }
 
 /// Journals the escalation and sends it to every channel. One a person's job raised
@@ -97,9 +99,22 @@ pub(crate) struct AskReq {
 /// it: nothing is sent then.
 pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> Option<u64> {
     let n = ctx.shared.next_ask();
-    let by = lock(&ctx.by).clone().filter(|b| !b.is_empty());
+    // A drill runs beside the repair slot: the person whose job runs there did not raise it.
+    let by = lock(&ctx.by)
+        .clone()
+        .filter(|b| !b.is_empty() && req.drill.is_none());
     let answers = req.card.words();
     let labels = req.card.labels();
+    // Raised while a drill runs: the card says the failure was caused on purpose.
+    let mut title = req.card.title.clone();
+    let mut body = req.card.lines.clone();
+    if let Some((name, label)) = super::drill::running(ctx).filter(|_| req.drill.is_none()) {
+        title = format!("Drill {name}: {title}");
+        body.insert(
+            0,
+            format!("This is drill {name}: Subweave caused this on purpose ({label}), to test the weave."),
+        );
+    }
     // The kinds of line its goal's window holds that nobody knows normal: an answer may
     // teach them.
     let lines: Vec<String> = match req.goal.as_deref().and_then(|g| ctx.w.goal(g)) {
@@ -133,13 +148,14 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> Option<u64> {
                 goal: req.goal.clone(),
                 action: req.action.clone(),
                 rule: req.rule.clone(),
-                text: req.card.title.clone(),
-                body: req.card.lines.join("\n"),
+                text: title,
+                body: body.join("\n"),
                 facts: req.facts.clone(),
                 answers: answers.clone(),
                 labels: labels.clone(),
                 signed: req.signed,
                 lines,
+                drill: req.drill.clone(),
             }
             .into()
         });

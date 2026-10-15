@@ -15,6 +15,8 @@ use crate::weave::{self, Class, Weave};
 pub const TASK: &str = "task";
 /// The `action` of the ask and answer lines of a weave change; no ACTION may take the name.
 pub const WEAVE: &str = "weave";
+/// The `action` of a failed drill's escalation; no ACTION may take the name.
+pub const DRILL: &str = "drill";
 
 /// `services/<name>/service.json`: how a service was asked for, as the daemon keeps it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +82,12 @@ pub enum Command {
     Task {
         service: String,
         text: String,
+        by: String,
+    },
+    /// Run one DRILL now.
+    Drill {
+        service: String,
+        drill: String,
         by: String,
     },
     /// `word`: `yes`, `no`, `always`, `never` or an action name. `note`: the answerer's

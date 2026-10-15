@@ -6,6 +6,8 @@ use super::Problem;
 pub struct Line {
     /// The first physical line, counted from 1.
     pub no: u32,
+    /// The last physical line: its last continuation, or its heredoc's closing line.
+    pub end: u32,
     pub text: String,
     pub heredoc: Option<Heredoc>,
 }
@@ -31,7 +33,7 @@ pub fn heredoc_token(tok: &str) -> Option<&str> {
 fn heredoc_start(line: &str) -> Option<String> {
     let toks: Vec<&str> = line.split_whitespace().collect();
     let at = match *toks.first()? {
-        "RUN" | "DO" | "ADD" => 1,
+        "RUN" | "DO" | "ADD" | "RESTORE" => 1,
         "FACT" => {
             // FACT <name> <TYPE> [<unit>] <<EOF
             let mut at = 2;
@@ -53,8 +55,8 @@ fn heredoc_start(line: &str) -> Option<String> {
     };
     let tok = toks.get(at)?;
     let word = heredoc_token(tok)?;
-    // A FACT heredoc is the whole text; a RUN heredoc too, or bash would see it.
-    if matches!(toks[0], "FACT" | "RUN" | "DO") && at + 1 != toks.len() {
+    // A FACT heredoc is the whole text; a RUN or RESTORE heredoc too, or bash would see it.
+    if matches!(toks[0], "FACT" | "RUN" | "DO" | "RESTORE") && at + 1 != toks.len() {
         return None;
     }
     Some(word.to_string())
@@ -124,6 +126,7 @@ pub fn lines(text: &str) -> (Vec<Line>, Vec<Problem>) {
         };
         out.push(Line {
             no,
+            end: i as u32,
             text: line,
             heredoc,
         });

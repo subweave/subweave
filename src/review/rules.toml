@@ -492,6 +492,24 @@ pass = "yes"
 says = "a goal proves that backups restore"
 
 [[rule]]
+id = "has-drill"
+area = "coverage"
+weight = 2
+on = "weave"
+code = "has-drill"
+says = "a weave with goals has a DRILL"
+why = "A goal that never failed on purpose may not notice a real failure: WEAVEFILE.md#drills."
+
+[[rule]]
+id = "break-keeps-data"
+area = "coverage"
+weight = 3
+on = "drill"
+code = "break-keeps-data"
+says = "no BREAK names a command that deletes data"
+why = "A drill breaks what the loop can repair; deleted data is not repaired: WEAVEFILE.md#drills."
+
+[[rule]]
 id = "cov-restore"
 area = "coverage"
 weight = 2

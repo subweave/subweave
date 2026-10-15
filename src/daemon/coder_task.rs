@@ -574,6 +574,7 @@ async fn session(
                             action: Some(work.action.to_string()),
                             rule: None,
                             signed: false,
+                            drill: None,
                             card: card::coder_asks(ctx, work.goal, work.action, task, &q, &shown),
                             facts: shown,
                         });
@@ -793,6 +794,7 @@ async fn judge(
         action: Some(work.action.to_string()),
         rule: None,
         signed: false,
+        drill: None,
         card: card::coder_stuck(ctx, work.goal, work.action, task, tried_lines, &now),
         facts: now,
     });
@@ -949,6 +951,7 @@ async fn gate_and_run(
             action: Some(work.action.to_string()),
             rule: Some(rule.clone()),
             signed: false,
+            drill: None,
             card: card::command(ctx, work.goal, work.action, command, purpose, &rule),
             facts: observe::shown(&values),
         });

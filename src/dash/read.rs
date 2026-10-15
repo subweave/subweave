@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use super::{ApiError, Svc};
 use crate::cli::stats;
 use crate::daemon::journal;
-use crate::daemon::state::{Event, ServiceState};
+use crate::daemon::state::{Event, LastDrill, ServiceState};
 use crate::service::{self, Spec};
 use crate::{paths, weave};
 
@@ -39,6 +39,8 @@ pub(crate) struct Status {
     pub decide: String,
     pub code: Vec<String>,
     pub stopped: bool,
+    /// The drill that ran last, and how it went.
+    pub drill: Option<LastDrill>,
 }
 
 #[derive(Serialize, PartialEq)]
@@ -71,6 +73,7 @@ pub(crate) fn status(name: &str, spec: &Spec, st: &ServiceState) -> Option<Statu
         decide: spec.decide.clone(),
         code: spec.code.clone(),
         stopped: spec.stopped,
+        drill: st.last_drill(),
     })
 }
 

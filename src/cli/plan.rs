@@ -6,7 +6,7 @@ use anyhow::Result;
 
 use crate::model::{self, decider::Decider};
 use crate::plan::{self, Level};
-use crate::weave::{self, ArgKind, FactSource, Weave, graph};
+use crate::weave::{self, ArgKind, FactSource, Weave, graph, show_duration};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -62,7 +62,8 @@ pub async fn run(args: Args) -> Result<ExitCode> {
     })
 }
 
-/// The ARGs, the SECRETs, the FACTs with their types, the goal tree and the KNOWN lines.
+/// The ARGs, the SECRETs, the FACTs with their types, the goal tree, the KNOWN lines and
+/// the drills.
 fn overview(w: &Weave) -> String {
     let mut out = String::new();
     let nw = w.args.iter().map(|a| a.name.len()).max().unwrap_or(0);
@@ -129,6 +130,33 @@ fn overview(w: &Weave) -> String {
         let gw = w.known.iter().map(|k| k.goal.len()).max().unwrap_or(0);
         for k in &w.known {
             let _ = writeln!(out, "KNOWN {:gw$}  {:7}  {}", k.goal, k.class.keyword(), k.sample);
+        }
+    }
+    if !w.drills.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        let nw = w.drills.iter().map(|d| d.name.len()).max().unwrap_or(0);
+        for d in &w.drills {
+            let _ = write!(
+                out,
+                "DRILL {:nw$}  \"{}\"  EXPECT {} FAILS WITHIN {} HOLDS WITHIN {}",
+                d.name,
+                d.label,
+                d.expect,
+                show_duration(d.fails_within),
+                show_duration(d.holds_within)
+            );
+            if let Some(every) = d.every {
+                let _ = write!(out, " EVERY {}", show_duration(every));
+            }
+            if let Some(e) = &d.when {
+                let _ = write!(out, " IF {e}");
+            }
+            if d.restore.is_none() {
+                out.push_str("  (no RESTORE)");
+            }
+            out.push('\n');
         }
     }
     out

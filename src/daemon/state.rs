@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::channel;
 use crate::model::Usage;
-use crate::service::{TASK, WEAVE};
+use crate::service::{DRILL, TASK, WEAVE};
 use crate::weave::Class;
 
 use super::epoch_of;
@@ -116,8 +116,8 @@ pub enum Kind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         why: Option<String>,
     },
-    /// The decider chose to wait on a failing goal: the loop leaves it alone `until`
-    /// (RFC 3339), across a restart too.
+    /// The loop leaves a failing goal alone `until` (RFC 3339), across a restart too: the
+    /// decider chose to wait, or a fix held and its window has yet to pass.
     Wait { goal: String, until: String },
     /// A goal does not apply: its IF is false, or a goal it comes AFTER is off.
     Off {
@@ -207,6 +207,9 @@ pub enum Kind {
         /// The window's lines of the kinds not known normal: an answer may teach them.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         lines: Vec<String>,
+        /// The drill that failed, on a drill's escalation: a yes runs it again.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drill: Option<String>,
     },
     /// Escalation `n` answered with the word `text`; `action` the action the word names,
     /// or `task` and `weave` for those escalations. `signed`: a signature from a pinned
@@ -257,6 +260,20 @@ pub enum Kind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         action: Option<String>,
         text: String,
+    },
+    /// A step of drill `drill`, which breaks the service to prove `goal` fails and holds
+    /// again: `ok` how the step went, `text` what it ran or how long it took, `output` a
+    /// command's.
+    Drill {
+        drill: String,
+        goal: String,
+        step: DrillStep,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ok: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
     },
     /// `n`: the escalation a card summary or an agent's run is for.
     Note {
@@ -314,6 +331,19 @@ pub enum Act {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         undoes: Option<String>,
     },
+}
+
+/// A drill's steps, in order. `detected` and `fixed` carry `ok: false` when the goal did
+/// not fail, or hold again, within the drill's time; `ended` carries its result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DrillStep {
+    Started,
+    Broke,
+    Detected,
+    Fixed,
+    Restored,
+    Ended,
 }
 
 fn yes() -> bool {
@@ -385,6 +415,7 @@ impl Kind {
             Kind::Refused { .. } => "refused",
             Kind::Message { .. } => "message",
             Kind::Note { .. } => "note",
+            Kind::Drill { .. } => "drill",
         }
     }
 
@@ -396,7 +427,8 @@ impl Kind {
             | Kind::Off { goal, .. }
             | Kind::Waiting { goal, .. }
             | Kind::Unknown { goal, .. }
-            | Kind::Wait { goal, .. } => Some(goal),
+            | Kind::Wait { goal, .. }
+            | Kind::Drill { goal, .. } => Some(goal),
             Kind::Decide { goal, .. }
             | Kind::Gate { goal, .. }
             | Kind::Command { goal, .. }
@@ -446,7 +478,8 @@ impl Kind {
             | Kind::Withdraw { .. }
             | Kind::Sent { .. }
             | Kind::Watch { .. }
-            | Kind::Unwatch { .. } => None,
+            | Kind::Unwatch { .. }
+            | Kind::Drill { .. } => None,
         }
     }
 
@@ -472,7 +505,8 @@ impl Kind {
             | Kind::Watch { channel: text, .. }
             | Kind::Unwatch { channel: text, .. }
             | Kind::Action(Act::Stopped { stopped: text, .. }) => Some(text),
-            Kind::Action(Act::Ended { text, .. } | Act::Started { text, .. }) => text.as_deref(),
+            Kind::Action(Act::Ended { text, .. } | Act::Started { text, .. })
+            | Kind::Drill { text, .. } => text.as_deref(),
             Kind::Goals { .. } | Kind::Check { .. } => None,
             Kind::Wait { until: text, .. } => Some(text),
         }
@@ -485,6 +519,7 @@ impl Kind {
             Kind::Gate { ok, .. } => ok.then_some(true),
             Kind::Action(Act::Ended { ok, .. }) | Kind::Command { ok, .. } => Some(*ok),
             Kind::Learn { ok, .. } => (!ok).then_some(false),
+            Kind::Drill { ok, .. } => *ok,
             _ => None,
         }
     }
@@ -514,7 +549,9 @@ impl Kind {
 
     pub fn output(&self) -> Option<&str> {
         match self {
-            Kind::Command { output, .. } | Kind::Learn { output, .. } => output.as_deref(),
+            Kind::Command { output, .. }
+            | Kind::Learn { output, .. }
+            | Kind::Drill { output, .. } => output.as_deref(),
             _ => None,
         }
     }
@@ -562,6 +599,10 @@ impl Kind {
             | Kind::Refused { why: text, .. }
             | Kind::Action(Act::Stopped { stopped: text, .. }) => each(text),
             Kind::Action(Act::Ended { text, .. }) => text.iter_mut().for_each(&mut each),
+            Kind::Drill { text, output, .. } => {
+                text.iter_mut().for_each(&mut each);
+                output.iter_mut().for_each(&mut each);
+            }
             Kind::Action(Act::Started { text, on, .. }) => {
                 text.iter_mut().for_each(&mut each);
                 on.iter_mut().for_each(&mut each);
@@ -609,10 +650,88 @@ pub struct ServiceState {
     /// The newest action with an UNDO that ended, until another action starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undo: Option<Undoable>,
+    /// Each drill's newest run, by name: at most one runs at a time.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub drills: BTreeMap<String, DrillRun>,
 }
 
 /// Outcomes kept per goal: more than any TRIES counts and the decider's 10.
 const OUTCOMES: usize = 100;
+
+/// A drill's run. Times are RFC 3339.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DrillRun {
+    pub goal: String,
+    pub started: String,
+    pub state: DrillState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "lowercase")]
+pub enum DrillState {
+    /// `step`: the newest step, and how it went; `broke` and `detected` when those steps
+    /// passed.
+    Running {
+        step: DrillStep,
+        ok: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        broke: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detected: Option<String>,
+    },
+    /// `ok`: the goal failed and held again in time. `text` says how it went.
+    Ended { ok: bool, text: String, t: String },
+}
+
+impl DrillRun {
+    pub fn running(&self) -> bool {
+        matches!(self.state, DrillState::Running { .. })
+    }
+
+    /// BREAK ran and the goal has not failed yet, nor run out of time to.
+    pub fn awaits_failure(&self) -> bool {
+        matches!(
+            self.state,
+            DrillState::Running { step: DrillStep::Broke, ok: true, .. }
+        )
+    }
+
+    /// The goal failed and has not held again yet, nor run out of time to.
+    pub fn awaits_hold(&self) -> bool {
+        matches!(
+            self.state,
+            DrillState::Running { step: DrillStep::Detected, ok: true, .. }
+        )
+    }
+}
+
+/// A drill's newest run, with its name.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LastDrill {
+    pub name: String,
+    #[serde(flatten)]
+    pub run: DrillRun,
+}
+
+impl LastDrill {
+    /// `cl-down passed`, `cl-down failed` or `cl-down runs`.
+    pub fn short(&self) -> String {
+        let how = match &self.run.state {
+            DrillState::Running { .. } => "runs",
+            DrillState::Ended { ok: true, .. } => "passed",
+            DrillState::Ended { ok: false, .. } => "failed",
+        };
+        format!("{} {how}", self.name)
+    }
+
+    /// Why it failed, when it did.
+    pub fn failure(&self) -> Option<&str> {
+        match &self.run.state {
+            DrillState::Ended { ok: false, text, .. } => Some(text),
+            _ => None,
+        }
+    }
+}
 
 /// Where a goal stands. Times are RFC 3339.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -760,6 +879,9 @@ pub struct Escalation {
     /// may say what they are.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lines: Vec<String>,
+    /// The drill that failed, on a drill's escalation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drill: Option<String>,
 }
 
 /// What the person reads.
@@ -931,6 +1053,80 @@ fn open_mut(s: &mut ServiceState, n: u64) -> Result<&mut Escalation, String> {
     }
 }
 
+/// A step of drill `name` at `t`. One drill runs at a time; `detected` comes only while
+/// its goal may still fail, `fixed` only while it may still hold again.
+fn drill_step(
+    s: &mut ServiceState,
+    t: &str,
+    name: &str,
+    goal: &str,
+    step: DrillStep,
+    ok: bool,
+    text: &Option<String>,
+) -> Result<(), String> {
+    if step == DrillStep::Started {
+        if let Some((other, _)) = s.drilling() {
+            return Err(format!("drill {other} runs"));
+        }
+        s.drills.insert(
+            name.to_string(),
+            DrillRun {
+                goal: goal.to_string(),
+                started: t.to_string(),
+                state: DrillState::Running {
+                    step,
+                    ok: true,
+                    broke: None,
+                    detected: None,
+                },
+            },
+        );
+        return Ok(());
+    }
+    // A drill its loop stopped ended at once; its RESTORE runs after, in the background.
+    if step == DrillStep::Restored && s.drills.get(name).is_some_and(|r| !r.running()) {
+        return Ok(());
+    }
+    let run = s
+        .drills
+        .get_mut(name)
+        .filter(|r| r.running())
+        .ok_or_else(|| format!("drill {name} does not run"))?;
+    match step {
+        DrillStep::Detected if !run.awaits_failure() => {
+            return Err(format!("drill {name} does not wait for {goal} to fail"));
+        }
+        DrillStep::Fixed if !run.awaits_hold() => {
+            return Err(format!("drill {name} does not wait for {goal} to hold"));
+        }
+        _ => {}
+    }
+    if step == DrillStep::Ended {
+        run.state = DrillState::Ended {
+            ok,
+            text: text.clone().unwrap_or_default(),
+            t: t.to_string(),
+        };
+        return Ok(());
+    }
+    if let DrillState::Running {
+        step: at,
+        ok: was,
+        broke,
+        detected,
+    } = &mut run.state
+    {
+        match step {
+            DrillStep::Broke if ok => *broke = Some(t.to_string()),
+            DrillStep::Detected if ok => *detected = Some(t.to_string()),
+            _ => {}
+        }
+        *at = step;
+        *was = ok;
+    }
+    Ok(())
+}
+
 /// Applies `e` to the state. An event the state does not allow changes nothing and says
 /// why. The same events in the same order give the same state.
 pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
@@ -991,7 +1187,10 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
             None => s.memory.release_judged(part, version, p.unwrap_or(if *security { 1.0 } else { 0.0 })),
         },
         Kind::Wait { goal, until } => {
-            goal_mut(s, goal)?;
+            // A hold ends a wait: one after it would park the goal's next failure.
+            if goal_mut(s, goal)?.holds() {
+                return Err(format!("{goal} holds: nothing to wait for"));
+            }
             s.waits.insert(goal.clone(), until.clone());
         }
         Kind::Off { goal, why } => set_goal(s, goal, GoalState::Off { why: why.clone() })?,
@@ -1119,6 +1318,7 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
             labels,
             signed,
             lines,
+            drill,
         } => {
             if s.escalations.contains_key(n) {
                 return Err(format!("#{n} was raised already"));
@@ -1143,6 +1343,7 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
                     raised: e.t.clone(),
                     state: EscalationState::Open { sent: Vec::new() },
                     lines: lines.clone(),
+                    drill: drill.clone(),
                 },
             );
             // A repair that asks has stopped: nothing runs for the goal until the answer.
@@ -1210,6 +1411,14 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
                 sent.retain(|x| x.channel != *channel);
             }
         }
+        Kind::Drill {
+            drill,
+            goal,
+            step,
+            ok,
+            text,
+            ..
+        } => drill_step(s, &e.t, drill, goal, *step, ok.unwrap_or(true), text)?,
         Kind::Decide { .. }
         | Kind::Gate { .. }
         | Kind::Learn { .. }
@@ -1238,6 +1447,25 @@ impl Spend {
 impl ServiceState {
     pub fn goal(&self, name: &str) -> Option<&GoalState> {
         self.goals.get(name)
+    }
+
+    /// The drill that runs now, by name.
+    pub fn drilling(&self) -> Option<(&str, &DrillRun)> {
+        self.drills
+            .iter()
+            .find(|(_, r)| r.running())
+            .map(|(n, r)| (n.as_str(), r))
+    }
+
+    /// The drill that started last: what `ps` and the dashboard show.
+    pub fn last_drill(&self) -> Option<LastDrill> {
+        self.drills
+            .iter()
+            .max_by(|a, b| a.1.started.cmp(&b.1.started))
+            .map(|(n, r)| LastDrill {
+                name: n.clone(),
+                run: r.clone(),
+            })
     }
 
     /// A goal AFTER `goal` may be checked: `goal` holds, or failed only one check, which
@@ -1289,7 +1517,7 @@ impl ServiceState {
     pub fn parked(&self, now: i64, park: impl Fn(Option<&str>) -> i64) -> (BTreeSet<String>, bool) {
         let mut newest: BTreeMap<Option<&str>, &Escalation> = BTreeMap::new();
         for e in self.escalations.values() {
-            if !matches!(e.action.as_deref(), Some(TASK | WEAVE)) {
+            if !matches!(e.action.as_deref(), Some(TASK | WEAVE | DRILL)) {
                 newest.insert(e.goal.as_deref(), e);
             }
         }
@@ -1423,6 +1651,19 @@ impl ServiceState {
                 .into()
             })
             .collect();
+        if let Some((drill, run)) = self.drilling() {
+            out.push(
+                Kind::Drill {
+                    drill: drill.to_string(),
+                    goal: run.goal.clone(),
+                    step: DrillStep::Ended,
+                    ok: Some(false),
+                    text: Some(format!("stopped: {why}")),
+                    output: None,
+                }
+                .into(),
+            );
+        }
         for (ep, t) in self.tasks_running() {
             out.push(Event {
                 by: t.by.clone(),

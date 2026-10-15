@@ -16,7 +16,7 @@ use crate::model::ModelRef;
 use crate::model::coder::Coder;
 use crate::model::decider::Decider;
 use crate::paths;
-use crate::service::{self as svc, Learned, Spec, TASK, WEAVE};
+use crate::service::{self as svc, DRILL, Learned, Spec, TASK, WEAVE};
 use crate::weave::{self, Condition, Weave, expr, graph};
 
 use super::asks::{self, AskReq};
@@ -38,7 +38,9 @@ const NO_PARK: Duration = Duration::from_secs(3600);
 /// A decider's `wait` leaves a goal alone until its next check, at least this long.
 const MIN_WAIT: Duration = Duration::from_secs(60);
 /// After a first failed check, the goal is checked again this soon, at most its EVERY.
-const RECHECK: Duration = Duration::from_secs(30);
+pub(crate) const RECHECK: Duration = Duration::from_secs(30);
+/// A due EVERY drill that could not start (its goal, its IF) is tried again this soon.
+const DRILL_RETRY: Duration = Duration::from_secs(60);
 
 /// How long a `no` leaves a goal alone: until its next check, at least `NO_PARK`; the
 /// box's own asks, `NO_PARK`.
@@ -63,6 +65,8 @@ pub(crate) enum Ctl {
     Do { action: String, by: String },
     Task { text: String, by: String },
     Forget { name: String, by: String },
+    /// Run one DRILL now.
+    Drill { drill: String, by: String },
     /// A weave change whose rules differ: a signed ask decides it.
     Change {
         pending: PendingChange,
@@ -262,7 +266,10 @@ impl Ctx {
         text: String,
         facts: BTreeMap<String, String>,
     ) {
-        let title = self.redact(&title);
+        let title = match super::drill::running(self) {
+            Some((name, _)) => format!("Drill {name}: {}", self.redact(&title)),
+            None => self.redact(&title),
+        };
         self.journal().add(Kind::Message {
             goal: goal.clone(),
             action: None,
@@ -287,6 +294,14 @@ impl Ctx {
 
     pub fn ask(&self, req: AskReq) -> Option<u64> {
         asks::raise(self, req)
+    }
+
+    /// Leaves `goal` alone until `until_ms`. The fold refuses it for a goal that holds.
+    pub fn wait(&self, goal: &str, until_ms: i64) {
+        self.journal().add(Kind::Wait {
+            goal: goal.to_string(),
+            until: super::rfc3339(until_ms),
+        });
     }
 }
 
@@ -327,6 +342,14 @@ struct Loop {
     pending: VecDeque<Job>,
     tasks: Tasks,
     ctl: mpsc::UnboundedReceiver<Ctl>,
+    /// The drill that runs, beside the repair slot: the loop repairs what it breaks.
+    drill: JoinSet<()>,
+    /// Drills asked for by hand, with who asked.
+    drills_asked: VecDeque<(String, String)>,
+    /// When a due EVERY drill was last refused: it is tried again after `DRILL_RETRY`.
+    drill_refused: BTreeMap<String, Instant>,
+    /// When the loop started (epoch seconds): an EVERY drill that never ran counts from it.
+    born: i64,
 }
 
 pub(crate) async fn run(
@@ -345,9 +368,10 @@ pub(crate) async fn run(
         }
     };
     shared.registry.join(&ctx);
-    {
+    let drill = {
         let mut j = ctx.journal();
         // What ran when the daemon stopped runs no more.
+        let drill = j.state().drilling().map(|(n, _)| n.to_string());
         for e in j.state().interrupted("the daemon stopped") {
             j.add(e);
         }
@@ -358,6 +382,11 @@ pub(crate) async fn run(
         if !j.state().goals.keys().eq(goals.iter()) {
             j.add(Kind::Goals { goals });
         }
+        drill
+    };
+    // What a drill's BREAK did does not outlive the daemon that ran it.
+    if let Some(d) = drill.as_deref().and_then(|n| ctx.w.drill(n)) {
+        super::drill::stopped(ctx.journal_handle(), ctx.env.clone(), d.clone());
     }
     let tracks = ctx
         .w
@@ -375,6 +404,10 @@ pub(crate) async fn run(
         pending: VecDeque::new(),
         tasks,
         ctl,
+        drill: JoinSet::new(),
+        drills_asked: VecDeque::new(),
+        drill_refused: BTreeMap::new(),
+        born: super::epoch(),
     };
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -383,6 +416,7 @@ pub(crate) async fn run(
             _ = tick.tick() => l.tick().await,
             Some(c) = l.ctl.recv() => l.control(c),
             Some(r) = l.repairs.join_next(), if !l.repairs.is_empty() => l.repaired(r),
+            Some(_) = l.drill.join_next(), if !l.drill.is_empty() => {}
         }
         l.keep_tasks();
     }
@@ -519,6 +553,83 @@ impl Loop {
             );
         }
         self.start_repair();
+        self.start_drill().await;
+    }
+
+    /// Starts a drill beside the repair slot, one at a time: one asked for by hand first,
+    /// else an EVERY drill that is due. An EVERY drill starts only while every goal holds
+    /// or is off, no escalation is open and the repair slot is free; any drill only while
+    /// its goal holds and its IF is true.
+    async fn start_drill(&mut self) {
+        let ctx = self.ctx.clone();
+        if !self.drill.is_empty() {
+            for (name, by) in self.drills_asked.drain(..) {
+                ctx.journal().note_by(None, format!("drill {name}: another drill runs"), &by);
+            }
+            return;
+        }
+        let (name, by) = match self.drills_asked.pop_front() {
+            Some((name, by)) => (name, Some(by)),
+            None => match self.due_drill() {
+                Some(name) => (name, None),
+                None => return,
+            },
+        };
+        let Some(d) = ctx.w.drill(&name) else {
+            if let Some(by) = &by {
+                ctx.journal().note_by(None, format!("drill: no drill {name}"), by);
+            }
+            return;
+        };
+        if let Some(why) = super::drill::refused(&ctx, d).await {
+            match &by {
+                Some(by) => ctx
+                    .journal()
+                    .note_by(Some(&d.expect), format!("drill {name} does not run: {why}"), by),
+                None => {
+                    self.drill_refused.insert(name, Instant::now());
+                }
+            }
+            return;
+        }
+        self.drill.spawn(super::drill::run(ctx.clone(), name, by));
+    }
+
+    /// The first EVERY drill whose EVERY has passed since it last started (or since the
+    /// loop started, for one that never ran), while the service is quiet: every goal holds
+    /// or is off, no escalation is open, and nothing runs or waits in the repair slot.
+    fn due_drill(&self) -> Option<String> {
+        let ctx = &self.ctx;
+        if ctx.w.drills.iter().all(|d| d.every.is_none())
+            || self.running.is_some()
+            || !self.pending.is_empty()
+        {
+            return None;
+        }
+        let j = ctx.journal();
+        let st = j.state();
+        if st.open().next().is_some() || !st.goals.values().all(|g| g.holds() || g.off()) {
+            return None;
+        }
+        let now = super::epoch();
+        ctx.w
+            .drills
+            .iter()
+            .filter(|d| {
+                self.drill_refused
+                    .get(&d.name)
+                    .is_none_or(|at| at.elapsed() >= DRILL_RETRY)
+            })
+            .find(|d| {
+                let Some(every) = d.every else { return false };
+                let last = st
+                    .drills
+                    .get(&d.name)
+                    .and_then(|r| super::epoch_of(&r.started))
+                    .unwrap_or(self.born);
+                now - last >= every.as_secs() as i64
+            })
+            .map(|d| d.name.clone())
     }
 
     /// A windowed goal that holds over a window the daemon has not watched whole (it
@@ -681,6 +792,10 @@ impl Loop {
                 });
                 t.line = Some((ok, kept, Instant::now()));
             }
+            // A drill that waits for this goal to fail, or to hold again, sees it here.
+            if let Some(e) = super::drill::seen(j.state(), &g.name) {
+                j.add(e);
+            }
             let state = j.state().goal(&g.name).cloned().unwrap_or(GoalState::Unknown { why: None });
             (was, state)
         };
@@ -822,6 +937,7 @@ impl Loop {
                     action: None,
                     rule: None,
                     signed: false,
+                    drill: None,
                     card: card::misfit(&ctx),
                     facts: BTreeMap::new(),
                 });
@@ -888,8 +1004,7 @@ impl Loop {
                 self.tracks.get_mut(&goal).expect("a track per goal").last_check = None;
                 if let Outcome::Wait = outcome {
                     let every = self.ctx.w.goal(&goal).map_or(MIN_WAIT, |g| g.every().max(MIN_WAIT));
-                    let until = super::rfc3339(observe::now_ms() + every.as_millis() as i64);
-                    self.ctx.journal().add(Kind::Wait { goal, until });
+                    self.ctx.wait(&goal, observe::now_ms() + every.as_millis() as i64);
                 }
             }
             Err(e) => self.ctx.journal().note(None, format!("repair ended: {e}")),
@@ -904,6 +1019,14 @@ impl Loop {
                 let Some(esc) = esc else { return };
                 if esc.action.as_deref() == Some(TASK) {
                     self.answer_task(n, &word);
+                    return;
+                }
+                if esc.action.as_deref() == Some(DRILL) {
+                    // Yes drills again, most often after a weave change; any other word
+                    // only settles it.
+                    if let Some(d) = esc.drill.filter(|_| word == "yes") {
+                        self.drills_asked.push_back((d, by));
+                    }
                     return;
                 }
                 if esc.action.as_deref() == Some(WEAVE) {
@@ -1000,6 +1123,7 @@ impl Loop {
                     by: Some(by),
                 }));
             }
+            Ctl::Drill { drill, by } => self.drills_asked.push_back((drill, by)),
             Ctl::Forget { name, by } => {
                 let dropped = {
                     let mut l = ctx.learned();
@@ -1027,6 +1151,7 @@ impl Loop {
                     card: card::weave_change(&ctx, &pending.by, &pending.why, &change),
                     facts: BTreeMap::new(),
                     signed: true,
+                    drill: None,
                 });
                 let Some(n) = raised else { return };
                 // What a signed yes applies.

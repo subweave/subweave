@@ -14,7 +14,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdout};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
-use super::{act, inbox, known, ps, task, weavefile};
+use super::{act, drill, inbox, known, ps, task, weavefile};
 use crate::daemon::journal::{self, Ask};
 use crate::paths;
 use crate::weave::Class;
@@ -261,6 +261,19 @@ fn tools() -> Vec<Value> {
             },
         }),
         json!({
+            "name": "drill",
+            "description": "Runs one DRILL of a service's weave now, as `subweave drill`: it breaks the service on purpose; its goal must fail, and the loop must make it hold again. A drill that fails escalates as a weave defect.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "service": service,
+                    "drill": {"type": "string", "description": "A DRILL of the service's weave"},
+                },
+                "required": ["service", "drill"],
+                "additionalProperties": false,
+            },
+        }),
+        json!({
             "name": "weave",
             "description": "A service's running Weavefile, its ARGs and its source, as `subweave weave` shows them: read it before you change it.",
             "inputSchema": {
@@ -272,7 +285,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "weave_change",
-            "description": "Proposes a new Weavefile for a service, as `subweave weave --change`. It must parse and pass the request check with the service's ARGs. FACT, GOAL, ACTION, SKILL and KNOWN changes apply at once; any other change waits for the person's signed answer on Steery (`signed: true`).",
+            "description": "Proposes a new Weavefile for a service, as `subweave weave --change`. It must parse and pass the request check with the service's ARGs. FACT, GOAL, ACTION, SKILL and KNOWN changes apply at once; any other change (DRILL included) waits for the person's signed answer on Steery (`signed: true`).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -325,6 +338,11 @@ async fn call(name: &str, args: Value, by: &str) -> Result<Value> {
             let a: DoArgs = parse(args)?;
             act::send(&a.service, &a.action, by.to_string())?;
             json!({"service": a.service, "action": a.action, "by": by})
+        }
+        "drill" => {
+            let a: DrillArgs = parse(args)?;
+            drill::send(&a.service, &a.drill, by.to_string())?;
+            json!({"service": a.service, "drill": a.drill, "by": by})
         }
         "weave" => {
             let a: WeaveArgs = parse(args)?;
@@ -482,4 +500,10 @@ struct TaskArgs {
 struct DoArgs {
     service: String,
     action: String,
+}
+
+#[derive(Deserialize)]
+struct DrillArgs {
+    service: String,
+    drill: String,
 }

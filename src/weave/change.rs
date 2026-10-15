@@ -124,8 +124,9 @@ fn known(w: &Weave) -> BTreeMap<String, Value> {
         .collect()
 }
 
-/// Every rule item (ABOUT, FROM, NEEDS, MODEL, each ARG, SECRET, NEVER and ASK) as its
-/// JSON without line numbers, with the Weavefile lines that write it, in file order.
+/// Every rule item (ABOUT, FROM, NEEDS, MODEL, each ARG, SECRET, NEVER, ASK and DRILL) as
+/// its JSON without line numbers, with the Weavefile lines that write it, in file order. A
+/// DRILL breaks the service on purpose: only the person adds or changes one.
 fn rules(text: &str, w: &Weave) -> Vec<(Value, Vec<String>)> {
     let lines: Vec<&str> = text.lines().collect();
     let keyword = |word: &str| -> Vec<String> {
@@ -174,6 +175,9 @@ fn rules(text: &str, w: &Weave) -> Vec<(Value, Vec<String>)> {
     }
     for r in &w.rules {
         items.push((unlined(r), span(r.line(), r.line())));
+    }
+    for d in &w.drills {
+        items.push((unlined(d), span(d.line, d.end)));
     }
     items
 }

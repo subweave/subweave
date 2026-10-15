@@ -519,6 +519,12 @@ pub fn commands(w: &Weave) -> Vec<(String, &str, u32)> {
             rest = &inner[end + 3..];
         }
     }
+    for d in &w.drills {
+        out.push((format!("drill {}", d.name), d.breaks.as_str(), d.line));
+        if let Some(r) = &d.restore {
+            out.push((format!("drill {} restore", d.name), r.as_str(), d.line));
+        }
+    }
     out
 }
 
@@ -892,6 +898,19 @@ pub fn elements(w: &Weave) -> IndexMap<&'static str, Vec<Element>> {
                 "when": s.when,
                 "body": s.body,
                 "jobs": jobs,
+            }),
+        );
+    }
+    for d in &w.drills {
+        add(
+            "drill",
+            d.name.clone(),
+            d.line,
+            json!({
+                "name": d.name,
+                "label": d.label,
+                "break": d.breaks,
+                "expect": d.expect,
             }),
         );
     }

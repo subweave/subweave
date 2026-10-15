@@ -24,6 +24,40 @@ pub struct Weave {
     pub skills: Vec<Skill>,
     /// The author's verdicts on kinds of log lines.
     pub known: Vec<Known>,
+    /// Failures the box causes on purpose, to prove a goal notices them and the loop
+    /// repairs them.
+    pub drills: Vec<Drill>,
+}
+
+/// `DRILL <name> "<label>" BREAK <command> EXPECT <goal> FAILS WITHIN <d> HOLDS WITHIN <d>
+/// [EVERY <d>] [IF <expr>]`, and an optional `RESTORE <command>` line under it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Drill {
+    pub name: String,
+    /// What it breaks, for a person: `DRILL cl-down "Stop the consensus client" …`.
+    pub label: String,
+    /// The command that causes the failure.
+    #[serde(rename = "break")]
+    pub breaks: String,
+    /// The goal that must fail, then hold again.
+    pub expect: String,
+    /// From the end of BREAK, how soon the goal must fail.
+    #[serde(serialize_with = "dur")]
+    pub fails_within: Duration,
+    /// From the end of BREAK, how soon it must hold again.
+    #[serde(serialize_with = "dur")]
+    pub holds_within: Duration,
+    /// How often the daemon runs it on its own; `None`: only by hand.
+    #[serde(serialize_with = "dur_opt")]
+    pub every: Option<Duration>,
+    /// A precondition: while false or unknown it does not run.
+    pub when: Option<Expr>,
+    /// Puts back what BREAK did, when the loop did not repair it.
+    pub restore: Option<String>,
+    pub line: u32,
+    /// The last physical line of the DRILL and its RESTORE.
+    #[serde(skip)]
+    pub end: u32,
 }
 
 /// `KNOWN <goal> NORMAL|TROUBLE "<sample line>"`: lines of the sample's kind are routine
@@ -568,6 +602,10 @@ impl Weave {
         self.parts.iter().find(|p| p.name == name)
     }
 
+    pub fn drill(&self, name: &str) -> Option<&Drill> {
+        self.drills.iter().find(|d| d.name == name)
+    }
+
     /// Named by another action's UNDO.
     pub fn undoes(&self, name: &str) -> bool {
         self.actions.iter().any(|a| a.undo.as_deref() == Some(name))
@@ -685,6 +723,10 @@ pub fn show_duration(d: Duration) -> String {
     } else {
         format!("{s}s")
     }
+}
+
+fn dur<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&show_duration(*d))
 }
 
 fn dur_opt<S: Serializer>(d: &Option<Duration>, s: S) -> Result<S::Ok, S::Error> {

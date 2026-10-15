@@ -6,6 +6,7 @@ mod agent;
 mod asks;
 mod card;
 mod coder_task;
+mod drill;
 mod episode;
 mod goals;
 mod inbox;
@@ -38,7 +39,7 @@ use journal::Journal;
 use service::{Ctl, PendingChange, Tasks};
 use state::{Act, Event, Kind};
 
-pub(crate) use service::command_env;
+pub(crate) use service::{RECHECK, command_env};
 
 /// What every service task shares: the ask counter, the journals and the agent channels'
 /// processes.
@@ -290,8 +291,20 @@ impl Daemon {
             j.add(job.start());
             j.add(job.end(false, format!("ended: {why}")));
         }
+        let drill = j.state().drilling().map(|(n, _)| n.to_string());
         for e in j.state().interrupted(why) {
             j.add(e);
+        }
+        drop(j);
+        // What a drill's BREAK did does not outlive its loop: RESTORE runs, from the weave
+        // that broke it.
+        let Some(drill) = drill else { return };
+        let Ok(spec) = svc::spec(name) else { return };
+        let weave = std::fs::read_to_string(paths::weavefile(name))
+            .ok()
+            .and_then(|text| crate::weave::parse(name, &text).ok());
+        if let Some(d) = weave.as_ref().and_then(|w| w.drill(&drill)) {
+            drill::stopped(journal.clone(), command_env(name, &spec).0, d.clone());
         }
     }
 
@@ -465,6 +478,16 @@ impl Daemon {
                 }
                 None => tracing::warn!(service = %service, "task: no such service"),
             },
+            Command::Drill { service, drill, by } => match self.tasks.get(&service) {
+                Some(t) => {
+                    let _ = t.ctl.send(Ctl::Drill { drill, by });
+                }
+                None if svc::spec(&service).is_ok() => {
+                    let text = format!("drill {drill}: the service is stopped");
+                    self.shared.note(&service, &text, &by);
+                }
+                None => tracing::warn!(service = %service, drill = %drill, "drill: no such service"),
+            },
             Command::Answer {
                 n,
                 word,
@@ -593,7 +616,7 @@ impl Daemon {
                 return;
             };
             let action = match esc.action.as_deref() {
-                Some(a @ (TASK | svc::WEAVE)) => Some(a.to_string()),
+                Some(a @ (TASK | svc::WEAVE | svc::DRILL)) => Some(a.to_string()),
                 _ => answers_action(&service, word),
             };
             let answer = Kind::Answer {

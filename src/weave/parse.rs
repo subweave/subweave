@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use super::Problem;
 use super::ast::{
-    Action, Arg, ArgKind, ArgOption, Before, Class, Condition, Effect, Fact, FactSource, Goal,
-    GoalRef, Known, Level, ModelHint, Needs, Part, PartField, PartSource, Rule, Secret, Skill,
-    Step, Weave,
+    Action, Arg, ArgKind, ArgOption, Before, Class, Condition, Drill, Effect, Fact, FactSource,
+    Goal, GoalRef, Known, Level, ModelHint, Needs, Part, PartField, PartSource, Rule, Secret,
+    Skill, Step, Weave,
 };
 use super::expr::{self, Expr};
 use super::lex::{self, Line};
@@ -16,20 +16,20 @@ use super::value::{FactType, Unit};
 /// Instruction keywords: a line starts with one of these.
 pub const INSTRUCTIONS: &[&str] = &[
     "ABOUT", "FROM", "NEEDS", "MODEL", "ARG", "SECRET", "FACT", "PART", "GOAL", "ACTION", "WHEN",
-    "RUN", "DO", "ADD", "NEVER", "ASK", "SKILL", "KNOWN",
+    "RUN", "DO", "ADD", "NEVER", "ASK", "SKILL", "KNOWN", "DRILL", "RESTORE",
 ];
 
 /// Every capital word with a meaning; none of them can be a name.
 pub const KEYWORDS: &[&str] = &[
     "ABOUT", "FROM", "NEEDS", "MODEL", "ARG", "SECRET", "FACT", "PART", "GOAL", "ACTION", "WHEN",
-    "RUN", "DO", "ADD", "NEVER", "ASK", "SKILL", "KNOWN", "AFTER", "EVERY", "OVER", "TRIES",
-    "PER", "FOR", "WITHIN", "CHANGES", "UNDO", "IF", "AND", "OR", "NOT", "SINCE", "MIN", "MAX",
-    "AVG", "DELTA", "COUNT", "BOOL", "NUMBER", "TEXT", "VERSION", "LINES", "MUST", "SHOULD",
-    "MAY", "BEFORE", "DECIDE", "CODE", "THEN", "CPU", "GPU", "GB", "TB", "RAM", "DISK",
-    "BECAUSE", "NORMAL", "TROUBLE",
+    "RUN", "DO", "ADD", "NEVER", "ASK", "SKILL", "KNOWN", "DRILL", "RESTORE", "BREAK", "EXPECT",
+    "FAILS", "HOLDS", "AFTER", "EVERY", "OVER", "TRIES", "PER", "FOR", "WITHIN", "CHANGES",
+    "UNDO", "IF", "AND", "OR", "NOT", "SINCE", "MIN", "MAX", "AVG", "DELTA", "COUNT", "BOOL",
+    "NUMBER", "TEXT", "VERSION", "LINES", "MUST", "SHOULD", "MAY", "BEFORE", "DECIDE", "CODE",
+    "THEN", "CPU", "GPU", "GB", "TB", "RAM", "DISK", "BECAUSE", "NORMAL", "TROUBLE",
 ];
 
-/// An ACTION's label is a button on a phone.
+/// An ACTION's or a DRILL's label is a button or a title on a phone.
 const LABEL_MAX: usize = 40;
 
 pub fn is_keyword(w: &str) -> bool {
@@ -306,6 +306,8 @@ struct Parser {
     problems: Vec<Problem>,
     /// The action that WHEN/RUN/DO/ADD lines belong to.
     action: Option<usize>,
+    /// The drill a RESTORE line belongs to: the one on the line above.
+    drill: Option<usize>,
     /// An options ARG that option lines may follow.
     arg: Option<usize>,
     /// WHEN lines per action.
@@ -330,9 +332,11 @@ pub fn parse(name: &str, text: &str) -> (Weave, Vec<Problem>) {
             rules: Vec::new(),
             skills: Vec::new(),
             known: Vec::new(),
+            drills: Vec::new(),
         },
         problems,
         action: None,
+        drill: None,
         arg: None,
         whens: Vec::new(),
     };
@@ -390,6 +394,7 @@ impl Parser {
         if !matches!(kw, "WHEN" | "RUN" | "DO" | "ADD") {
             self.action = None;
         }
+        let drill = self.drill.take();
         let no = line.no;
         match kw {
             "ABOUT" => {
@@ -606,6 +611,22 @@ impl Parser {
                     sample,
                     line: no,
                 });
+            }
+            "DRILL" => self.drill_line(line, c.rest())?,
+            "RESTORE" => {
+                let Some(i) = drill else {
+                    return Err("RESTORE goes on the line under its DRILL".into());
+                };
+                let script = match Self::heredoc(line, c.peek()) {
+                    Some(body) => body.to_string(),
+                    None => c.rest().to_string(),
+                };
+                if script.trim().is_empty() {
+                    return Err("RESTORE has no command".into());
+                }
+                let d = &mut self.w.drills[i];
+                d.restore = Some(script);
+                d.end = line.end;
             }
             _ => unreachable!("every instruction keyword has a branch"),
         }
@@ -829,9 +850,9 @@ impl Parser {
                 "ACTION {n}: the name belongs to a person's task (subweave task); pick another"
             ));
         }
-        if n == crate::service::WEAVE {
+        if n == crate::service::WEAVE || n == crate::service::DRILL {
             return Err(format!(
-                "ACTION {n}: the name belongs to a weave change (subweave weave --change); pick another"
+                "ACTION {n}: the name belongs to a weave change or a drill's escalation; pick another"
             ));
         }
         let mut action = Action {
@@ -884,6 +905,66 @@ impl Parser {
         self.w.actions.push(action);
         self.whens.push(0);
         res
+    }
+
+    fn drill_line(&mut self, line: &Line, rest: &str) -> Result<(), String> {
+        const FORM: &str = "DRILL <name> \"<label>\" BREAK <command> EXPECT <goal> FAILS WITHIN \
+                            <d> HOLDS WITHIN <d> [EVERY <d>] [IF <expr>]";
+        let no = line.no;
+        let mut c = Cur::new(rest);
+        let n = name(c.word().unwrap_or_default(), is_item_name, ITEM_FORM)?;
+        if !c.starts_quoted() {
+            return Err(format!("DRILL {n} needs its label first: {FORM}"));
+        }
+        let label = c.quoted()?;
+        if label.trim().is_empty() || label.chars().count() > LABEL_MAX {
+            return Err(format!("DRILL {n}: the label is 1 to {LABEL_MAX} characters"));
+        }
+        if !c.eat("BREAK") {
+            return Err(format!("{FORM}: DRILL {n} has no BREAK"));
+        }
+        let (breaks, tail) = split_kw(c.rest(), "EXPECT");
+        let Some(tail) = tail else {
+            return Err(format!("{FORM}: DRILL {n} has no EXPECT after its BREAK command"));
+        };
+        if breaks.trim().is_empty() {
+            return Err(format!("DRILL {n}: BREAK has no command"));
+        }
+        let (head, cond) = split_if(tail);
+        let mut t = Cur::new(head);
+        let expect = name(t.word().unwrap_or_default(), is_item_name, ITEM_FORM)?;
+        let mut within = |kw: &str| -> Result<Duration, String> {
+            if !(t.eat(kw) && t.eat("WITHIN")) {
+                return Err(format!("{FORM}: DRILL {n} has no {kw} WITHIN <d>"));
+            }
+            dur(t.word().unwrap_or_default())
+        };
+        let fails_within = within("FAILS")?;
+        let holds_within = within("HOLDS")?;
+        let every = if t.eat("EVERY") {
+            Some(dur(t.word().unwrap_or_default())?)
+        } else {
+            None
+        };
+        if !t.at_end() {
+            return Err(format!("DRILL {n}: `{}` is not EVERY or IF", t.rest()));
+        }
+        let when = cond.and_then(|src| self.expr(no, src));
+        self.drill = Some(self.w.drills.len());
+        self.w.drills.push(Drill {
+            name: n,
+            label,
+            breaks: breaks.trim().to_string(),
+            expect,
+            fails_within,
+            holds_within,
+            every,
+            when,
+            restore: None,
+            line: no,
+            end: line.end,
+        });
+        Ok(())
     }
 
     fn step(&mut self, kw: &str, line: &Line, c: &mut Cur) -> Result<(), String> {

@@ -259,6 +259,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                     action: None,
                     rule: None,
                     signed: false,
+                    drill: None,
                     card: card::tries(ctx, goal, n, per, &shown),
                     facts: shown,
                 });
@@ -274,6 +275,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                         action: None,
                         rule: None,
                         signed: false,
+                        drill: None,
                         card: card::no_fit(ctx, goal, &refusals, &off, &shown),
                         facts: shown,
                     });
@@ -294,6 +296,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                                 action: None,
                                 rule: None,
                                 signed: false,
+                                drill: None,
                                 card: card::which(ctx, goal, &cands, &why, &shown),
                                 facts: shown,
                             });
@@ -369,6 +372,7 @@ fn undo_failed(
         action: None,
         rule: None,
         signed: false,
+        drill: None,
         card: card::undo_failed(ctx, goal, of, u, &why, shown),
         facts: shown.clone(),
     });
@@ -504,6 +508,7 @@ fn ask_gate(ctx: &Ctx, goal: &Goal, a: &Action, rule: &Rule, shown: &BTreeMap<St
         action: Some(a.name.clone()),
         rule: Some(rule.text()),
         signed: false,
+        drill: None,
         card: card::gate(ctx, goal, a, rule, shown),
         facts: shown.clone(),
     });
@@ -886,10 +891,7 @@ async fn wait_within(ctx: &Ctx, goal: &Goal, a: &Action, within: Duration) -> bo
     *ctx.ran.lock().unwrap_or_else(|e| e.into_inner()) = None;
     let whole = ended + goal.over().as_millis() as i64;
     if held && whole > observe::now_ms() {
-        ctx.journal().add(Kind::Wait {
-            goal: goal.name.clone(),
-            until: super::rfc3339(whole),
-        });
+        ctx.wait(&goal.name, whole);
     }
     held
 }

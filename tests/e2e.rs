@@ -963,6 +963,7 @@ FACT errors   LINES   tail -n 0 -F {d}/app.log
 FACT events   LINES   tail -n 0 -F {d}/events.log
 FACT spooled  NUMBER  ls {d}/spool | wc -l
 FACT setting  TEXT    cat {d}/setting
+FACT drills   TEXT    cat {d}/drills 2>/dev/null || true
 
 PART web github:toy/web VERSION cat {d}/web-version
 
@@ -971,7 +972,8 @@ GOAL running   "the hello page is up" \
                AFTER installed  EVERY 1s  TRIES 10 PER 1h  served == 1
 GOAL rotated   "the server log is fresh"  AFTER running    EVERY 1s                   SINCE(rotate) < 1h
 GOAL calm      "the app log stays quiet"  EVERY 2s  OVER 12s  COUNT(errors) == 0
-GOAL quiet     "the event log shows no trouble"  EVERY 1s  OVER 4s  TRIES 10 PER 1h \
+# OVER outlasts a failure's two checks and the repair's start, which drops a goal that holds.
+GOAL quiet     "the event log shows no trouble"  EVERY 1s  OVER 8s  TRIES 10 PER 1h \
                "the lines in `events` show nothing that needs action"
 GOAL tidy      "the spool is empty"       EVERY 1s  spooled == 0
 GOAL tuned     "the setting is on"        EVERY 1s  TRIES 1 PER 1h  setting == 'on'
@@ -1026,6 +1028,14 @@ ACTION untune "Put the setting back" WITHIN 3s CHANGES config
 ACTION upgrade "Upgrade web" FOR patched WITHIN 3s CHANGES version
   WHEN "a newer release of web fixes a security issue"
   RUN  echo 1.2.0 > {d}/web-version
+
+DRILL down "Kill the server" BREAK pkill -f "http.server $port" \
+      EXPECT running FAILS WITHIN 10s HOLDS WITHIN 40s EVERY 2s IF drills == 'on'
+  RESTORE date > {d}/down-restored
+
+DRILL blind "Leave a note outside the spool" BREAK date > {d}/blind-broke \
+      EXPECT tidy FAILS WITHIN 3s HOLDS WITHIN 6s
+  RESTORE date > {d}/blind-restored
 "#,
         from = from_line(),
         www = www.display(),
@@ -1734,6 +1744,8 @@ async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
     let settled = b.lines("answer", |l| l["n"].is_u64()).len() + b.lines("withdraw", |_| true).len();
     assert_eq!(num(4), Some(settled), "{out}");
     assert_eq!(num(5), Some(2), "{out}");
+    // Phase 6n's drills: one passed, one did not notice.
+    assert_eq!(cols.get(6), Some(&"1/2"), "drills passed: {out}");
     for want in ["agent 2", "mcp 1", "steery 1", "withdrawn "] {
         assert!(row.contains(want), "stats lacks {want:?}:\n{out}");
     }
@@ -2477,7 +2489,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
         tools,
         [
             "inbox", "wait_ask", "answer", "known", "forget_known", "known_release", "status", "log",
-            "task", "do", "weave", "weave_change", "skill"
+            "task", "do", "drill", "weave", "weave_change", "skill"
         ],
         "{list}"
     );
@@ -2747,6 +2759,23 @@ async fn daemon_and_cli_keep_a_toy_service() {
             "hush did not run for the disk line: {started}"
         );
         b.holds(&["quiet"], 20).await;
+        // A hold ends a fix's wait: none may come after it, or the next disk line's
+        // failure waits it out with no repair while its window closes.
+        let j = b.journal();
+        let from = j
+            .iter()
+            .rposition(|l| l["kind"] == "action" && l["action"] == "hush" && l["ok"].is_null())
+            .unwrap_or_else(|| b.fail("no start of hush"));
+        let held = j[from..]
+            .iter()
+            .position(|l| l["kind"] == "check" && l["goal"] == "quiet" && l["ok"] == true);
+        if let Some(h) = held {
+            let late: Vec<&Value> = j[from + h..]
+                .iter()
+                .filter(|l| l["kind"] == "wait" && l["goal"] == "quiet")
+                .collect();
+            assert!(late.is_empty(), "a wait after quiet held parks its next failure: {late:?}");
+        }
         let decided = b.lines("decide", |l| l["goal"] == "quiet").len() - decides;
         if i < 2 {
             assert_eq!(decided, 1, "pass {i} of hush was not the decider's");
@@ -3195,6 +3224,67 @@ async fn daemon_and_cli_keep_a_toy_service() {
     let secrets = std::fs::read_to_string(b.service().join("secrets.json")).unwrap();
     assert!(secrets.contains(SECRET), "the run again kept TOY_TOKEN");
     b.holds(&["installed", "running"], 30).await;
+
+    // 6n. Drills. `down` is due every 2s once `drills` is on, but not while a goal fails;
+    // then it runs, the loop notices and restarts the server, and RESTORE does not run.
+    // `blind`, by hand, breaks nothing `tidy` reads: it escalates and RESTORE runs.
+    phase("6n drills");
+    let drill = |b: &Box_, name: &str| b.lines("drill", |l| l["drill"] == name);
+    std::fs::write(dir.join("setting"), "off\n").unwrap();
+    b.until("tuned to fail", 15, || (b.goal("tuned") == "fails").then_some(()))
+        .await;
+    std::fs::write(dir.join("drills"), "on\n").unwrap();
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert!(drill(&b, "down").is_empty(), "an EVERY drill started while tuned failed");
+    std::fs::write(dir.join("setting"), "on\n").unwrap();
+    b.holds(&["tuned"], 15).await;
+    b.until("down to start on its own", 120, || drill(&b, "down").into_iter().next())
+        .await;
+    std::fs::write(dir.join("drills"), "off\n").unwrap();
+    let ended = b
+        .until("down to end", 60, || {
+            drill(&b, "down").into_iter().find(|l| l["step"] == "ended")
+        })
+        .await;
+    if ended["ok"] != true {
+        b.fail(&format!("down did not pass: {ended}"));
+    }
+    let steps = Value::Array(drill(&b, "down").iter().map(|l| l["step"].clone()).collect());
+    assert_eq!(steps, json!(["started", "broke", "detected", "fixed", "ended"]), "{steps:?}");
+    let first = &drill(&b, "down")[0];
+    assert!(first.get("by").is_none(), "EVERY started down, not a person: {first}");
+    assert!(!dir.join("down-restored").exists(), "RESTORE ran after a drill that passed");
+    let out = b.ok(&["ps"]).await;
+    assert!(out.contains("down passed"), "{out}");
+
+    let out = b.ok(&["drill", "toy", "blind"]).await;
+    assert!(out.contains("asked the daemon to run drill blind on toy"), "{out}");
+    let ended = b
+        .until("blind to end", 30, || {
+            drill(&b, "blind").into_iter().find(|l| l["step"] == "ended")
+        })
+        .await;
+    let label = "Leave a note outside the spool";
+    assert_eq!(ended["ok"], false, "{ended}");
+    assert_eq!(ended["text"], format!("tidy did not notice {label}"), "{ended}");
+    let steps = Value::Array(drill(&b, "blind").iter().map(|l| l["step"].clone()).collect());
+    assert_eq!(steps, json!(["started", "broke", "detected", "restored", "ended"]), "{steps:?}");
+    let missed = &drill(&b, "blind")[2];
+    assert!(missed["ok"] == false && missed["text"] == "not within 3s", "{missed}");
+    assert!(dir.join("blind-restored").exists(), "RESTORE did not run");
+    let ask = b
+        .until("blind's escalation", 15, || {
+            b.lines("ask", |l| l["drill"] == "blind").into_iter().next()
+        })
+        .await;
+    assert_eq!(ask["action"], "drill", "{ask}");
+    assert!(
+        ask["text"].as_str().is_some_and(|t| t.contains("`tidy` did not notice")),
+        "{ask}"
+    );
+    let out = b.ok(&["ps"]).await;
+    assert!(out.contains("blind failed") && out.contains(&format!("drill blind: tidy did not notice {label}")), "{out}");
+    b.ok(&["answer", &ask["n"].to_string(), "no"]).await;
 
     // 9. Escalation targets: an agent channel, Steery sessions, weave changes, stats.
     phase("9 escalation");

@@ -80,6 +80,8 @@ a goal fails ──► the decider picks an action
 | `ASK "<text>"`, `ASK IF <expr>`, `ASK BEFORE <action>\|CHANGES <effects>` | wait for the person |
 | `SKILL <name> WHEN "<text>" <<EOF` | what the coder reads, and when |
 | `KNOWN <goal> NORMAL\|TROUBLE "<sample line>"` | what lines of the sample's kind show a goal over log lines ([Memory](#memory)) |
+| `DRILL <name> "<label>" BREAK <command> EXPECT <goal> FAILS WITHIN <d> HOLDS WITHIN <d> [EVERY <d>] [IF <expr>]` | break the service on purpose: the goal must fail, then hold again ([Drills](#drills)) |
+| `RESTORE <command>` | under a `DRILL`: puts back what `BREAK` did when the goal does not hold at the drill's end |
 | `... IF <expr>` | at the end of an `ARG`-reading line: in effect only while `<expr>` holds |
 
 ## Lines
@@ -93,7 +95,7 @@ a goal fails ──► the decider picks an action
   - `RUN` and `FACT`: a bash script. A bash heredoc inside a one-line `RUN` is bash's own.
   - `DO` and `SKILL`: text for a model.
   - `ADD`: a file's contents.
-- Each name is used once in a file, across `ARG`s, slots, `SECRET`s, `FACT`s, `PART`s, `GOAL`s, `ACTION`s and `SKILL`s.
+- Each name is used once in a file, across `ARG`s, slots, `SECRET`s, `FACT`s, `PART`s, `GOAL`s, `ACTION`s, `SKILL`s and `DRILL`s.
 - Order is free. A weave reads best in sections, one per concern: its facts, goals, actions and skills together. The `postgres` weave has sections for install, settings, running, backups, disk, load, updates and logs.
 
 A weave is a directory with two files: the `Weavefile` and a `README.md` for people. The daemon reads only the `Weavefile`.
@@ -240,7 +242,7 @@ GOAL quiet      "the logs show no trouble"   AFTER running    EVERY 10m \
 - `EVERY`: `1m` by default for code, `5m` for quoted conditions.
 - `OVER`: the window the goal is judged over, from now back; its `EVERY` by default. Only a goal that reads a window takes it: a `LINES` fact, or `MIN`, `MAX`, `AVG`, `DELTA` or `COUNT`.
 - `TRIES`: `3 PER 1h` by default. Past it, the daemon escalates. Code counts this, not the model. A `wait` is not a try: a first sync that waits for hours escalates nothing.
-- A goal that never held fails its first check: `SINCE(drill)` has no value until the first drill, so a new box drills right after its first backup.
+- A goal that never held fails its first check: `SINCE(rehearse)` has no value until the first test restore, so a new box tests one right after its first backup.
 - **Fail and hold.** A goal's first failed check makes it suspect, with no warning, action or ask. The daemon checks it again 30 seconds later, or after its `EVERY` when that is sooner; a second failed check makes it fail. The re-check reads the same window, so a line that failed the first check fails the second too.
 - A goal that is suspect or failing holds again only when a check over its full window holds: a line that failed it fails each check until `OVER` has passed without it. A windowed goal that would hold over a window the daemon has not watched whole (after a start or restart) is unknown until it has.
 - After a fix's steps, the `WITHIN` wait judges a windowed goal over the part of its window after the steps, once that part is the whole window or `WITHIN` is spent. A fix that held leaves the goal alone until its whole window is after the steps.
@@ -439,6 +441,30 @@ GOAL logs    "old server logs leave the disk room"  AFTER installed  EVERY 10m \
 - A service that is stopped, removed or not running yet: each goal that comes AFTER it or reads it is `unknown`, and `ps` says why under the service.
 - `subweave plan` and `subweave run` check every reference against the services the box keeps, stopped ones too: a service, goal or fact that is not there, a type, and an AFTER cycle across services fail them. `plan` where no daemon runs lists each reference it could not check, and passes. An agent's weave change is checked the same way.
 - The `box` weave in the [library](https://github.com/subweave/library) keeps what every service on a box shares: room on each filesystem, the clock, the systemd journal's size, SSH, and the OS's security updates. Run it once per box: `subweave run box`. Service weaves go AFTER its goals and keep no copies; `subweave review` flags a copy.
+
+## Drills
+
+A goal that never failed on purpose may not notice a real failure. A drill breaks the service on purpose; its goal must fail, and the loop must make it hold again.
+
+```weavefile
+DRILL cl-stop "Stop the consensus client" BREAK systemctl stop lighthouse \
+      EXPECT synced FAILS WITHIN 3m HOLDS WITHIN 15m EVERY 30d IF NOT adopted
+  RESTORE systemctl start lighthouse
+```
+
+- `BREAK <command>`: what breaks the service. Never a command that deletes data: `subweave review` flags `rm`, `dd`, `DROP`, `FLUSHALL` and similar.
+- `EXPECT <goal>`: a goal of this weave. It must fail within `FAILS WITHIN`, counted from the end of `BREAK`, and hold again within `HOLDS WITHIN`. `plan` refuses a `FAILS WITHIN` shorter than two checks of the goal (its `EVERY` and the 30 s re-check).
+- `RESTORE <command>` on the line under the `DRILL`, or `RESTORE <<EOF` for a script: puts back what `BREAK` did. It runs when the goal does not hold at the drill's end, and when the daemon or the service stops mid-drill.
+- `EVERY <d>`: the daemon runs it on its own. Without `EVERY`, only `subweave drill <service> <name>` (MCP `drill`) runs it.
+- `IF <expr>`: it starts only while the expression holds. Put a drill that touches what the weave did not install behind an `IF`, or behind an `ASK BEFORE` rule on the action that repairs it.
+
+A drill runs beside the repair slot, one per service at a time, and only while its goal holds. An `EVERY` drill also waits until every goal holds or is off, no escalation is open, and no repair runs or waits; one refused tries again a minute later.
+
+The loop repairs what `BREAK` did as any failure: rules, `TRIES` and escalations apply. Messages and cards raised meanwhile say it is a drill.
+
+A drill fails when its goal did not fail in time (`<goal> did not notice <label>`) or did not hold again in time (`<goal> did not recover from <label>`). It escalates as a weave defect, `Drill again?`: fix the goal's check or its actions, then answer `yes`. A `BREAK` that exits non-zero ends the drill with no escalation.
+
+`ps`, `stats` and the dashboard show each service's last drill.
 
 ## The loop
 
@@ -773,7 +799,7 @@ An agent changes a service's weave only through the daemon, never in place.
 
 1. It must parse, pass the checks, and pass the request check with the service's ARGs and no request. Else it is refused with the findings.
 2. Only `FACT`, `GOAL`, `ACTION`, `SKILL` and `KNOWN` differ: it applies at once.
-3. Anything else differs (`NEVER`, `ASK`, `ARG`, `SECRET`, `MODEL`, `NEEDS`, `FROM`, `ABOUT`): a signed escalation, `Change the rules of <service>?`, with what differs and why. The daemon applies it only on that escalation's verified signed `yes`; `no` drops it.
+3. Anything else differs (`NEVER`, `ASK`, `DRILL`, `ARG`, `SECRET`, `MODEL`, `NEEDS`, `FROM`, `ABOUT`): a signed escalation, `Change the rules of <service>?`, with what differs and why. The daemon applies it only on that escalation's verified signed `yes`; `no` drops it.
 4. It applies as a new `run` of the weave: SECRETs and models stay, and ARGs stay as they are when it applies (an ARG only the new weave has takes its checked value). The journal gets a note, `weave changed by <by>: <why>`, with what changed.
 5. A change written against a Weavefile that is no longer the running one is dropped with a note: read the weave again and propose again. So is a signed `yes` while the service is stopped.
 
@@ -781,7 +807,7 @@ An agent changes a service's weave only through the daemon, never in place.
 
 [skills/escalation/SKILL.md](skills/escalation/SKILL.md) tells an agent how to settle an escalation, fix the weave so the next case does not escalate, upstream a generic fix to [github.com/subweave/library](https://github.com/subweave/library) redacted, and what never to do. `subweave skill` prints it; the MCP tool `skill`, Steery words and an agent's stdin carry it.
 
-`subweave stats <service>` counts, per week for the last 4 weeks, the repairs that code, the decider and the coder settled, the escalations by who settled them, and the weave changes.
+`subweave stats <service>` counts, per week for the last 4 weeks, the repairs that code, the decider and the coder settled, the escalations by who settled them, the weave changes, and the drills that passed of those that ended.
 
 ### Agents
 
@@ -795,7 +821,7 @@ An agent changes a service's weave only through the daemon, never in place.
 | `known`, `forget_known`, `known_release` | `subweave known`, `subweave forget-known`, and `subweave known` for a `PART` release ([Memory](#memory)) |
 | `status` | what `ps` shows, as JSON |
 | `log` | a service's newest journal lines, at most 200 |
-| `task`, `do` | `subweave task`, `subweave do` |
+| `task`, `do`, `drill` | `subweave task`, `subweave do`, `subweave drill` |
 | `weave`, `weave_change` | `subweave weave`, `subweave weave --change` |
 | `skill` | the escalation skill |
 
@@ -814,7 +840,7 @@ An agent changes a service's weave only through the daemon, never in place.
 
 The journal is the service's state. The daemon folds each line into that state as it writes the line, and replays the journal when it starts; `ps`, `inbox`, `stats`, the dashboard and MCP read the same fold. `state.json` caches a fold with the part of the journal it covers.
 
-- `kind`: `goals`, `check`, `verdict`, `known`, `release`, `off`, `waiting`, `unknown`, `decide`, `gate`, `action`, `command`, `learn`, `ask`, `answer`, `withdraw`, `sent`, `watch`, `unwatch`, `refused`, `message`, `note`.
+- `kind`: `goals`, `check`, `verdict`, `known`, `release`, `off`, `waiting`, `unknown`, `decide`, `gate`, `action`, `command`, `learn`, `ask`, `answer`, `withdraw`, `sent`, `watch`, `unwatch`, `refused`, `message`, `note`, `drill`.
 - A `verdict` line is the model's `p` that one line (`text`) of a quoted goal's window shows trouble. A `known` line says what a person or an agent (`by`) said lines of `text`'s kind are for the goal: `class` `normal` or `trouble`, `why`; `class: null` forgets them.
 - A `release` line says whether release `text` of `PART` `part` is a security fix (`security`): the model's verdict with `p`, or a person's or an agent's word with `by` and `why`.
 - A `goals` line names the weave's goals, in graph order, when they change. An `off` line says why a goal does not apply; a `waiting` line names the goal it comes AFTER that does not hold (`on`), `<service>:<goal>` for another service's; an `unknown` line says why another service it reads cannot be read (`text`).
@@ -823,7 +849,7 @@ The journal is the service's state. The daemon folds each line into that state a
 - A `command` line holds `output`: stdout and stderr, secrets redacted, the last 4 KB.
 - An `ask` line holds `text`, its title, `body`, what the channels got with it, `answers`, and `rule`, the rule that holds its action. The `gate` line before it names the rule and the escalation, `n`. `lines` are the window's lines of kinds not known normal: an answer with `known` teaches them.
 - `answer` settles escalation `n` with the word in `text`; `withdraw` closes it with no answer, `text` saying why. `sent` says which channel it went to and what that channel reads the answer by; `watch`, a Steery connect the daemon reads whatever becomes of the escalation; `unwatch`, that a channel has nothing more to read for it.
-- A `refused` line keeps an event the state did not allow under `refused`, and why in `text`: an answer to an escalation answered or withdrawn already, an unsigned answer to a signed one.
+- A `refused` line keeps an event the state did not allow under `refused`, and why in `text`: an answer to an escalation answered or withdrawn already, an unsigned answer to a signed one, a `wait` for a goal that holds (a hold ends a wait).
 - An action's run starts with an `action` line with no `ok`, `within` the seconds its goal has to hold and `on` the known trouble lines its goal failed on, and ends with one whose `ok` says whether the goal held within them. A run its loop's stop cut off ends with `stopped`, saying why, instead: it counts toward no `TRIES`. The start of an action with an `UNDO` names it in `undo`; the start of an undo's run names the action it undoes in `undoes`.
 - `by` says who acted, on lines a person causes: `answer`, a task, `do`, `tell`, `stop`, `start`, `forget`, and the `ask` and `gate` lines of a job a person asked for. `cli:<user>` at a terminal, `dash@<ip>` from the dashboard, `mcp:<client name>` from an [agent](#agents), an agent channel's name from its command, the channel's answerer for an answer from a channel.
 - An `ask` line of a signed escalation has `signed: true`. A weave change's `ask` and `answer` lines have `action: "weave"`.
@@ -831,6 +857,7 @@ The journal is the service's state. The daemon folds each line into that state a
 - Every line of a person's task has `action: "task"`. It starts with `{"kind":"action","action":"task","text":"<the task>","by":"…"}`, with no `ok`, when the task starts, and ends with an `action` line whose `ok` says whether it was done and whose `text` is the coder's summary, or why it failed: `ended: the service stopped` when a stop or new settings cut it off.
 - A task that asks waits for the answer; other tasks wait behind it. `yes` runs it again with every rule passed so far and what its earlier runs did.
 - The decider reads the newest action outcomes for the failing goal. `SINCE()` and `TRIES` read the service's state in code.
+- A `drill` line names the `drill` and its `goal`; `step` is `started` (`text`: its label; `by` who asked, none for `EVERY`), `broke` (`ok`: BREAK's exit, `output`), `detected`, `fixed`, `restored` (`ok`, `output`) or `ended` (`ok`: passed; `text`: the result). `detected` and `fixed` with `ok: false` say `not within <d>`. A drill escalation's `ask` has `action: "drill"` and `drill`.
 
 ## The daemon and the CLI
 
@@ -847,7 +874,7 @@ cargo install --locked --git https://github.com/subweave/subweave   # macOS: CLI
 | `review <weave>` | score the Weavefile against the authoring rules |
 | `run <weave> ["<request>"]` | the request check, then hand the service to the daemon |
 | `tell <service> "<request>"` | change ARGs by sentence, with the same check |
-| `ps` | services, failing goals, models, spend this month |
+| `ps` | services, failing goals, models, spend this month, last drill |
 | `log [-f] [--json] [--all] [<service>]` | the journal; `--all` interleaves every service |
 | `stats <service>` | metrics from numeric facts; the ladder per week |
 | `inbox`, `answer <n> <word> [--note "<why>"] [--known normal\|trouble]` | open escalations from every service |
@@ -856,6 +883,7 @@ cargo install --locked --git https://github.com/subweave/subweave   # macOS: CLI
 | `weave <service> [--change <file\|-> --why "<why>"]` | the running weave; propose a new one ([Weave changes](#weave-changes)) |
 | `skill` | the [escalation skill](#the-skill) |
 | `do <service> <action>` | run one action now |
+| `drill <service> <drill>` | run one [drill](#drills) now |
 | `task <service> "<what to do>"` | give the coder a task in words, through the same rules |
 | `learned <service>`, `forget <service> <name>` | the commands this box learned; drop one |
 | `known <service> <goal> normal\|trouble "<line>" [--why "<why>"]`, `forget-known <service> <goal> "<line>"` | what a kind of log line is for a goal ([Memory](#memory)) |
@@ -984,7 +1012,10 @@ instruction
   | "NEVER" ( quoted | if [ because ] | before [ if ] [ because ] )
   | "ASK" ( quoted | if [ because ] | before [ if ] [ because ] )
   | "SKILL" name "WHEN" quoted heredoc
-  | "KNOWN" name ( "NORMAL" | "TROUBLE" ) quoted ;   (* a sample log line *)
+  | "KNOWN" name ( "NORMAL" | "TROUBLE" ) quoted    (* a sample log line *)
+  | "DRILL" name quoted "BREAK" command "EXPECT" name "FAILS" "WITHIN" dur
+           "HOLDS" "WITHIN" dur [ "EVERY" dur ] [ if ]
+  | "RESTORE" body ;                     (* the line under its DRILL *)
 level    = "MUST" | "SHOULD" | "MAY" ;
 type     = "BOOL" | "NUMBER" [ unit ] | "TEXT" | "VERSION" | "LINES" ;
 unit     = "%" | "ms" | "s" | "m" | "h" | "d" | "B" | "KB" | "MB" | "GB" | "TB" ;

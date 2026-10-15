@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::Problem;
-use super::ast::{ArgKind, Before, Condition, Rule, Weave};
+use super::ast::{ArgKind, Before, Condition, Rule, Weave, show_duration};
 use super::expr::{Expr, Op, Window};
 use super::value::{Dim, FactType, Version};
 
@@ -21,6 +21,44 @@ pub fn check(w: &Weave, problems: &mut Vec<Problem>) {
     expressions(w, problems);
     backticks(w, problems);
     known(w, problems);
+    drills(w, problems);
+}
+
+/// Each DRILL expects a goal of this weave, which can fail within FAILS WITHIN: it is
+/// checked within its EVERY, and fails at a second check soon after. It holds again
+/// after it fails.
+fn drills(w: &Weave, problems: &mut Vec<Problem>) {
+    for d in &w.drills {
+        let Some(g) = w.goal(&d.expect) else {
+            problems.push(Problem::new(
+                d.line,
+                format!("DRILL {}: EXPECT {}: no GOAL {}", d.name, d.expect, d.expect),
+            ));
+            continue;
+        };
+        let every = g.every();
+        let soonest = every + every.min(crate::daemon::RECHECK);
+        if d.fails_within < soonest {
+            problems.push(Problem::new(
+                d.line,
+                format!(
+                    "DRILL {}: FAILS WITHIN {} is too short: {} is checked every {} and fails \
+                     at a second check, so it can take {}",
+                    d.name,
+                    show_duration(d.fails_within),
+                    g.name,
+                    show_duration(every),
+                    show_duration(soonest)
+                ),
+            ));
+        }
+        if d.holds_within <= d.fails_within {
+            problems.push(Problem::new(
+                d.line,
+                format!("DRILL {}: HOLDS WITHIN must be longer than FAILS WITHIN", d.name),
+            ));
+        }
+    }
 }
 
 /// Each KNOWN names a quoted goal over a LINES fact, and one kind of line once per goal.
@@ -79,6 +117,7 @@ fn names(w: &Weave, problems: &mut Vec<Problem>) {
             .map(|a| (a.name.as_str(), a.line, "ACTION")),
     );
     all.extend(w.skills.iter().map(|s| (s.name.as_str(), s.line, "SKILL")));
+    all.extend(w.drills.iter().map(|d| (d.name.as_str(), d.line, "DRILL")));
     all.sort_by_key(|(_, line, _)| *line);
     let mut seen: BTreeMap<&str, (u32, &str)> = BTreeMap::new();
     for (name, line, kind) in all {
@@ -239,6 +278,9 @@ pub(super) fn conditions(w: &Weave) -> Vec<(u32, &Expr, bool)> {
             | Rule::NeverBefore { cond: Some(e), line, .. } => conds.push((*line, e, false)),
             _ => {}
         }
+    }
+    for d in &w.drills {
+        conds.extend(d.when.iter().map(|e| (d.line, e, false)));
     }
     conds
 }
