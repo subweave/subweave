@@ -19,7 +19,7 @@ subweave run postgres "postgres 18 for our app, private network, backups to s3:/
 - **Code** checks numbers, runs learned commands and enforces named rules.
 - **The decider** (default [Jev](https://docs.typesafe.ai), a System One model) checks the request against the weave's `ARG`s, picks the next action and judges text. Each decision is one short call to a small, low-cost model.
 - **The coder** (default DeepSeek) writes each box's commands once, and does the open-ended tasks, one gated shell command at a time.
-- **Channels** take the daemon's asks and messages to the person: [Steery](https://steery.dev) (signed answers), Telegram, Slack, email, webhooks.
+- **Channels** take the daemon's asks and messages to the person: [Steery](https://steery.dev) (signed answers), Telegram, Slack, email, webhooks. An agent answers them over MCP, `subweave mcp` ([Agents](WEAVEFILE.md#agents)).
 
 The run picks both models; a Weavefile only hints. One [OpenRouter](https://openrouter.ai) key runs every weave here ([Models](WEAVEFILE.md#models)).
 

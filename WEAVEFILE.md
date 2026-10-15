@@ -577,6 +577,23 @@ subweave channel test steery
 - On the person's computer, `subweave watch` shows every box's messages as system notifications.
 - Channel keys stay on the box in `/etc/subweave/channels.json`, mode 600. They never go to a model.
 
+### Agents
+
+`subweave mcp` is an [MCP](https://modelcontextprotocol.io) server on stdin and stdout: an agent answers the box's asks for the person. It acts as `mcp:<client name>`.
+
+| Tool | Does |
+|---|---|
+| `inbox` | every open ask: service, `n`, goal, action, title, body, facts, answers, when raised |
+| `wait_ask` | blocks until an ask not in `seen` is open, then gives every open ask; `[]` after `timeout_secs` (default 600) |
+| `answer` | answers ask `n` of a service with one of its answers; `note` goes in the journal after the answer |
+| `status` | what `ps` shows, as JSON |
+| `log` | a service's newest journal lines, at most 200 |
+| `task`, `do` | `subweave task`, `subweave do` |
+
+```json
+{"mcpServers": {"subweave": {"command": "ssh", "args": ["-o", "BatchMode=yes", "ubuntu@box", "sudo", "-n", "subweave", "mcp"]}}}
+```
+
 ## Journal
 
 `/var/lib/subweave/services/<service>/journal.jsonl`, one JSON object per line:
@@ -590,7 +607,8 @@ subweave channel test steery
 - A `check` line holds the facts the goal read.
 - A `command` line holds `output`: stdout and stderr, secrets redacted, the last 4 KB.
 - An `ask` line holds `text`, its title, and `body`, what the channels got with it.
-- `by` says who acted, on lines a person causes: `answer`, a task, `do`, `tell`, `stop`, `start`, `forget`, and the `ask` and `gate` lines of a job a person asked for. `cli:<user>` at a terminal, `dash@<ip>` from the dashboard, the channel's answerer for an answer from a channel.
+- `by` says who acted, on lines a person causes: `answer`, a task, `do`, `tell`, `stop`, `start`, `forget`, and the `ask` and `gate` lines of a job a person asked for. `cli:<user>` at a terminal, `dash@<ip>` from the dashboard, `mcp:<client name>` from an [agent](#agents), the channel's answerer for an answer from a channel.
+- An answer's note follows it as a `note` line with the same `by`.
 - Every line of a person's task has `action: "task"`. It starts with `{"kind":"action","action":"task","text":"<the task>","by":"…"}`, with no `ok`, when the task starts, and ends with an `action` line whose `ok` says whether it was done and whose `text` is the coder's summary, or why it failed: `ended: the service stopped` when a stop or new settings cut it off.
 - A task that asks waits for the answer; other tasks wait behind it. `yes` runs it again with every rule passed so far and what its earlier runs did.
 - The decider reads the newest journal lines for the failing goal. `SINCE()`, `PREV()` and `TRIES` read the journal in code.
@@ -615,6 +633,7 @@ cargo install --locked --git https://github.com/subweave/subweave   # macOS: CLI
 | `stats <service>` | metrics from numeric facts |
 | `inbox`, `answer <n> <word>` | open asks from every service |
 | `watch` | messages from every box, as system notifications on this computer |
+| `mcp` | an MCP server on stdin and stdout, for an [agent](#agents) |
 | `do <service> <action>` | run one action now |
 | `task <service> "<what to do>"` | give the coder a task in words, through the same rules |
 | `learned <service>`, `forget <service> <name>` | the commands this box learned; drop one |
