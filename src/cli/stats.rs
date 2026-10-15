@@ -1,13 +1,16 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;
 
 use anyhow::Result;
 use jiff::Timestamp;
 
-use crate::service::{self, Kind, Line};
+use crate::service::{self, JobKind, Kind, Line, TASK};
 
 const HOURS: usize = 24;
 const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+/// The ladder table covers this many weeks.
+const WEEKS: usize = 4;
+const WEEK: i64 = 7 * 86_400;
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -83,10 +86,16 @@ pub fn run(args: Args) -> Result<ExitCode> {
     super::known(&args.service)?;
     let now = Timestamp::now().as_second();
     let lines = service::journal(&args.service)?;
-    let facts = series(&lines, now, 3600, HOURS);
+    print!("{}", facts_table(&lines, now));
+    println!();
+    print!("{}", ladder_table(&lines, now));
+    Ok(ExitCode::SUCCESS)
+}
+
+fn facts_table(lines: &[Line], now: i64) -> String {
+    let facts = series(lines, now, 3600, HOURS);
     if facts.is_empty() {
-        println!("no numeric facts in the last 24 h");
-        return Ok(ExitCode::SUCCESS);
+        return "no numeric facts in the last 24 h\n".into();
     }
     let rows: Vec<[String; 5]> = facts
         .iter()
@@ -99,9 +108,10 @@ pub fn run(args: Args) -> Result<ExitCode> {
             *w = (*w).max(c.chars().count());
         }
     }
+    let mut out = String::new();
     for r in std::iter::once(&head).chain(&rows) {
-        println!(
-            "{:w0$}  {:>w1$}  {:>w2$}  {:>w3$}  {}",
+        out.push_str(&format!(
+            "{:w0$}  {:>w1$}  {:>w2$}  {:>w3$}  {}\n",
             r[0],
             r[1],
             r[2],
@@ -111,9 +121,137 @@ pub fn run(args: Args) -> Result<ExitCode> {
             w1 = widths[1],
             w2 = widths[2],
             w3 = widths[3],
-        );
+        ));
     }
-    Ok(ExitCode::SUCCESS)
+    out
+}
+
+/// One week of the ladder: repairs each rung settled, escalations by who settled them,
+/// and weave changes.
+#[derive(Default)]
+struct Week {
+    code: u32,
+    decider: u32,
+    coder: u32,
+    escalated: BTreeMap<String, u32>,
+    changes: u32,
+}
+
+/// Who settled an escalation, from its answer's `by`: the part before `:` or `@`
+/// (`cli`, `mcp`, `steery`, `telegram`, `dash`), an agent channel's name, or
+/// `withdrawn` when its goal held again.
+fn settler(by: &str) -> String {
+    if by.starts_with("daemon:") {
+        return "withdrawn".into();
+    }
+    match by.find([':', '@']) {
+        Some(i) => by[..i].to_owned(),
+        None => by.to_owned(),
+    }
+}
+
+/// The last `WEEKS` weeks from the journal, oldest first. A repair counts in the week
+/// its action passed, under the highest rung its episode used: the coder (a coder
+/// conversation), the decider (a `decide` line), else code (learned steps or `RUN`).
+/// A repair that escalated counts as an escalation, in the week of its answer.
+fn ladder(lines: &[Line], now: i64) -> Vec<Week> {
+    let mut weeks: Vec<Week> = (0..WEEKS).map(|_| Week::default()).collect();
+    let week = |t: &str| -> Option<usize> {
+        let age = now - t.parse::<Timestamp>().ok()?.as_second();
+        (0..WEEK * WEEKS as i64)
+            .contains(&age)
+            .then(|| WEEKS - 1 - (age / WEEK) as usize)
+    };
+    let repairs: BTreeSet<&str> = lines
+        .iter()
+        .filter(|l| l.job == Some(JobKind::Repair))
+        .filter_map(|l| l.ep.as_deref())
+        .collect();
+    let in_ep = |ep: &str, f: &dyn Fn(&Line) -> bool| {
+        lines.iter().any(|l| l.ep.as_deref() == Some(ep) && f(l))
+    };
+    for l in lines {
+        let Some(k) = week(&l.t) else { continue };
+        let w = &mut weeks[k];
+        match l.kind {
+            Kind::Action if l.ok == Some(true) && l.action.as_deref() != Some(TASK) => {
+                let Some(ep) = l.ep.as_deref().filter(|ep| repairs.contains(ep)) else {
+                    continue;
+                };
+                if in_ep(ep, &|x| x.kind == Kind::Ask) {
+                    continue;
+                }
+                if in_ep(ep, &|x| x.kind == Kind::Note && x.usage.is_some() && x.n.is_none()) {
+                    w.coder += 1;
+                } else if in_ep(ep, &|x| x.kind == Kind::Decide) {
+                    w.decider += 1;
+                } else {
+                    w.code += 1;
+                }
+            }
+            Kind::Answer if l.n.is_some() => {
+                let who = settler(l.by.as_deref().unwrap_or("unknown"));
+                *w.escalated.entry(who).or_default() += 1;
+            }
+            Kind::Note if l.text.as_deref().is_some_and(|t| t.starts_with("weave changed by ")) => {
+                w.changes += 1;
+            }
+            _ => {}
+        }
+    }
+    weeks
+}
+
+fn ladder_table(lines: &[Line], now: i64) -> String {
+    let head = [
+        "WEEK FROM",
+        "CODE",
+        "DECIDER",
+        "CODER",
+        "ESCALATED",
+        "WEAVE CHANGES",
+        "SETTLED BY",
+    ]
+    .map(String::from);
+    let rows: Vec<[String; 7]> = ladder(lines, now)
+        .into_iter()
+        .enumerate()
+        .map(|(k, w)| {
+            let from = now - (WEEKS - k) as i64 * WEEK;
+            let day = Timestamp::from_second(from)
+                .map(|t| t.strftime("%Y-%m-%d").to_string())
+                .unwrap_or_default();
+            let by: Vec<String> = w
+                .escalated
+                .iter()
+                .map(|(who, n)| format!("{who} {n}"))
+                .collect();
+            [
+                day,
+                w.code.to_string(),
+                w.decider.to_string(),
+                w.coder.to_string(),
+                w.escalated.values().sum::<u32>().to_string(),
+                w.changes.to_string(),
+                if by.is_empty() { "-".into() } else { by.join(", ") },
+            ]
+        })
+        .collect();
+    let mut widths = [0usize; 6];
+    for r in std::iter::once(&head).chain(&rows) {
+        for (w, c) in widths.iter_mut().zip(r) {
+            *w = (*w).max(c.chars().count());
+        }
+    }
+    let mut out = String::new();
+    for r in std::iter::once(&head).chain(&rows) {
+        out.push_str(&format!("{:w$}", r[0], w = widths[0]));
+        for (c, w) in r[1..6].iter().zip(&widths[1..]) {
+            out.push_str(&format!("  {c:>w$}"));
+        }
+        out.push_str(&format!("  {}\n", r[6]));
+    }
+    out
 }
 
 /// One bar per hour's mean, scaled from the lowest mean to the highest; a blank for an
