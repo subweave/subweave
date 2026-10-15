@@ -63,10 +63,8 @@ pub async fn run() -> Result<()> {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     }
     // Two daemons on one state would each run every service: every check, repair and ask
-    // twice.
-    if let Some(r) = running() {
-        anyhow::bail!("a daemon already runs on {}: pid {}", paths::state().display(), r.pid);
-    }
+    // twice. The lock lives as long as this process, crash or not.
+    let _lock = lock_state()?;
     save_json(
         &paths::daemon(),
         &Running {
@@ -143,6 +141,24 @@ pub(crate) fn running() -> Option<Running> {
     let alive = unsafe { libc::kill(pid, 0) } == 0
         || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
     alive.then_some(r)
+}
+
+/// `daemon.lock` in the state, held with `flock` until this process ends.
+fn lock_state() -> Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    let path = paths::state().join("daemon.lock");
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    // SAFETY: flock on a descriptor this function owns; the File keeps it open.
+    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let by = running().map_or(String::new(), |r| format!(": pid {}", r.pid));
+        anyhow::bail!("a daemon already runs on {}{by}", paths::state().display());
+    }
+    Ok(f)
 }
 
 impl Daemon {
