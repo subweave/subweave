@@ -29,6 +29,10 @@ jiff = "0.2"
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1-rustls-tls"] }
 libc = "0.2"
 p256 = { version = "0.13", features = ["ecdsa"] }
+# 0.31: the last OTLP exporter on reqwest 0.12, the HTTP client this crate already has.
+opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "trace", "reqwest-blocking-client"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 ryu = "1"
 serde = { version = "1", features = ["derive"] }
@@ -42,6 +46,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]
+opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace"] }
+prost = "0.14"
 tempfile = "3"
 
 [profile.release]

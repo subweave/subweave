@@ -11,6 +11,7 @@ mod journal;
 mod learned;
 mod repair;
 mod service;
+mod trace;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Stdio;
@@ -56,6 +57,7 @@ struct Daemon {
 /// Runs every service in the foreground until SIGINT or SIGTERM.
 pub async fn run() -> Result<()> {
     crate::logs::init();
+    trace::init();
     for dir in [paths::inbox(), paths::services()] {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     }
@@ -116,6 +118,7 @@ pub async fn run() -> Result<()> {
         let _ = t.handle.await;
     }
     let _ = std::fs::remove_file(paths::daemon());
+    let _ = tokio::task::spawn_blocking(trace::shutdown).await;
     Ok(())
 }
 
@@ -197,16 +200,15 @@ impl Daemon {
         let _ = t.handle.await;
         let Some(why) = why else { return };
         let open = std::mem::take(&mut *t.tasks.lock().unwrap_or_else(|e| e.into_inner()));
-        let path = paths::journal(name);
         for job in open {
             if !job.again {
                 let mut start = job.line(None, job.text.clone());
                 start.t = now();
-                journal::append(&path, &start);
+                journal::append(name, &start);
             }
             let mut end = job.line(Some(false), format!("ended: {why}"));
             end.t = now();
-            journal::append(&path, &end);
+            journal::append(name, &end);
         }
     }
 
@@ -375,9 +377,8 @@ impl Daemon {
             }
             None => {
                 let task = ask.action.as_deref() == Some(TASK);
-                let path = paths::journal(&service);
                 journal::append(
-                    &path,
+                    &service,
                     &Line {
                         t: now(),
                         kind: Kind::Answer,
@@ -398,7 +399,7 @@ impl Daemon {
                     let lines = svc::journal(&service).unwrap_or_default();
                     let start_by = journal::task_lines(&lines, n).and_then(|l| l[0].by.clone());
                     journal::append(
-                        &path,
+                        &service,
                         &Line {
                             t: now(),
                             kind: Kind::Action,

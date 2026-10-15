@@ -31,6 +31,8 @@ struct Seen {
     hooks: Vec<Value>,
     /// Questions or requests the script has no answer for.
     unexpected: Vec<String>,
+    /// OTLP trace exports, protobuf.
+    traces: Vec<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -284,6 +286,11 @@ async fn chat(State(m): State<Mock>, headers: HeaderMap, body: String) -> axum::
         "done",
         json!({"commands": [MKDIR, WRITE], "cause": "nothing was installed yet"}),
     )
+}
+
+async fn traces(State(m): State<Mock>, body: axum::body::Bytes) -> &'static str {
+    m.seen().traces.push(body.to_vec());
+    ""
 }
 
 async fn hook(State(m): State<Mock>, body: String) -> &'static str {
@@ -885,6 +892,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .route("/systemone", post(systemone))
         .route("/chat/completions", post(chat))
         .route("/hook", post(hook))
+        .route("/v1/traces", post(traces))
         .with_state(mock.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mock_url = format!("http://{}", listener.local_addr().unwrap());
@@ -939,6 +947,8 @@ async fn daemon_and_cli_keep_a_toy_service() {
     let daemon = b
         .command()
         .env_remove("TOY_TOKEN")
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", &mock_url)
+        .env("OTEL_BSP_SCHEDULE_DELAY", "200")
         .arg("daemon")
         .stdout(log.try_clone().unwrap())
         .stderr(log)
@@ -1451,6 +1461,89 @@ async fn daemon_and_cli_keep_a_toy_service() {
     // 8. The dashboard: a password, the API, the live journal, a task in words.
     phase("8 dash");
     dashboard(&mut b).await;
+
+    // Traces: the first install's repair is one trace whose id is its episode, with a
+    // child span per command line.
+    phase("traces");
+    let ep = b
+        .lines("command", |l| l["action"] == "install")
+        .first()
+        .and_then(|l| l["ep"].as_str().map(String::from))
+        .unwrap_or_else(|| b.fail("no install command with an ep"));
+    let commands: Vec<String> = b
+        .lines("command", |l| l["ep"] == ep)
+        .iter()
+        .filter_map(|l| l["text"].as_str().map(String::from))
+        .collect();
+    assert_eq!(commands, [MKDIR, WRITE]);
+    let (resources, spans) = b
+        .until("the install episode's trace", 15, || {
+            use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+            use prost::Message;
+            let seen = mock.seen();
+            let mut resources = Vec::new();
+            let mut spans = Vec::new();
+            for body in &seen.traces {
+                let Ok(req) = ExportTraceServiceRequest::decode(body.as_slice()) else {
+                    continue;
+                };
+                for rs in req.resource_spans {
+                    let mine: Vec<_> = rs
+                        .scope_spans
+                        .into_iter()
+                        .flat_map(|ss| ss.spans)
+                        .filter(|s| hex::encode(&s.trace_id) == ep)
+                        .collect();
+                    if !mine.is_empty() {
+                        resources.extend(rs.resource.into_iter().flat_map(|r| r.attributes));
+                        spans.extend(mine);
+                    }
+                }
+            }
+            spans
+                .iter()
+                .any(|s| s.parent_span_id.is_empty())
+                .then_some((resources, spans))
+        })
+        .await;
+    let text = |attrs: &[opentelemetry_proto::tonic::common::v1::KeyValue], key: &str| {
+        use opentelemetry_proto::tonic::common::v1::any_value::Value as V;
+        attrs
+            .iter()
+            .find(|kv| kv.key == key)
+            .and_then(|kv| match kv.value.as_ref()?.value.as_ref()? {
+                V::StringValue(s) => Some(s.clone()),
+                _ => None,
+            })
+    };
+    assert_eq!(text(&resources, "service.name").as_deref(), Some("subweave"));
+    assert!(text(&resources, "host.name").is_some(), "{resources:?}");
+    let roots: Vec<_> = spans.iter().filter(|s| s.parent_span_id.is_empty()).collect();
+    assert_eq!(roots.len(), 1, "{spans:?}");
+    let root = roots[0];
+    assert_eq!(root.name, "repair of installed");
+    assert_eq!(text(&root.attributes, "subweave.kind").as_deref(), Some("repair"));
+    assert!(
+        spans
+            .iter()
+            .filter(|s| !s.parent_span_id.is_empty())
+            .all(|s| s.parent_span_id == root.span_id),
+        "every step is a child of the job"
+    );
+    let traced: Vec<String> = spans
+        .iter()
+        .filter(|s| s.name == "command")
+        .filter_map(|s| text(&s.attributes, "subweave.command"))
+        .collect();
+    assert_eq!(traced, commands, "a span per command line");
+    assert!(
+        spans
+            .iter()
+            .filter(|s| s.name == "command")
+            .all(|s| s.end_time_unix_nano > s.start_time_unix_nano
+                && s.start_time_unix_nano >= root.start_time_unix_nano),
+        "{spans:?}"
+    );
 
     // 6d. The secret never left the box: journal, state, webhook, model requests.
     let journal_text = std::fs::read_to_string(b.service().join("journal.jsonl")).unwrap();

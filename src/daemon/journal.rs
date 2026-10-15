@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::paths;
@@ -11,7 +10,7 @@ use crate::service::{self as svc, Kind, Line, TASK};
 use super::{epoch, epoch_of, now, redact};
 
 pub(crate) struct Journal {
-    path: PathBuf,
+    service: String,
     lines: Vec<Line>,
     /// Model spend not yet on a line; the next line carries it.
     pending: f64,
@@ -25,7 +24,7 @@ impl Journal {
             Vec::new()
         });
         Journal {
-            path: paths::journal(service),
+            service: service.to_string(),
             lines,
             pending: 0.0,
             secrets,
@@ -57,7 +56,7 @@ impl Journal {
             l.cost_usd = Some(l.cost_usd.unwrap_or(0.0) + self.pending);
             self.pending = 0.0;
         }
-        append(&self.path, &l);
+        append(&self.service, &l);
         self.lines.push(l.clone());
         l
     }
@@ -262,8 +261,10 @@ pub(crate) fn task_lines(lines: &[Line], n: u64) -> Option<&[Line]> {
     Some(&lines[start..])
 }
 
-/// Appends one line to a journal file.
-pub(crate) fn append(path: &Path, l: &Line) {
+/// Appends one line to a service's journal; the one place lines are written, so the trace
+/// of the line's episode gets it too.
+pub(crate) fn append(service: &str, l: &Line) {
+    let path = paths::journal(service);
     let write = || -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -271,7 +272,7 @@ pub(crate) fn append(path: &Path, l: &Line) {
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(path)?;
+            .open(&path)?;
         let mut bytes = serde_json::to_vec(l)?;
         bytes.push(b'\n');
         f.write_all(&bytes)
@@ -279,13 +280,14 @@ pub(crate) fn append(path: &Path, l: &Line) {
     if let Err(e) = write() {
         tracing::error!(path = %path.display(), error = %e, "cannot write a journal line");
     }
+    super::trace::line(service, l);
 }
 
 /// A note in the journal of a service whose loop is not running; `by`, when not empty,
 /// says who caused it.
 pub(crate) fn note(service: &str, text: &str, by: &str) {
     append(
-        &paths::journal(service),
+        service,
         &Line {
             t: now(),
             kind: Kind::Note,
