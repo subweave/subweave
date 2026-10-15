@@ -442,3 +442,26 @@ pub(crate) fn misfit(ctx: &Ctx) -> Card {
         buttons: buttons(&[("yes", "Run it anyway"), ("no", &later(None))]),
     }
 }
+
+/// An agent's new Weavefile changes more than facts, goals, actions and skills.
+pub(crate) fn weave_change(
+    ctx: &Ctx,
+    by: &str,
+    why: &str,
+    change: &crate::weave::change::Change,
+) -> Card {
+    let mut lines = vec![
+        format!("{by} proposes a new Weavefile: {}.", why.trim_end_matches('.')),
+        "A rule change needs your signed answer.".to_owned(),
+    ];
+    lines.extend(change.removed.iter().map(|l| format!("Removed: {l}")));
+    lines.extend(change.added.iter().map(|l| format!("Added: {l}")));
+    if !change.free.is_empty() {
+        lines.push(format!("Also: {}.", change.summary()));
+    }
+    Card {
+        title: format!("Change the rules of {}?", ctx.name),
+        lines,
+        buttons: buttons(&[("yes", "Apply it"), ("no", "Keep the rules")]),
+    }
+}

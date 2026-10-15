@@ -242,28 +242,80 @@ impl Daemon {
         }
     }
 
+    /// Writes a service's bundle and starts its loop again; `note` journals it, by `by`.
+    async fn run(&mut self, bundle: svc::Bundle, note: &str, by: &str) {
+        let name = bundle.spec.name.clone();
+        if !valid_name(&name) {
+            tracing::warn!(service = %name, "run: no service name");
+            return;
+        }
+        self.halt(&name, Some("the service restarted for new settings"))
+            .await;
+        if let Err(e) = write_bundle(&bundle) {
+            tracing::error!(service = %name, error = %format!("{e:#}"), "run: cannot write the service");
+            return;
+        }
+        journal::note(&name, note, by);
+        self.broken.remove(&name);
+        self.start(&name, true);
+    }
+
+    /// A weave change applies as a run again when its rules stay as they are, or when
+    /// `approved` names the ask whose signed yes it carries; otherwise the service's loop
+    /// raises that signed ask.
+    async fn change(&mut self, bundle: svc::Bundle, why: String, approved: Option<u64>, by: String) {
+        let name = bundle.spec.name.clone();
+        if !valid_name(&name) {
+            tracing::warn!(service = %name, "weave change: no service name");
+            return;
+        }
+        let old_text = std::fs::read_to_string(paths::weavefile(&name)).unwrap_or_default();
+        let parsed = (
+            crate::weave::parse(&name, &old_text),
+            crate::weave::parse(&name, &bundle.weavefile),
+        );
+        let (Ok(old), Ok(new)) = parsed else {
+            let text = format!("weave change by {by} dropped: a Weavefile does not parse");
+            journal::note(&name, &text, &by);
+            return;
+        };
+        let change = crate::weave::change::compare(&old_text, &old, &bundle.weavefile, &new);
+        if !change.rules() || approved.is_some() {
+            let signed = approved
+                .map(|n| format!("; signed yes on #{n}"))
+                .unwrap_or_default();
+            let note = format!("weave changed by {by}: {why}; {}{signed}", change.summary());
+            self.run(bundle, &note, &by).await;
+            return;
+        }
+        match self.tasks.get(&name) {
+            Some(t) => {
+                let _ = t.ctl.send(Ctl::Change {
+                    bundle,
+                    why,
+                    change,
+                    by,
+                });
+            }
+            None => {
+                let text = format!("weave change by {by} dropped: the service is stopped");
+                journal::note(&name, &text, &by);
+            }
+        }
+    }
+
     async fn apply(&mut self, cmd: Command) {
         match cmd {
             Command::Run { bundle, by } => {
-                let name = bundle.spec.name.clone();
-                if !valid_name(&name) {
-                    tracing::warn!(service = %name, "run: no service name");
-                    return;
-                }
-                self.halt(&name, Some("the service restarted for new settings"))
-                    .await;
-                if let Err(e) = write_bundle(&bundle) {
-                    tracing::error!(service = %name, error = %format!("{e:#}"), "run: cannot write the service");
-                    return;
-                }
-                journal::note(
-                    &name,
-                    &format!("run {}: {}", bundle.spec.weave, bundle.spec.request),
-                    &by,
-                );
-                self.broken.remove(&name);
-                self.start(&name, true);
+                let note = format!("run {}: {}", bundle.spec.weave, bundle.spec.request);
+                self.run(bundle, &note, &by).await;
             }
+            Command::Change {
+                bundle,
+                why,
+                approved,
+                by,
+            } => self.change(bundle, why, approved, by).await,
             Command::Tell {
                 service,
                 request,
@@ -432,10 +484,9 @@ impl Daemon {
                         t: now(),
                         kind: Kind::Answer,
                         goal: ask.goal.clone(),
-                        action: if task {
-                            Some(TASK.to_string())
-                        } else {
-                            answers_action(&service, word)
+                        action: match ask.action.as_deref() {
+                            Some(a @ (TASK | svc::WEAVE)) => Some(a.to_string()),
+                            _ => answers_action(&service, word),
                         },
                         text: Some(word.to_string()),
                         n: Some(n),

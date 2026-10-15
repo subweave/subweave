@@ -132,3 +132,11 @@ pub fn output(service: &str) -> PathBuf {
 pub fn status(service: &str) -> PathBuf {
     self::service(service).join("status.json")
 }
+
+/// A weave change that waits for its signed answer: the `Command::Change` that a yes to
+/// ask `n` applies.
+pub fn change(service: &str, n: u64) -> PathBuf {
+    self::service(service)
+        .join("changes")
+        .join(format!("{n}.json"))
+}

@@ -25,6 +25,7 @@ mod task;
 mod term;
 mod version;
 mod watch;
+pub(crate) mod weavefile;
 
 use std::process::ExitCode;
 
@@ -70,6 +71,8 @@ enum Command {
     Learned(learned::Args),
     /// Drop a learned fact command, or an action's learned steps
     Forget(learned::ForgetArgs),
+    /// A service's running Weavefile and ARGs; --change proposes a new Weavefile
+    Weave(weavefile::Args),
     /// Draft SKILL recipes from learned steps, for the weave's author
     Learn(learn::Args),
     /// Pause a service
@@ -116,6 +119,7 @@ impl Command {
             Command::Learn(a) => (a.on.as_deref(), Some(&a.service)),
             Command::Stop(a) | Command::Start(a) => (a.on.as_deref(), Some(&a.service)),
             Command::Rm(a) => (a.on.as_deref(), Some(&a.service)),
+            Command::Weave(a) => (a.on.as_deref(), Some(&a.service)),
             Command::Channel(a) => (a.on.as_deref(), None),
             Command::Key(a) => (a.on.as_deref(), None),
             Command::Provider(a) => (a.on.as_deref(), None),
@@ -176,6 +180,7 @@ async fn local(command: Command) -> Result<ExitCode> {
         Command::Stop(args) => control::stop(args),
         Command::Start(args) => control::start(args),
         Command::Rm(args) => control::rm(args),
+        Command::Weave(args) => weavefile::run(args).await,
         Command::Channel(args) => channel::run(args).await,
         Command::Watch => watch::run().await,
         Command::Mcp => mcp::run().await,

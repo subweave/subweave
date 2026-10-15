@@ -1,6 +1,7 @@
 //! The Weavefile format: `WEAVEFILE.md` in the repository.
 
 pub mod ast;
+pub mod change;
 pub mod check;
 pub mod expr;
 pub mod graph;

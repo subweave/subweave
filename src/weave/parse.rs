@@ -698,6 +698,11 @@ impl Parser {
                 "ACTION {n}: the name belongs to a person's task (subweave task); pick another"
             ));
         }
+        if n == crate::service::WEAVE {
+            return Err(format!(
+                "ACTION {n}: the name belongs to a weave change (subweave weave --change); pick another"
+            ));
+        }
         let mut action = Action {
             name: n.clone(),
             label: None,

@@ -12,6 +12,8 @@ use crate::paths;
 
 /// The `action` of every journal line of a person's task; no ACTION may take the name.
 pub const TASK: &str = "task";
+/// The `action` of the ask and answer lines of a weave change; no ACTION may take the name.
+pub const WEAVE: &str = "weave";
 /// The `text` of the `answer` line that closes an ask whose goal holds again.
 pub const WITHDRAWN: &str = "withdrawn";
 
@@ -110,6 +112,17 @@ pub enum Command {
         service: String,
         name: String,
         #[serde(default)]
+        by: String,
+    },
+    /// A new Weavefile an agent proposed, checked by `weave --change` and bundled as `run`
+    /// bundles a service run again. The daemon applies it at once when the rules stay as
+    /// they are; otherwise a signed ask decides, unless `approved` names the ask whose
+    /// signed yes it carries.
+    Change {
+        bundle: Bundle,
+        why: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approved: Option<u64>,
         by: String,
     },
 }

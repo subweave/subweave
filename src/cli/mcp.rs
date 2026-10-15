@@ -14,7 +14,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdout};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
-use super::{act, inbox, ps, task};
+use super::{act, inbox, ps, task, weavefile};
 use crate::{paths, service};
 
 const PROTOCOL: &str = "2025-06-18";
@@ -210,6 +210,30 @@ fn tools() -> Vec<Value> {
                 "additionalProperties": false,
             },
         }),
+        json!({
+            "name": "weave",
+            "description": "A service's running Weavefile, its ARGs and its source, as `subweave weave` shows them: read it before you change it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"service": service},
+                "required": ["service"],
+                "additionalProperties": false,
+            },
+        }),
+        json!({
+            "name": "weave_change",
+            "description": "Proposes a new Weavefile for a service, as `subweave weave --change`. It must parse and pass the request check with the service's ARGs. FACT, GOAL, ACTION and SKILL changes apply at once; any other change waits for the person's signed answer on Steery (`signed: true`).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "service": service,
+                    "weavefile": {"type": "string", "description": "The whole new Weavefile"},
+                    "why": {"type": "string", "description": "Why, in a sentence"},
+                },
+                "required": ["service", "weavefile", "why"],
+                "additionalProperties": false,
+            },
+        }),
     ]
 }
 
@@ -230,8 +254,29 @@ async fn call(name: &str, args: Value, by: &str) -> Result<Value> {
             act::send(&a.service, &a.action, by.to_string())?;
             json!({"service": a.service, "action": a.action, "by": by})
         }
+        "weave" => {
+            let a: WeaveArgs = parse(args)?;
+            serde_json::to_value(weavefile::show(&a.service)?)?
+        }
+        "weave_change" => {
+            let a: WeaveChangeArgs = parse(args)?;
+            let proposed = weavefile::propose(&a.service, &a.weavefile, &a.why, by.to_string());
+            serde_json::to_value(proposed.await?)?
+        }
         _ => bail!("no tool {name:?}"),
     })
+}
+
+#[derive(Deserialize)]
+struct WeaveArgs {
+    service: String,
+}
+
+#[derive(Deserialize)]
+struct WeaveChangeArgs {
+    service: String,
+    weavefile: String,
+    why: String,
 }
 
 fn parse<T: DeserializeOwned>(args: Value) -> Result<T> {

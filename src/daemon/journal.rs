@@ -5,7 +5,7 @@ use std::io::Write;
 use std::time::Duration;
 
 use crate::paths;
-use crate::service::{self as svc, Kind, Line, TASK};
+use crate::service::{self as svc, Kind, Line, TASK, WEAVE};
 
 use super::{epoch, epoch_of, now, redact};
 
@@ -186,8 +186,8 @@ impl Journal {
         let mut answers: BTreeMap<u64, (String, i64)> = BTreeMap::new();
         for l in &self.lines {
             match l.kind {
-                // A person's task parks no goal and not the box.
-                Kind::Ask if l.action.as_deref() != Some(TASK) => {
+                // A person's task or a weave change parks no goal and not the box.
+                Kind::Ask if !matches!(l.action.as_deref(), Some(TASK | WEAVE)) => {
                     if let Some(n) = l.n {
                         out.insert(l.goal.clone(), (n, None));
                     }

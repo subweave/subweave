@@ -17,7 +17,7 @@ use crate::model::coder::Coder;
 use crate::model::decider::Decider;
 use crate::paths;
 use crate::service::{
-    self as svc, GoalState, GoalStatus, Kind, Learned, Line, Spec, Status, TASK,
+    self as svc, GoalState, GoalStatus, Kind, Learned, Line, Spec, Status, TASK, WEAVE,
 };
 use crate::weave::{self, Condition, Weave, expr, graph};
 
@@ -75,6 +75,13 @@ pub(crate) enum Ctl {
     Do { action: String, by: String },
     Task { text: String, by: String },
     Forget { name: String, by: String },
+    /// A weave change whose rules differ: a signed ask decides it.
+    Change {
+        bundle: svc::Bundle,
+        why: String,
+        change: weave::change::Change,
+        by: String,
+    },
 }
 
 /// The person's tasks a loop runs or has queued, kept current for the daemon: when it
@@ -814,6 +821,10 @@ impl Loop {
                     self.answer_task(n, &word, &by, note);
                     return;
                 }
+                if ask.action.as_deref() == Some(WEAVE) {
+                    self.answer_change(n, &word, &by, note);
+                    return;
+                }
                 let action = ctx.w.action(&word).map(|a| a.name.clone());
                 ctx.journal().add(Line {
                     kind: Kind::Answer,
@@ -930,6 +941,70 @@ impl Loop {
                     &by,
                 );
             }
+            Ctl::Change {
+                bundle,
+                why,
+                change,
+                by,
+            } => {
+                let n = ctx.ask(AskReq {
+                    goal: None,
+                    action: Some(WEAVE.to_string()),
+                    rule: None,
+                    card: card::weave_change(&ctx, &by, &why, &change),
+                    facts: BTreeMap::new(),
+                    signed: true,
+                });
+                // What a signed yes applies.
+                let pending = svc::Command::Change {
+                    bundle,
+                    why,
+                    approved: Some(n),
+                    by,
+                };
+                let path = paths::change(&ctx.name, n);
+                let kept = path
+                    .parent()
+                    .map_or(Ok(()), std::fs::create_dir_all)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|()| save_json(&path, &pending));
+                if let Err(e) = kept {
+                    ctx.journal()
+                        .note(None, format!("weave change #{n} cannot be kept: {e:#}"));
+                }
+            }
+        }
+    }
+
+    /// The person's signed answer to a weave change: yes hands the daemon the change it
+    /// kept; any other word drops it.
+    fn answer_change(&mut self, n: u64, word: &str, by: &str, note: Option<String>) {
+        let ctx = self.ctx.clone();
+        let mut j = ctx.journal();
+        j.add(Line {
+            kind: Kind::Answer,
+            action: Some(WEAVE.to_string()),
+            text: Some(word.to_string()),
+            n: Some(n),
+            by: Some(by.to_string()),
+            ..Default::default()
+        });
+        if let Some(text) = note {
+            j.note_by(None, text, by);
+        }
+        let path = paths::change(&ctx.name, n);
+        let kept: Option<svc::Command> = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok());
+        let _ = std::fs::remove_file(&path);
+        match (word, kept) {
+            ("yes", Some(cmd)) => {
+                if let Err(e) = svc::put(&cmd) {
+                    j.note(None, format!("weave change #{n} cannot be applied: {e:#}"));
+                }
+            }
+            ("yes", None) => j.note(None, format!("weave change #{n}: nothing kept to apply")),
+            _ => j.note(None, format!("weave change #{n} dropped: answered {word}")),
         }
     }
 

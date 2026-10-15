@@ -1,0 +1,157 @@
+//! What a new Weavefile changes, read from the parsed weaves, never the text. FACT, GOAL,
+//! ACTION and SKILL items an agent may change alone; every other item is a rule, and a
+//! change to one waits for the person's signed answer.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::Serialize;
+use serde_json::Value;
+
+use super::Weave;
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Change {
+    /// `GOAL running changed`, `FACT disk added`: the facts, goals, actions and skills.
+    pub free: Vec<String>,
+    /// The Weavefile lines of each rule item only the old weave has, in file order.
+    pub removed: Vec<String>,
+    /// The Weavefile lines of each rule item only the new weave has, in file order.
+    pub added: Vec<String>,
+}
+
+impl Change {
+    /// Whether the rules differ: the change waits for the person's signed answer.
+    pub fn rules(&self) -> bool {
+        !self.removed.is_empty() || !self.added.is_empty()
+    }
+
+    /// `GOAL running changed, FACT disk added`, or what says nothing of them changed.
+    pub fn summary(&self) -> String {
+        if self.free.is_empty() {
+            "no fact, goal, action or skill changed".into()
+        } else {
+            self.free.join(", ")
+        }
+    }
+
+    /// The rule lines that differ, `- ` removed and `+ ` added.
+    pub fn diff(&self) -> Vec<String> {
+        let minus = self.removed.iter().map(|l| format!("- {l}"));
+        minus.chain(self.added.iter().map(|l| format!("+ {l}"))).collect()
+    }
+}
+
+/// `old` and `new`, parsed from `old_text` and `new_text`.
+pub fn compare(old_text: &str, old: &Weave, new_text: &str, new: &Weave) -> Change {
+    let mut change = Change::default();
+    for (what, o, n) in [
+        ("FACT", named(&old.facts, |f| &f.name), named(&new.facts, |f| &f.name)),
+        ("GOAL", named(&old.goals, |g| &g.name), named(&new.goals, |g| &g.name)),
+        ("ACTION", named(&old.actions, |a| &a.name), named(&new.actions, |a| &a.name)),
+        ("SKILL", named(&old.skills, |s| &s.name), named(&new.skills, |s| &s.name)),
+    ] {
+        for name in o.keys().chain(n.keys()).collect::<BTreeSet<_>>() {
+            let how = match (o.get(name), n.get(name)) {
+                (Some(a), Some(b)) if a == b => continue,
+                (Some(_), Some(_)) => "changed",
+                (Some(_), None) => "removed",
+                (None, _) => "added",
+            };
+            change.free.push(format!("{what} {name} {how}"));
+        }
+    }
+    let (o, n) = (rules(old_text, old), rules(new_text, new));
+    let ok: Vec<&Value> = o.iter().map(|(k, _)| k).collect();
+    let nk: Vec<&Value> = n.iter().map(|(k, _)| k).collect();
+    for (k, lines) in &o {
+        if !nk.contains(&k) {
+            change.removed.extend(lines.iter().cloned());
+        }
+    }
+    for (k, lines) in &n {
+        if !ok.contains(&k) {
+            change.added.extend(lines.iter().cloned());
+        }
+    }
+    change
+}
+
+/// Each item by name, as its JSON without line numbers.
+fn named<T: Serialize>(items: &[T], name: impl Fn(&T) -> &String) -> BTreeMap<String, Value> {
+    items
+        .iter()
+        .map(|i| (name(i).clone(), unlined(i)))
+        .collect()
+}
+
+/// Every rule item (ABOUT, FROM, NEEDS, MODEL, each ARG, SECRET, NEVER and ASK) as its
+/// JSON without line numbers, with the Weavefile lines that write it, in file order.
+fn rules(text: &str, w: &Weave) -> Vec<(Value, Vec<String>)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let keyword = |word: &str| -> Vec<String> {
+        lines
+            .iter()
+            .filter(|l| l.trim_start().split_whitespace().next() == Some(word))
+            .map(|l| l.trim().to_owned())
+            .collect()
+    };
+    // From `first` to `last` (1-based), and on while a line ends with `\`.
+    let span = |first: u32, last: u32| -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut i = first.max(1) as usize - 1;
+        while i < lines.len() {
+            let go_on = out.last().is_some_and(|l| l.ends_with('\\'));
+            if i >= last as usize && !go_on {
+                break;
+            }
+            out.push(lines[i].trim().to_owned());
+            i += 1;
+        }
+        out
+    };
+    let mut items = Vec::new();
+    if let Some(about) = &w.about {
+        items.push((Value::String(format!("ABOUT {about}")), keyword("ABOUT")));
+    }
+    if let Some(from) = &w.from {
+        items.push((unlined(from), span(from.line, from.line)));
+    }
+    if w.needs.line > 0 {
+        items.push((unlined(&w.needs), span(w.needs.line, w.needs.line)));
+    }
+    if w.model.decide.is_some() || !w.model.code.is_empty() {
+        items.push((unlined(&w.model), keyword("MODEL")));
+    }
+    for a in &w.args {
+        let last = match &a.kind {
+            super::ArgKind::Options(opts) => opts.iter().map(|o| o.line).max().unwrap_or(a.line),
+            super::ArgKind::Value { .. } => a.line,
+        };
+        items.push((unlined(a), span(a.line, last.max(a.line))));
+    }
+    for s in &w.secrets {
+        items.push((unlined(s), span(s.line, s.line)));
+    }
+    for r in &w.rules {
+        items.push((unlined(r), span(r.line(), r.line())));
+    }
+    items
+}
+
+/// `item` as JSON, every `line` field taken out: moving an item is no change.
+fn unlined<T: Serialize>(item: &T) -> Value {
+    let mut v = serde_json::to_value(item).unwrap_or(Value::Null);
+    strip(&mut v);
+    v
+}
+
+fn strip(v: &mut Value) {
+    match v {
+        Value::Object(map) => {
+            map.remove("line");
+            map.values_mut().for_each(strip);
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip),
+        _ => {}
+    }
+}
