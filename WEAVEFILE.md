@@ -551,7 +551,8 @@ A channel is where messages go. Channels belong to the daemon, not to the weave:
 ```
 subweave channel add steery                        # a Steery key, read from stdin
 subweave channel add telegram 123456789            # the chat id; the bot token from stdin
-subweave channel add slack                         # an incoming-webhook URL, from stdin
+subweave channel add slack C0123ABCD               # the channel id; a bot token (xoxb-…) from stdin
+subweave channel add slack                         # or an incoming-webhook URL, from stdin
 subweave channel add email ops@acme.dev            # an SMTP URL, from stdin
 subweave channel add webhook https://ops.acme.dev/subweave
 subweave channel add heartbeat https://hc-ping.com/<uuid>
@@ -562,7 +563,7 @@ subweave channel test steery
 |---|---|---|
 | `steery` | asks as cards on the person's phone, [steery.dev](https://steery.dev) | yes, signed by the person's device |
 | `telegram` | every message, from the person's own bot | yes, with buttons |
-| `slack` | every message | no |
+| `slack` | every message, from a bot with `chat:write` or an incoming webhook | no |
 | `email` | every message | no |
 | `webhook` | every message, as JSON | no |
 | `heartbeat` | a GET after every tick | — |

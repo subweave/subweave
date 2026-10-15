@@ -22,7 +22,7 @@ enum Cmd {
     Add {
         /// steery, telegram, slack, email, webhook or heartbeat
         kind: ChannelKind,
-        /// telegram: the chat id; email: the address; webhook, heartbeat: the URL
+        /// telegram: the chat id; slack: the channel id, for a bot token; email: the address; webhook, heartbeat: the URL
         target: Option<String>,
         /// The lowest message it gets: ask, warning or info
         #[arg(long)]
@@ -96,7 +96,7 @@ fn read_secret(kind: ChannelKind) -> Result<Option<String>> {
     let what = match kind {
         ChannelKind::Steery => "the Steery key",
         ChannelKind::Telegram => "the bot token",
-        ChannelKind::Slack => "the Slack incoming-webhook URL",
+        ChannelKind::Slack => "the Slack bot token (xoxb-…) or incoming-webhook URL",
         ChannelKind::Email => "the SMTP URL, like smtps://user:pass@host:465",
         ChannelKind::Webhook => {
             if std::io::stdin().is_terminal() {
