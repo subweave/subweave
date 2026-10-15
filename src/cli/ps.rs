@@ -40,7 +40,8 @@ pub(crate) fn rows() -> Result<Vec<Row>> {
                         .iter()
                         .filter(|g| g.state == GoalState::Holds)
                         .count(),
-                    total: st.goals.len(),
+                    // An off goal does not apply on this box: it is neither held nor owed.
+                    total: st.goals.iter().filter(|g| g.state != GoalState::Off).count(),
                 }),
                 failing: st
                     .goals
