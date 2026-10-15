@@ -536,6 +536,9 @@ impl Loop {
             t.since = Some(now());
             self.dirty = true;
         }
+        if state == GoalState::Off {
+            self.withdraw(goal, "no longer applies: its IF, or a parent's, is false");
+        }
     }
 
     /// A check's result: journal line when it says something new, messages on change.
@@ -611,15 +614,15 @@ impl Loop {
             }
         }
         if state == GoalState::Holds {
-            self.withdraw(&g.name);
+            self.withdraw(&g.name, "holds again");
         }
     }
 
-    /// Asks for `goal` the loop raised are moot once it holds: each gets a `withdrawn`
-    /// answer, its channel message loses its buttons, and the channels hear it.
-    /// Checked on every pass, not only on the change, so an ask left open by an older
-    /// daemon closes too.
-    fn withdraw(&self, goal: &str) {
+    /// Asks for `goal` the loop raised are moot once it holds or turns off (`why`): each
+    /// gets a `withdrawn` answer, its channel message loses its buttons, and the
+    /// channels hear it. Checked on every pass, not only on the change, so an ask left
+    /// open by an older daemon closes too.
+    fn withdraw(&self, goal: &str, why: &str) {
         let ctx = &self.ctx;
         let open = ctx.journal().open_for(goal);
         for n in open {
@@ -631,7 +634,7 @@ impl Loop {
                 goal: Some(goal.to_string()),
                 text: Some(svc::WITHDRAWN.to_string()),
                 n: Some(n),
-                by: Some(format!("daemon: {goal} holds again")),
+                by: Some(format!("daemon: {goal} {why}")),
                 ..Default::default()
             });
             asks::withdraw(&ctx.shared, n);
@@ -639,7 +642,7 @@ impl Loop {
                 channel::Kind::Info,
                 Some(goal.to_string()),
                 format!("#{n} withdrawn"),
-                format!("{goal} holds again; ask #{n} is closed."),
+                format!("{goal} {why}; ask #{n} is closed."),
                 BTreeMap::new(),
             );
         }
