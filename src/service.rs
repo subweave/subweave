@@ -127,6 +127,16 @@ pub enum Command {
         why: Option<String>,
         by: String,
     },
+    /// Release `version` of PART `part` is a security fix, or not.
+    Release {
+        service: String,
+        part: String,
+        version: String,
+        security: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why: Option<String>,
+        by: String,
+    },
     /// A new Weavefile an agent proposed, checked by `weave --change` and bundled as `run`
     /// bundles a service run again. `base`: the Weavefile it was written against; the
     /// daemon drops the change once the running one differs. It applies at once when the

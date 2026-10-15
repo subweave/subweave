@@ -41,6 +41,8 @@ same tools.
   `subweave answer <n> <word> --known normal|trouble --note "why"` (MCP: `known`).
 - Outside an escalation: `subweave known <service> <goal> normal|trouble "<line>"
   --why "<reason>"`; `subweave forget-known <service> <goal> "<line>"` takes it back.
+- A `PART` release the model judged wrong: `subweave known <service> <part>
+  security|routine <version> --why "<reason>"` (MCP: `known_release`).
 - Never add lists of normal lines to a goal's sentence: teach the kinds. The box
   drops normal ones in code and fails on trouble ones without a model.
 - `subweave learn <service>` drafts KNOWN lines from what the box knows; generic ones

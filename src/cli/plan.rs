@@ -92,8 +92,12 @@ fn overview(w: &Weave) -> String {
         let fw = w.facts.iter().map(|f| f.name.len()).max().unwrap_or(0);
         for f in &w.facts {
             let how = match &f.source {
-                FactSource::Command(_) => "command",
-                FactSource::Quoted(_) => "learned",
+                FactSource::Command(_) => "command".to_string(),
+                FactSource::Quoted(_) => "learned".to_string(),
+                FactSource::Part { part, .. } => match w.part(part) {
+                    Some(p) => format!("PART {}", p.source),
+                    None => "PART".to_string(),
+                },
             };
             let _ = writeln!(out, "{:fw$}  {:9}  {how}", f.name, f.ty.to_string());
         }

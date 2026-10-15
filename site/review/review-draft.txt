@@ -1,4 +1,4 @@
-draft  56/100   44 rules, 115 checks, $0.0008
+draft  55/100   44 rules, 115 checks, $0.0008
 
 area       score  failed
 header         0  about (1), needs (1), about-plain (1)
@@ -7,21 +7,21 @@ secrets       40  secret-used (1), secret-argv (1)
 facts         36  fact-number (2), fact-exit (1), fact-reads (1), fact-command-reads (1), follow-trusted (1), command-syntax (1)
 goals         80  goal-has-action (1), goal-no-threshold (1)
 actions       65  catch-all (1), literal-arg (2), when-situation (1), risky-asks (1), whens-apart (7), do-specific (1), run-unattended (1), run-repeatable (1)
-rules         50  rule-no-number (1), rule-concrete (1)
+rules         30  rule-no-number (1), rule-concrete (2)
 skills        40  skill-specific (1), skill-warns (1)
 coverage      85  cov-exposure (1)
 
-Weavefile:5    error    arg-default-fits     keep                                      an ARG's default fits its own description                                     0.18
+Weavefile:5    error    arg-default-fits     keep                                      an ARG's default fits its own description                                     0.15
 Weavefile:15   error    rule-no-number       NEVER "allow more than 100 connections"   a rule on a number is NEVER IF or ASK IF, in code                             0.98
                                                                                        LIMITS.md#1.
 Weavefile:20   error    fact-reads           clean                                     a quoted FACT describes a reading, not a change                               0.12
 Weavefile:21   error    fact-command-reads   pending                                   a FACT command only reads                                                     0.86
                                                                                        Facts run every few minutes: LIMITS.md#7.
-Weavefile:27   error    goal-no-threshold    fast                                      a threshold is code, not prose                                                0.94
+Weavefile:27   error    goal-no-threshold    fast                                      a threshold is code, not prose                                                0.93
                                                                                        The decider does not compare numbers inside a sentence: LIMITS.md#1.
 Weavefile:30   error    goal-has-action      served                                    every goal has an action that may fix it
 Weavefile:37   error    command-syntax       action restart                            every command passes `bash -n`
-Weavefile:37   error    when-situation       restart                                   WHEN says when the action is the fix, not what it does                        0.14
+Weavefile:37   error    when-situation       restart                                   WHEN says when the action is the fix, not what it does                        0.13
                                                                                        The decider picks an action by its WHEN alone: LIMITS.md#2.
 Weavefile:45   error    risky-asks           restore                                   an action that can lose data or keep the service down has ASK BEFORE          0.94
 Weavefile:1    warning  about                draft                                     ABOUT says what the service is
@@ -32,32 +32,34 @@ Weavefile:4    warning  arg-used             version                            
 Weavefile:5    warning  arg-used             keep                                      every ARG and slot is read by a command, quoted text, an IF or a skill
 Weavefile:6    warning  arg-used             region                                    every ARG and slot is read by a command, quoted text, an IF or a skill
 Weavefile:7    warning  arg-default-safe     access                                    a default is safe for someone who did not choose it; else make the ARG MUST   0.02
-Weavefile:7    warning  options-distinct     access                                    an ARG's options do not overlap                                               0.56
+Weavefile:7    warning  options-distinct     access                                    an ARG's options do not overlap                                               0.65
 Weavefile:7    warning  arg-used             access                                    every ARG and slot is read by a command, quoted text, an IF or a skill
 Weavefile:13   warning  secret-used          PW                                        every SECRET is named in a command, a task or a skill
+Weavefile:15   warning  rule-concrete        NEVER "allow more than 100 connections"   a quoted rule names something one command can do                              0.45
+                                                                                       Quoted rules gate each coder command: LIMITS.md#5.
 Weavefile:16   warning  rule-concrete        NEVER "be insecure"                       a quoted rule names something one command can do                              0.00
                                                                                        Quoted rules gate each coder command: LIMITS.md#5.
-Weavefile:18   warning  fact-exit            up                                        a quoted BOOL fact says when it exits 0                                       0.08
-Weavefile:19   warning  fact-number          disk                                      a quoted NUMBER fact describes one number                                     0.03
-Weavefile:20   warning  fact-number          clean                                     a quoted NUMBER fact describes one number                                     0.33
+Weavefile:18   warning  fact-exit            up                                        a quoted BOOL fact says when it exits 0                                       0.10
+Weavefile:19   warning  fact-number          disk                                      a quoted NUMBER fact describes one number                                     0.04
+Weavefile:20   warning  fact-number          clean                                     a quoted NUMBER fact describes one number                                     0.30
 Weavefile:23   warning  follow-trusted       weblog                                    a LINES fact reads only lines the service writes about itself                 0.01
                                                                                        Text on the box can steer the decider: LIMITS.md#3.
-Weavefile:32   warning  secret-argv          PGPASSWORD in action install              a secret never appears in a command line                                      0.76
+Weavefile:32   warning  secret-argv          PGPASSWORD in action install              a secret never appears in a command line                                      0.84
 Weavefile:32   warning  literal-arg          action install                            a command reads an ARG as $name, not its default written out
-Weavefile:32   warning  run-unattended       install                                   a RUN step never waits for input                                              0.74
+Weavefile:32   warning  run-unattended       install                                   a RUN step never waits for input                                              0.77
 Weavefile:41   warning  literal-arg          action bounce                             a command reads an ARG as $name, not its default written out
-Weavefile:41   warning  whens-apart          restart / bounce for room                 two actions for one goal have WHENs that do not overlap                       0.90
-Weavefile:41   warning  whens-apart          restart / bounce for fast                 two actions for one goal have WHENs that do not overlap                       0.88
-Weavefile:41   warning  run-repeatable       bounce                                    a RUN step is safe to run twice                                               0.31
+Weavefile:41   warning  whens-apart          restart / bounce for room                 two actions for one goal have WHENs that do not overlap                       0.91
+Weavefile:41   warning  whens-apart          restart / bounce for fast                 two actions for one goal have WHENs that do not overlap                       0.91
+Weavefile:41   warning  run-repeatable       bounce                                    a RUN step is safe to run twice                                               0.34
                                                                                        TRIES and learned steps run an action again.
-Weavefile:45   warning  whens-apart          restart / restore for fast                two actions for one goal have WHENs that do not overlap                       0.68
-Weavefile:45   warning  whens-apart          bounce / restore for fast                 two actions for one goal have WHENs that do not overlap                       0.69
+Weavefile:45   warning  whens-apart          restart / restore for fast                two actions for one goal have WHENs that do not overlap                       0.69
+Weavefile:45   warning  whens-apart          bounce / restore for fast                 two actions for one goal have WHENs that do not overlap                       0.72
 Weavefile:49   warning  whens-apart          restart / tune for fast                   two actions for one goal have WHENs that do not overlap                       0.78
-Weavefile:49   warning  whens-apart          bounce / tune for fast                    two actions for one goal have WHENs that do not overlap                       0.80
-Weavefile:49   warning  whens-apart          restore / tune for fast                   two actions for one goal have WHENs that do not overlap                       0.75
-Weavefile:49   warning  do-specific          tune                                      a DO task names what to change                                                0.18
+Weavefile:49   warning  whens-apart          bounce / tune for fast                    two actions for one goal have WHENs that do not overlap                       0.81
+Weavefile:49   warning  whens-apart          restore / tune for fast                   two actions for one goal have WHENs that do not overlap                       0.78
+Weavefile:49   warning  do-specific          tune                                      a DO task names what to change                                                0.14
 Weavefile:53   warning  skill-specific       k8s                                       a skill gives facts specific to the software                                  0.02
 Weavefile:1    note     about-plain          draft                                     ABOUT names the software and what it provides                                 0.02
-Weavefile:5    note     arg-what-example     keep                                      an ARG's description gives an example                                         0.15
-Weavefile:6    note     arg-what-example     region                                    an ARG's description gives an example                                         0.04
+Weavefile:5    note     arg-what-example     keep                                      an ARG's description gives an example                                         0.12
+Weavefile:6    note     arg-what-example     region                                    an ARG's description gives an example                                         0.03
 Weavefile:53   note     skill-warns          k8s                                       a skill says what not to do                                                   0.11

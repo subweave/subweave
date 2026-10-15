@@ -69,14 +69,15 @@ a goal fails ──► the decider picks an action
 | `ARG <name>[=<default>] MUST\|SHOULD\|MAY ["<what>"]` | a setting the request chooses |
 | `SECRET <NAME> "<what>"` | a value the person types once |
 | `FACT <name> <TYPE> <command>\|"<what>"` | what the box shows: `BOOL`, `NUMBER [<unit>]`, `TEXT`, `VERSION` or `LINES` |
+| `PART <name> github:<org>/<repo>\|docker:<image>\|apt:<package> VERSION <command>` | a component with releases, and its derived facts ([PART](#part)) |
 | `GOAL <name> "<sentence>" ... <condition>` | what must hold |
-| `ACTION <name> ["<label>"] [FOR <goals>] [WITHIN <duration>]` | what the loop may do |
-| `... IF <expr>` | at the end of a `SECRET`, `GOAL`, `ACTION` or `ASK BEFORE` line: in effect only while `<expr>` holds |
+| `ACTION <name> ["<label>"] [FOR <goals>] [WITHIN <duration>] [CHANGES <effects>] [UNDO <action>]` | what the loop may do, and what it changes |
+| `... IF <expr>` | at the end of a `SECRET`, `GOAL`, `ACTION` or `BEFORE` rule line: in effect only while `<expr>` holds |
 | `RUN <command>` | a step of the action above, in code |
 | `DO "<task>"` | a step of the action above, for the coder |
 | `ADD <<EOF <path>` | a step of the action above: write a file on the box |
-| `NEVER "<text>"`, `NEVER IF <expr> [BECAUSE "<why>"]` | refuse |
-| `ASK "<text>"`, `ASK BEFORE <action> [BECAUSE "<why>"]`, `ASK IF <expr> [BECAUSE "<why>"]` | wait for the person |
+| `NEVER "<text>"`, `NEVER IF <expr>`, `NEVER BEFORE <action>\|CHANGES <effects>` | refuse |
+| `ASK "<text>"`, `ASK IF <expr>`, `ASK BEFORE <action>\|CHANGES <effects>` | wait for the person |
 | `SKILL <name> WHEN "<text>" <<EOF` | what the coder reads, and when |
 | `KNOWN <goal> NORMAL\|TROUBLE "<sample line>"` | what lines of the sample's kind show a goal over log lines ([Memory](#memory)) |
 | `... IF <expr>` | at the end of an `ARG`-reading line: in effect only while `<expr>` holds |
@@ -87,12 +88,12 @@ a goal fails ──► the decider picks an action
 - `\` at the end of a line joins it to the next line, outside heredocs.
 - `#` at the start of a line makes it a comment.
 - `WHEN`, `RUN`, `DO` and `ADD` belong to the `ACTION` above them. Each action has one `WHEN`.
-- `IF <expr>` ends a `SECRET`, `GOAL`, `ACTION` or `ASK BEFORE` line. The instruction is in effect only while the expression holds. `NEVER IF` and `ASK IF` are rules of their own.
+- `IF <expr>` ends a `SECRET`, `GOAL`, `ACTION` or `BEFORE` rule line. The instruction is in effect only while the expression holds. `NEVER IF` and `ASK IF` are rules of their own.
 - `<<EOF` in place of an instruction's text starts a heredoc: `RUN <<EOF`, `DO <<EOF`, `SKILL wal-g WHEN "…" <<EOF`. The text is the lines up to the one that holds only `EOF` and spaces, without their common indentation. Any capital word works in place of `EOF`.
   - `RUN` and `FACT`: a bash script. A bash heredoc inside a one-line `RUN` is bash's own.
   - `DO` and `SKILL`: text for a model.
   - `ADD`: a file's contents.
-- Each name is used once in a file, across `ARG`s, slots, `SECRET`s, `FACT`s, `GOAL`s, `ACTION`s and `SKILL`s.
+- Each name is used once in a file, across `ARG`s, slots, `SECRET`s, `FACT`s, `PART`s, `GOAL`s, `ACTION`s and `SKILL`s.
 - Order is free. A weave reads best in sections, one per concern: its facts, goals, actions and skills together. The `postgres` weave has sections for install, settings, running, backups, disk, load, updates and logs.
 
 A weave is a directory with two files: the `Weavefile` and a `README.md` for people. The daemon reads only the `Weavefile`.
@@ -185,6 +186,37 @@ FACT logs      LINES      "new WARNING, ERROR, FATAL and PANIC lines of the Post
 - The daemon runs a fact only when a goal that is due needs it. A goal that is off reads no facts. All goals checked in one tick read one snapshot: each fact is read once.
 - In a decider request, `BOOL`, `NUMBER` and `VERSION` values go under `facts`; `TEXT` and `LINES` go under `program_output`.
 
+## PART
+
+```weavefile
+PART reth        github:paradigmxyz/reth  VERSION reth --version | sed -n 's/^reth Version: //p'
+PART lighthouse  docker:sigp/lighthouse   VERSION lighthouse --version | head -1 | cut -d' ' -f2
+PART openssl     apt:openssl              VERSION dpkg-query -W -f '${Version}' openssl
+```
+
+`PART <name> <source> VERSION <command>`: a component with releases. The command prints the running version.
+
+| Source | Releases |
+|---|---|
+| `github:<org>/<repo>` | the repo's GitHub releases, with their notes; drafts and pre-releases left out |
+| `docker:<image>` | the image's tags that are plain versions, from its registry; tags carry no notes |
+| `apt:<package>` | the versions `apt-cache madison` lists, with each one's changelog entry |
+
+Each part adds five facts, which goals and quoted texts read like any fact:
+
+| Fact | Type | Value |
+|---|---|---|
+| `<name>.running` | `VERSION` | what the command printed |
+| `<name>.newest` | `VERSION` | the newest release |
+| `<name>.behind` | `NUMBER` | releases newer than the running one |
+| `<name>.security` | `BOOL` | a newer release fixes a security issue or is high priority |
+| `<name>.notes` | `TEXT` | the notes of the newer releases |
+
+- The release list is kept 6 hours under the service's directory, then read again.
+- `.security`: the decider reads the notes of each newer release once. Its verdict is kept in memory by part and version ([Memory](#memory)); `subweave known <service> <part> security|routine <version>` beats it. A release with no notes is no security fix unless someone says it is.
+- A source's facts have no value while it cannot be read: a goal that reads them is unknown.
+- `GITHUB_API_URL` moves the GitHub API.
+
 ## GOAL
 
 ```weavefile
@@ -275,14 +307,28 @@ ACTION fix WITHIN 30m
   DO   "make the failing goal hold again without losing data"
 ```
 
-`ACTION <name> ["<label>"] [FOR <goal>, …] [WITHIN <duration>] [IF <expr>]`
+`ACTION <name> ["<label>"] [FOR <goal>, …] [WITHIN <duration>] [CHANGES <effect>, …] [UNDO <action>] [IF <expr>]`
 
 - `"<label>"`: the button that runs the action on a card, at most 40 characters: `"Restart PostgreSQL"`. Without one, the button shows the name.
-- `FOR`: the goals this action may fix. Without `FOR`, any goal.
+- `FOR`: the goals this action may fix. Without `FOR`, any goal, unless another action's `UNDO` names it.
 - `WITHIN`: after the last step, the goal must hold again within this time; `5m` by default. Until then the loop does nothing else for that goal. A restore that replays WAL for hours says `WITHIN 6h`.
-- `IF`: the action does not run while the expression is false.
-  - An `IF` on facts or `SINCE` is a precondition: while false, or unknown, the action is no fix at all.
-  - An `IF` on ARGs only says how the box is set up: the action is the person's here. When its `FOR` names the failing goal and the decider picks it, the person gets a card that names the fix, like `Update reth and Lighthouse yourself?`. `subweave do` and an answer never run it.
+- `CHANGES`: what the action changes, from five effects. Rules by effect gate it ([Rules](#rules)). An action without `CHANGES` counts as changing all five.
+
+  | Effect | The action |
+  |---|---|
+  | `restart` | restarts the service: a short outage |
+  | `config` | changes settings |
+  | `version` | installs another release |
+  | `data` | changes or deletes stored data |
+  | `network` | changes who reaches the box: listeners, firewall |
+
+  `CHANGES nothing` says it changes none of them.
+- `UNDO <action>`: the action that puts back what this one changed.
+  - When this action fails, or its goal does not hold within `WITHIN`, the undo runs through the rules and is journaled.
+  - When this action passed and a goal that held before it fails within its `WITHIN`, the undo runs first.
+  - An undo passes when every goal that held before the action holds again. It never starts an undo of its own. When it fails, or a rule refuses it, the person gets a card.
+  - An action only an `UNDO` names, with no `FOR`, is never a fix of its own.
+- `IF`: a precondition. While the expression is false, or unknown, the action is no fix. When no action fits, the card says what the action written for the goal needs.
 - `WHEN` says when the action is the right fix, not what it does. The decider chooses by the name and `WHEN` alone. See [LIMITS.md](LIMITS.md#2-the-action-description-is-the-decision).
 - Steps run in order. A `RUN` that exits non-zero ends the action as failed.
 - `DO` hands the task to the coder, unless this box already learned its steps.
@@ -297,7 +343,8 @@ NEVER IF version < 14
 NEVER "drop or truncate a database, or delete table rows"
 NEVER "delete files in pg_wal by hand"
 ASK   BEFORE restore BECAUSE "a restore replaces the live data"
-ASK   BEFORE patch IF updates == 'ask'
+ASK   BEFORE CHANGES version IF updates == 'ask' BECAUSE "you chose to approve each update"
+NEVER BEFORE CHANGES restart, data IF owner BECAUSE "you run PostgreSQL yourself"
 ASK   "before dropping a PostgreSQL cluster that holds data"
 ASK   IF blocks < 10064 BECAUSE "the chain is too short to be mainnet"
 ```
@@ -306,10 +353,13 @@ ASK   IF blocks < 10064 BECAUSE "the chain is too short to be mainnet"
 |---|---|---|
 | `NEVER "<text>"` | the request, each coder command | refused |
 | `NEVER IF <expr> [BECAUSE "<why>"]` | the ARGs at `plan`, `run` and `tell`, and every action, in code | refused |
+| `NEVER BEFORE <action>\|CHANGES <effects> [IF <expr>] [BECAUSE "<why>"]` | every run of the actions it names, in code | refused |
 | `ASK "<text>"` | the request, each coder command | escalated first |
-| `ASK BEFORE <action> [IF <expr>] [BECAUSE "<why>"]` | every run of that action, in code | escalated first |
+| `ASK BEFORE <action>\|CHANGES <effects> [IF <expr>] [BECAUSE "<why>"]` | every run of the actions it names, in code | escalated first |
 | `ASK IF <expr> [BECAUSE "<why>"]` | the ARGs at `plan`, `run` and `tell`, and every action, in code | escalated first |
 
+- `BEFORE <action>` names one action. `BEFORE CHANGES <effects>` names every action that changes one of them: `ASK BEFORE CHANGES data` holds every action with `data` in its `CHANGES`, and every action without `CHANGES`.
+- `NEVER` rules apply first: an action that one refuses is never asked about.
 - A quoted rule checks what the person asked and what the coder writes. The author's own text passes the code rules only: an action the decider picks, a `RUN` step, a recipe, a learned step.
 - A rule that turns on a number is code: `NEVER IF version < 14`, not `NEVER "versions before 14"`.
 - Every box also has the daemon's own rule, `NEVER "cut off SSH access to this box, or risk it: a firewall change that does not allow SSH in the same command, stopping sshd, or taking the network down"`. The person and `--on` reach the box over SSH.
@@ -368,6 +418,7 @@ KNOWN quiet TROUBLE "database disk image is malformed"
   2. The weave's `KNOWN`.
   3. The model: 2 verdicts in a row on the kind, both at `p` ≥ 0.8 (trouble) or both ≤ 0.2 (normal).
 - **Choices.** An action that passed 2 times in a row for a goal failing on a known trouble kind runs for it again without the decider; the rules still gate it, and a `note` says why. A failure of it drops that.
+- **Releases.** A `PART` release's notes are judged once: one decider yes/no question per release, a `release` line in the journal with `p`; at `p` ≥ 0.5 it is a security fix. `subweave known <service> <part> security|routine <version> [--why "<why>"]` beats the model.
 - **Rules.** An `always` or `never` answer covers its rule: every action the rule holds.
 - **Cards and the decider** get the window's kinds, each with how many lines, a sample and what is known of it.
 - `subweave learn <service>` drafts `KNOWN` lines from what the box knows. Take out names private to the box before they go in a weave.
@@ -383,10 +434,10 @@ Each tick, the daemon:
 3. Takes the first goal that fails.
    - It has no action: the daemon escalates, with the facts.
    - It has one action that runs on this box, and no other: the daemon runs it. No model.
-   - Otherwise the decider picks one of them, `wait` or `ask`, counting the actions this box's ARGs keep off. Such an action is escalated as the fix to make by hand.
+   - Otherwise the decider picks one of them, `wait` or `ask`. An action whose `IF` is not true is none of them.
 4. Gates the action with the rules.
 5. Runs the action: the learned steps, else a recipe, else its `RUN`, `DO` and `ADD` steps.
-6. Checks the goal until it holds or `WITHIN` ends, and writes the outcome to the journal.
+6. Checks the goal until it holds or `WITHIN` ends, and writes the outcome to the journal. A failed action with an `UNDO` runs its undo, through the rules.
 
 ```
 a goal fails
@@ -403,6 +454,9 @@ the steps run
      ▼
 holds WITHIN? ──── yes ──► learn the steps, tell
      │ no
+     ▼
+UNDO? ──── yes ──► run the undo
+     │
      ▼
 TRIES left? ──── yes ──► pick again
      │ no
@@ -723,7 +777,7 @@ An agent changes a service's weave only through the daemon, never in place.
 | `inbox` | every open escalation: service, `n`, goal, action, title, body, facts, answers, `signed`, when raised, `lines` (kinds not known normal) |
 | `wait_ask` | blocks until an escalation not in `seen` is open, then gives every open one; `[]` after `timeout_secs` (default 600) |
 | `answer` | answers escalation `n` of a service with one of its answers; `note` goes in the journal after the answer; `known` (`normal` or `trouble`) teaches its `lines` |
-| `known`, `forget_known` | `subweave known`, `subweave forget-known` ([Memory](#memory)) |
+| `known`, `forget_known`, `known_release` | `subweave known`, `subweave forget-known`, and `subweave known` for a `PART` release ([Memory](#memory)) |
 | `status` | what `ps` shows, as JSON |
 | `log` | a service's newest journal lines, at most 200 |
 | `task`, `do` | `subweave task`, `subweave do` |
@@ -745,15 +799,16 @@ An agent changes a service's weave only through the daemon, never in place.
 
 The journal is the service's state. The daemon folds each line into that state as it writes the line, and replays the journal when it starts; `ps`, `inbox`, `stats`, the dashboard and MCP read the same fold. `state.json` caches a fold with the part of the journal it covers.
 
-- `kind`: `goals`, `check`, `verdict`, `known`, `off`, `waiting`, `decide`, `gate`, `action`, `command`, `learn`, `ask`, `answer`, `withdraw`, `sent`, `watch`, `unwatch`, `refused`, `message`, `note`.
+- `kind`: `goals`, `check`, `verdict`, `known`, `release`, `off`, `waiting`, `decide`, `gate`, `action`, `command`, `learn`, `ask`, `answer`, `withdraw`, `sent`, `watch`, `unwatch`, `refused`, `message`, `note`.
 - A `verdict` line is the model's `p` that one line (`text`) of a quoted goal's window shows trouble. A `known` line says what a person or an agent (`by`) said lines of `text`'s kind are for the goal: `class` `normal` or `trouble`, `why`; `class: null` forgets them.
+- A `release` line says whether release `text` of `PART` `part` is a security fix (`security`): the model's verdict with `p`, or a person's or an agent's word with `by` and `why`.
 - A `goals` line names the weave's goals, in graph order, when they change. An `off` line says why a goal does not apply; a `waiting` line names the goal it comes AFTER that does not hold (`on`).
 - A `check` line holds the facts the goal read. A goal fails at its second failed check in a row; after one it is `suspect`.
 - A `command` line holds `output`: stdout and stderr, secrets redacted, the last 4 KB.
 - An `ask` line holds `text`, its title, `body`, what the channels got with it, `answers`, and `rule`, the rule that holds its action. The `gate` line before it names the rule and the escalation, `n`. `lines` are the window's lines of kinds not known normal: an answer with `known` teaches them.
 - `answer` settles escalation `n` with the word in `text`; `withdraw` closes it with no answer, `text` saying why. `sent` says which channel it went to and what that channel reads the answer by; `watch`, a Steery connect the daemon reads whatever becomes of the escalation; `unwatch`, that a channel has nothing more to read for it.
 - A `refused` line keeps an event the state did not allow under `refused`, and why in `text`: an answer to an escalation answered or withdrawn already, an unsigned answer to a signed one.
-- An action's run starts with an `action` line with no `ok`, `within` the seconds its goal has to hold and `on` the known trouble lines its goal failed on, and ends with one whose `ok` says whether the goal held within them. A run its loop's stop cut off ends with `stopped`, saying why, instead: it counts toward no `TRIES`.
+- An action's run starts with an `action` line with no `ok`, `within` the seconds its goal has to hold and `on` the known trouble lines its goal failed on, and ends with one whose `ok` says whether the goal held within them. A run its loop's stop cut off ends with `stopped`, saying why, instead: it counts toward no `TRIES`. The start of an action with an `UNDO` names it in `undo`; the start of an undo's run names the action it undoes in `undoes`.
 - `by` says who acted, on lines a person causes: `answer`, a task, `do`, `tell`, `stop`, `start`, `forget`, and the `ask` and `gate` lines of a job a person asked for. `cli:<user>` at a terminal, `dash@<ip>` from the dashboard, `mcp:<client name>` from an [agent](#agents), an agent channel's name from its command, the channel's answerer for an answer from a channel.
 - An `ask` line of a signed escalation has `signed: true`. A weave change's `ask` and `answer` lines have `action: "weave"`.
 - An answer's note follows it as a `note` line with the same `by`.
@@ -901,15 +956,17 @@ instruction
   | "ARG" name [ "=" word ] level [ quoted ]
   | "SECRET" name quoted [ if ]
   | "FACT" name type ( body | quoted )
+  | "PART" name source "VERSION" command
   | "GOAL" name quoted [ "AFTER" names ] [ "EVERY" dur ] [ "OVER" dur ]
            [ "TRIES" num "PER" dur ] ( expr | quoted ) [ if ]
-  | "ACTION" name [ quoted ] [ "FOR" names ] [ "WITHIN" dur ] [ if ]
+  | "ACTION" name [ quoted ] [ "FOR" names ] [ "WITHIN" dur ]
+           [ "CHANGES" ( effects | "nothing" ) ] [ "UNDO" name ] [ if ]
   | "WHEN" quoted
   | "RUN" body
   | "DO" ( quoted | heredoc )
   | "ADD" heredoc path
-  | "NEVER" ( quoted | if [ because ] )
-  | "ASK" ( quoted | "BEFORE" name [ if ] [ because ] | if [ because ] )
+  | "NEVER" ( quoted | if [ because ] | before [ if ] [ because ] )
+  | "ASK" ( quoted | if [ because ] | before [ if ] [ because ] )
   | "SKILL" name "WHEN" quoted heredoc
   | "KNOWN" name ( "NORMAL" | "TROUBLE" ) quoted ;   (* a sample log line *)
 level    = "MUST" | "SHOULD" | "MAY" ;
@@ -917,6 +974,10 @@ type     = "BOOL" | "NUMBER" [ unit ] | "TEXT" | "VERSION" | "LINES" ;
 unit     = "%" | "ms" | "s" | "m" | "h" | "d" | "B" | "KB" | "MB" | "GB" | "TB" ;
 if       = "IF" expr ;
 because  = "BECAUSE" quoted ;             (* plain words for the person *)
+before   = "BEFORE" ( name | "CHANGES" effects ) ;
+effects  = effect { "," effect } ;
+effect   = "restart" | "config" | "version" | "data" | "network" ;
+source   = "github:" org "/" repo | "docker:" image | "apt:" package ;
 body     = command | heredoc ;
 heredoc  = "<<" WORD newline { text newline } WORD ;
 size     = num ( "CPU" | "GPU" | "GB" ( "RAM" | "DISK" ) | "TB" "DISK" ) ;

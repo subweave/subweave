@@ -50,6 +50,8 @@ struct Seen {
     unexpected: Vec<String>,
     /// OTLP trace exports, protobuf.
     traces: Vec<Vec<u8>>,
+    /// GitHub release list requests.
+    releases: usize,
 }
 
 /// What the Steery mock holds.
@@ -379,6 +381,11 @@ async fn systemone(State(m): State<Mock>, headers: HeaderMap, body: String) -> a
                 })
             }
             "kind" => choice(&q, "other", 0.8),
+            // A PART release's notes: a security fix?
+            k if k.starts_with("release.") => {
+                let notes = text(&state["program_output"][k]);
+                noul(if notes.contains("CVE") { 0.95 } else { 0.05 })
+            }
             // One kind of line of a goal's window: does it show trouble?
             k if k.starts_with("line.") => {
                 let line = text(&state["program_output"][k]);
@@ -522,6 +529,26 @@ async fn traces(State(m): State<Mock>, body: axum::body::Bytes) -> &'static str 
     ""
 }
 
+/// GitHub's releases of `toy/web`, newest first, with a draft and a pre-release that do
+/// not count.
+async fn releases(State(m): State<Mock>, UrlPath((org, repo)): UrlPath<(String, String)>) -> (StatusCode, axum::Json<Value>) {
+    m.seen().releases += 1;
+    if (org.as_str(), repo.as_str()) != ("toy", "web") {
+        m.seen().unexpected.push(format!("releases of {org}/{repo}"));
+        return (StatusCode::NOT_FOUND, axum::Json(json!({"message": "Not Found"})));
+    }
+    (
+        StatusCode::OK,
+        axum::Json(json!([
+            {"tag_name": "v1.3.0", "body": "Draft.", "draft": true, "prerelease": false},
+            {"tag_name": "v1.3.0-rc.1", "body": "Try it.", "draft": false, "prerelease": true},
+            {"tag_name": "v1.2.0", "body": "Fixes CVE-2026-4411, a remote crash in the parser. Upgrade soon.", "draft": false, "prerelease": false},
+            {"tag_name": "v1.1.0", "body": "Faster startup and clearer logs.", "draft": false, "prerelease": false},
+            {"tag_name": "v1.0.0", "body": "First release.", "draft": false, "prerelease": false},
+        ])),
+    )
+}
+
 async fn hook(State(m): State<Mock>, body: String) -> &'static str {
     let v = serde_json::from_str(&body).unwrap_or(Value::String(body));
     m.seen().hooks.push(v);
@@ -576,6 +603,7 @@ impl Box_ {
             .env("MOCK_API_KEY", API_KEY)
             .env("STEERY_URL", &self.steery_url)
             .env("TOY_TOKEN", SECRET)
+            .env("GITHUB_API_URL", &self.steery_url)
             .env_remove("OPENROUTER_API_KEY")
             .env_remove("GITHUB_TOKEN")
             .stdin(Stdio::null());
@@ -918,12 +946,17 @@ SECRET TOY_TOKEN "a token the page never shows"
 NEVER IF port < 1024
 NEVER "{FIREWALL_RULE}"
 ASK   BEFORE rotate BECAUSE "a rotate starts the server log over"
+ASK   BEFORE CHANGES data BECAUSE "it deletes what the spool holds"
 
 FACT present  BOOL    test -f $root/index.html
 FACT scene    TEXT    echo "$(cat {d}/scene 2>/dev/null) $TOY_TOKEN"
 FACT served   NUMBER  "1 when http://127.0.0.1:$port/ answers HTTP 200 with a page that contains the word hello, else 0"
 FACT errors   LINES   tail -n 0 -F {d}/app.log
 FACT events   LINES   tail -n 0 -F {d}/events.log
+FACT spooled  NUMBER  ls {d}/spool | wc -l
+FACT setting  TEXT    cat {d}/setting
+
+PART web github:toy/web VERSION cat {d}/web-version
 
 GOAL installed "the hello page is installed"                  EVERY 1s                   present
 GOAL running   "the hello page is up" \
@@ -932,14 +965,18 @@ GOAL rotated   "the server log is fresh"  AFTER running    EVERY 1s             
 GOAL calm      "the app log stays quiet"  EVERY 2s  OVER 12s  COUNT(errors) == 0
 GOAL quiet     "the event log shows no trouble"  EVERY 1s  OVER 4s  TRIES 10 PER 1h \
                "the lines in `events` show nothing that needs action"
+GOAL tidy      "the spool is empty"       EVERY 1s  spooled == 0
+GOAL tuned     "the setting is on"        EVERY 1s  TRIES 1 PER 1h  setting == 'on'
+GOAL patched   "no security release of web waits" \
+               EVERY 1s  web.newest >= web.running AND NOT web.security
 
 KNOWN quiet NORMAL "{HEARTBEAT}"
 
-ACTION install FOR installed WITHIN 5s
+ACTION install FOR installed WITHIN 5s CHANGES config
   WHEN "the directory or its index.html is missing: nothing is installed yet"
   DO   "create the directory $root and write $root/index.html, a small HTML page that says hello"
 
-ACTION restart "Restart the server" FOR running WITHIN 5s
+ACTION restart "Restart the server" FOR running WITHIN 5s CHANGES restart
   WHEN "the fix when the server process is gone, crashed or was killed, and its files are in place: a restart brings it back"
   RUN <<EOF
     kill "$(cat {d}/toy.pid 2>/dev/null)" 2>/dev/null || true
@@ -950,21 +987,37 @@ ACTION restart "Restart the server" FOR running WITHIN 5s
     exit 1
   EOF
 
-ACTION fix FOR installed, running WITHIN 5s
+ACTION fix FOR installed, running WITHIN 5s CHANGES config, restart
   WHEN "no other action fits, or the fitting ones already failed"
   DO   "make the failing goal hold again"
 
-ACTION rotate "Start a fresh server log" FOR rotated WITHIN 5s
+ACTION rotate "Start a fresh server log" FOR rotated WITHIN 5s CHANGES config
   WHEN "the server log needs a fresh start"
   RUN  date > {d}/rotated
 
-ACTION hush "Clear the disk alarm" FOR quiet WITHIN 2s
+ACTION hush "Clear the disk alarm" FOR quiet WITHIN 2s CHANGES nothing
   WHEN "a line in `events` says a disk failed"
   RUN  date >> {d}/hushed
 
-ACTION mute "Mute the event log" FOR quiet WITHIN 2s
+ACTION mute "Mute the event log" FOR quiet WITHIN 2s CHANGES nothing
   WHEN "the event log is noisy with lines that need no action"
   RUN  date >> {d}/muted
+
+ACTION purge "Empty the spool" FOR tidy WITHIN 3s CHANGES data
+  WHEN "files wait in the spool"
+  RUN  rm -f {d}/spool/*
+
+ACTION tune "Turn the setting on" FOR tuned WITHIN 2s CHANGES config UNDO untune
+  WHEN "the setting is off"
+  RUN  echo half > {d}/setting
+
+ACTION untune "Put the setting back" WITHIN 3s CHANGES config
+  WHEN "tune made things worse"
+  RUN  echo off > {d}/setting
+
+ACTION upgrade "Upgrade web" FOR patched WITHIN 3s CHANGES version
+  WHEN "a newer release of web fixes a security issue"
+  RUN  echo 1.2.0 > {d}/web-version
 "#,
         from = from_line(),
         www = www.display(),
@@ -1684,6 +1737,9 @@ async fn daemon_and_cli_keep_a_toy_service() {
     std::fs::write(dir.join("scene"), "calm").unwrap();
     std::fs::write(dir.join("app.log"), "").unwrap();
     std::fs::write(dir.join("events.log"), "").unwrap();
+    std::fs::create_dir_all(dir.join("spool")).unwrap();
+    std::fs::write(dir.join("setting"), "on\n").unwrap();
+    std::fs::write(dir.join("web-version"), "1.2.0\n").unwrap();
     let weave = weave_dir.display().to_string();
 
     // The vendors: OpenRouter and a webhook, on one local server.
@@ -1704,6 +1760,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .route("/v1/throws/{id}", get(throw_get))
         .route("/v1/requests", post(request_create))
         .route("/v1/requests/{id}", get(request_get))
+        .route("/repos/{org}/{repo}/releases", get(releases))
         .with_state(mock.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mock_url = format!("http://{}", listener.local_addr().unwrap());
@@ -1770,6 +1827,29 @@ async fn daemon_and_cli_keep_a_toy_service() {
         !o.status.success()
             && both(&o).contains(
                 "Weavefile:3: `disk < 1GB`: `disk` is a percentage and `1GB` is a size, which do not compare"
+            ),
+        "{}",
+        both(&o)
+    );
+
+    // 6k. plan refuses an effect outside the closed set.
+    let effects = dir.join("examples/effects");
+    std::fs::create_dir_all(&effects).unwrap();
+    std::fs::write(
+        effects.join("Weavefile"),
+        "ABOUT \"a box that wipes its disk\"\n\
+         FACT full BOOL test -f /nonexistent\n\
+         GOAL room \"the disk has room\" NOT full\n\
+         ACTION wipe FOR room CHANGES disk\n\
+         \x20 WHEN \"the disk is full\"\n\
+         \x20 RUN true\n",
+    )
+    .unwrap();
+    let o = b.sw(&["plan", &effects.display().to_string()]).await;
+    assert!(
+        !o.status.success()
+            && both(&o).contains(
+                "Weavefile:4: ACTION wipe: `disk` is no effect: restart, config, version, data or network, or nothing alone"
             ),
         "{}",
         both(&o)
@@ -2356,8 +2436,8 @@ async fn daemon_and_cli_keep_a_toy_service() {
     assert_eq!(
         tools,
         [
-            "inbox", "wait_ask", "answer", "known", "forget_known", "status", "log", "task",
-            "do", "weave", "weave_change", "skill"
+            "inbox", "wait_ask", "answer", "known", "forget_known", "known_release", "status", "log",
+            "task", "do", "weave", "weave_change", "skill"
         ],
         "{list}"
     );
@@ -2692,6 +2772,95 @@ async fn daemon_and_cli_keep_a_toy_service() {
     let o = b.sw(&["forget-known", "toy", "quiet", "never seen 1"]).await;
     assert!(!o.status.success(), "forgetting an unknown kind passed");
 
+    // 6l. ASK BEFORE CHANGES data gates purge, which it never names.
+    phase("6l effects, undo, part");
+    std::fs::write(dir.join("spool/job-1"), "x").unwrap();
+    let (n, words) = b.until("the purge ask", 20, || b.open_ask("tidy")).await;
+    let ask = b.lines("ask", |l| l["n"] == n).remove(0);
+    assert_eq!(ask["action"], "purge", "{ask}");
+    assert_eq!(ask["rule"], "ASK BEFORE CHANGES data", "{ask}");
+    assert!(ask["body"].as_str().is_some_and(|t| t.contains("It changes data.")), "{ask}");
+    assert!(dir.join("spool/job-1").exists(), "purge ran before the answer");
+    assert!(words.contains(&"yes".to_string()), "{words:?}");
+    b.ok(&["answer", &n.to_string(), "yes"]).await;
+    b.until("purge to pass", 20, || (b.passes("purge") == 1).then_some(())).await;
+    assert!(!dir.join("spool/job-1").exists());
+    b.holds(&["tidy"], 10).await;
+
+    // A fix whose goal does not hold within its WITHIN: its UNDO runs and is journaled.
+    std::fs::write(dir.join("setting"), "off\n").unwrap();
+    let undone = b
+        .until("the undo of tune", 30, || {
+            b.lines("action", |l| l["action"] == "untune" && !l["ok"].is_null())
+                .into_iter()
+                .next()
+        })
+        .await;
+    assert_eq!(undone["ok"], true, "{undone}");
+    let tune = b.lines("action", |l| l["action"] == "tune" && !l["ok"].is_null());
+    assert!(tune.len() == 1 && tune[0]["ok"] == false, "{tune:?}");
+    let undo_start = b.lines("action", |l| l["action"] == "untune" && l["ok"].is_null());
+    assert!(undo_start.len() == 1 && undo_start[0]["undoes"] == "tune", "{undo_start:?}");
+    assert!(
+        b.lines("action", |l| l["action"] == "tune" && l["ok"].is_null())[0]["undo"] == "untune",
+        "the start of tune names its undo"
+    );
+    assert_eq!(std::fs::read_to_string(dir.join("setting")).unwrap(), "off\n");
+    std::fs::write(dir.join("setting"), "on\n").unwrap();
+    b.holds(&["tuned"], 15).await;
+
+    // A PART reads its running version and GitHub's releases; the decider reads each
+    // newer release's notes once, and a security one makes `upgrade` the fix.
+    let asked = || {
+        mock.seen()
+            .requests
+            .iter()
+            .filter(|(p, _, body)| p == "/systemone" && body.contains("\"release.0\""))
+            .count()
+    };
+    assert_eq!(asked(), 0, "running the newest release needs no verdict");
+    std::fs::write(dir.join("web-version"), "1.0.0\n").unwrap();
+    b.until("upgrade to pass", 30, || (b.passes("upgrade") == 1).then_some(())).await;
+    b.holds(&["patched"], 10).await;
+    let read = b
+        .lines("check", |l| l["goal"] == "patched" && l["facts"]["web.running"] == "1.0.0")
+        .remove(0);
+    assert_eq!(read["facts"]["web.newest"], "v1.2.0", "{read}");
+    assert_eq!(read["facts"]["web.security"], "yes", "{read}");
+    let verdicts = b.lines("release", |l| l["part"] == "web");
+    let mut versions: Vec<&str> = verdicts.iter().filter_map(|l| l["text"].as_str()).collect();
+    versions.sort();
+    assert_eq!(versions, ["1.1.0", "1.2.0"], "{verdicts:?}");
+    for v in &verdicts {
+        assert_eq!(v["security"], v["text"] == "1.2.0", "{v}");
+    }
+    // Again behind: the verdicts are memory, the list is cached, nobody is asked again.
+    std::fs::write(dir.join("web-version"), "1.0.0\n").unwrap();
+    b.until("a second upgrade", 30, || (b.passes("upgrade") == 2).then_some(())).await;
+    assert_eq!(asked(), 1, "the decider judged each release once");
+    assert_eq!(b.lines("release", |_| true).len(), 2);
+    assert_eq!(mock.seen().releases, 1, "the release list is cached");
+    // A person's word beats the model's verdict.
+    let out = b.ok(&["known", "toy", "web", "routine", "v1.2.0", "--why", "not reachable here"]).await;
+    assert!(out.contains("toy web 1.2.0: known routine"), "{out}");
+    let told = b
+        .until("the person's release line", 10, || {
+            b.lines("release", |l| l["by"].is_string()).into_iter().next()
+        })
+        .await;
+    assert!(told["text"] == "1.2.0" && told["security"] == false, "{told}");
+    std::fs::write(dir.join("web-version"), "1.0.0\n").unwrap();
+    b.until("patched to hold while behind", 15, || {
+        b.lines("check", |l| {
+            l["goal"] == "patched" && l["ok"] == true && l["facts"]["web.running"] == "1.0.0"
+        })
+        .into_iter()
+        .next()
+    })
+    .await;
+    assert_eq!(b.passes("upgrade"), 2, "no upgrade for a routine release");
+    std::fs::write(dir.join("web-version"), "1.2.0\n").unwrap();
+
     // 7. ps, log, learned.
     phase("7 ps, log, learned");
     let out = b.ok(&["ps"]).await;
@@ -2699,7 +2868,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .lines()
         .find(|l| l.starts_with("toy "))
         .unwrap_or_else(|| b.fail(&format!("no toy in ps:\n{out}")));
-    assert!(row.contains("5/5"), "{row}");
+    assert!(row.contains("8/8"), "{row}");
     assert!(
         row.contains("typesafe/jev-1.13@mock / deepseek/x@mock"),
         "{row}"

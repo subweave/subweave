@@ -201,6 +201,22 @@ fn tools() -> Vec<Value> {
             },
         }),
         json!({
+            "name": "known_release",
+            "description": "Tells the box whether a release of a PART fixes a security issue or is high priority, as `subweave known <service> <part> security|routine <version>`. It beats the model's verdict on the release's notes; `<part>.security` reads it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "service": service,
+                    "part": {"type": "string", "description": "A PART of the service's weave"},
+                    "version": {"type": "string", "description": "The release, like v1.2.0"},
+                    "security": {"type": "boolean", "description": "true: a security or high-priority release; false: routine"},
+                    "why": {"type": "string", "description": "Why, in a sentence"},
+                },
+                "required": ["service", "part", "version", "security"],
+                "additionalProperties": false,
+            },
+        }),
+        json!({
             "name": "status",
             "description": "Each service as `subweave ps` shows it: goals held and total, failing goals, open escalations, repair, models, this month's spend in USD.",
             "inputSchema": none,
@@ -291,6 +307,12 @@ async fn call(name: &str, args: Value, by: &str) -> Result<Value> {
             let a: ForgetKnownArgs = parse(args)?;
             let template = known::send(&a.service, &a.goal, &a.line, None, None, by.to_string())?;
             json!({"service": a.service, "goal": a.goal, "forgot": template, "by": by})
+        }
+        "known_release" => {
+            let a: KnownReleaseArgs = parse(args)?;
+            let why = a.why.map(|w| w.trim().to_string()).filter(|w| !w.is_empty());
+            let version = known::send_release(&a.service, &a.part, &a.version, a.security, why, by.to_string())?;
+            json!({"service": a.service, "part": a.part, "version": version, "security": a.security, "by": by})
         }
         "status" => serde_json::to_value(ps::rows()?)?,
         "log" => log(parse(args)?)?,
@@ -407,6 +429,15 @@ struct ForgetKnownArgs {
     service: String,
     goal: String,
     line: String,
+}
+
+#[derive(Deserialize)]
+struct KnownReleaseArgs {
+    service: String,
+    part: String,
+    version: String,
+    security: bool,
+    why: Option<String>,
 }
 
 #[derive(Deserialize)]

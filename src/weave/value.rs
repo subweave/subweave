@@ -241,6 +241,12 @@ impl Version {
             text: text.to_string(),
         })
     }
+
+    /// The version as written without its leading `v`: one release's key whichever way
+    /// a source or a person spells it.
+    pub fn bare(&self) -> &str {
+        self.text.strip_prefix(['v', 'V']).unwrap_or(&self.text)
+    }
 }
 
 impl PartialEq for Version {

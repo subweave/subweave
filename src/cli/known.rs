@@ -1,5 +1,6 @@
 //! `subweave known` and `subweave forget-known`: a person or an agent tells the box what a
-//! kind of log line is for a goal, or makes it forget.
+//! kind of log line is for a goal, or whether a PART's release is a security fix; or
+//! makes it forget a kind of line.
 
 use std::process::ExitCode;
 
@@ -12,12 +13,12 @@ use crate::weave::Class;
 #[derive(clap::Args)]
 pub struct Args {
     pub service: String,
-    /// A quoted goal over a LINES fact
-    goal: String,
-    /// normal or trouble
-    #[arg(value_parser = class)]
-    class: Class,
-    /// One line of the kind, as the log printed it
+    /// A quoted goal over a LINES fact, or a PART
+    name: String,
+    /// normal or trouble for a goal's line; security or routine for a PART's release
+    #[arg(value_parser = said)]
+    said: Said,
+    /// One line of the kind, as the log printed it; or the release's version
     line: String,
     /// Why, in a sentence
     #[arg(long)]
@@ -25,6 +26,23 @@ pub struct Args {
     /// Run on this box, over ssh
     #[arg(long, value_name = "USER@HOST")]
     pub on: Option<String>,
+}
+
+/// What `known` says: a kind of line's class, or whether a release is a security fix.
+#[derive(Clone, Copy)]
+enum Said {
+    Line(Class),
+    Release { security: bool },
+}
+
+fn said(word: &str) -> Result<Said, String> {
+    match word {
+        "security" => Ok(Said::Release { security: true }),
+        "routine" => Ok(Said::Release { security: false }),
+        w => Class::parse(w)
+            .map(Said::Line)
+            .ok_or_else(|| format!("{w:?} is not normal, trouble, security or routine")),
+    }
 }
 
 #[derive(clap::Args)]
@@ -45,14 +63,56 @@ pub(crate) fn class(word: &str) -> Result<Class, String> {
 
 pub fn run(args: Args) -> Result<ExitCode> {
     let why = args.why.map(|w| w.trim().to_string()).filter(|w| !w.is_empty());
-    let template = send(&args.service, &args.goal, &args.line, Some(args.class), why, super::by())?;
-    println!(
-        "{} {}: lines like `{template}` are known {}",
-        args.service,
-        args.goal,
-        args.class.as_str()
-    );
+    match args.said {
+        Said::Line(class) => {
+            let template = send(&args.service, &args.name, &args.line, Some(class), why, super::by())?;
+            println!(
+                "{} {}: lines like `{template}` are known {}",
+                args.service,
+                args.name,
+                class.as_str()
+            );
+        }
+        Said::Release { security } => {
+            let version = send_release(&args.service, &args.name, &args.line, security, why, super::by())?;
+            println!(
+                "{} {} {version}: known {}",
+                args.service,
+                args.name,
+                if security { "security" } else { "routine" }
+            );
+        }
+    }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Hands the daemon whether release `version` of PART `part` is a security fix, after
+/// checking the part exists and the version parses. The version as kept, without `v`.
+pub(crate) fn send_release(
+    service: &str,
+    part: &str,
+    version: &str,
+    security: bool,
+    why: Option<String>,
+    by: String,
+) -> Result<String> {
+    let w = super::service_weave(service)?;
+    if w.part(part).is_none() {
+        bail!("{service} has no PART {part}");
+    }
+    let Some(v) = crate::weave::Version::parse(version) else {
+        bail!("{version:?} is no version");
+    };
+    let version = v.bare().to_string();
+    service::put(&Command::Release {
+        service: service.to_string(),
+        part: part.to_string(),
+        version: version.clone(),
+        security,
+        why,
+        by,
+    })?;
+    Ok(version)
 }
 
 pub fn forget(args: ForgetArgs) -> Result<ExitCode> {

@@ -32,7 +32,7 @@ fn from_shown(ty: FactType, text: &str) -> Result<Value, String> {
     }
 }
 
-const FACT_LIMIT: Duration = Duration::from_secs(60);
+pub(crate) const FACT_LIMIT: Duration = Duration::from_secs(60);
 /// A ring keeps at least this much, and longer for a longer window that reads it.
 pub(crate) const KEEP: Duration = Duration::from_secs(3600);
 /// A LINES ring keeps at most this many lines: a log that floods is cut from its oldest.
@@ -293,6 +293,8 @@ pub(crate) struct Observer {
     keep: BTreeMap<String, Duration>,
     /// Per LINES fact, the time of the newest line a check event holds.
     journaled: Mutex<BTreeMap<String, i64>>,
+    /// Held while a PART is read.
+    pub parts: tokio::sync::Mutex<()>,
 }
 
 impl Observer {
@@ -302,6 +304,7 @@ impl Observer {
             followers: Mutex::new(BTreeMap::new()),
             keep,
             journaled: Mutex::new(BTreeMap::new()),
+            parts: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -483,6 +486,8 @@ fn parse(ty: FactType, o: &Out, learned: bool, ctx: &Ctx) -> Result<Value, Strin
 /// goal of this tick reads. A quoted fact with no learned command is learned first when
 /// `learn`; one that cannot be learned has no value. A LINES fact starts its follower.
 pub(crate) async fn read(ctx: &Ctx, names: &BTreeSet<String>, learn: bool) -> Snapshot {
+    // A PART is read once for all its facts.
+    let mut parts: BTreeSet<&str> = BTreeSet::new();
     for name in names {
         let Some(fact) = ctx.w.fact(name) else {
             continue;
@@ -492,6 +497,10 @@ pub(crate) async fn read(ctx: &Ctx, names: &BTreeSet<String>, learn: bool) -> Sn
             FactSource::Command(c) => Some(c.clone()),
             FactSource::Quoted(_) if learn => learned::fact_command(ctx, fact).await,
             FactSource::Quoted(_) => learned::learned_command(ctx, fact),
+            FactSource::Part { part, .. } => {
+                parts.insert(part);
+                None
+            }
         };
         let Some(mut command) = command else {
             continue;
@@ -518,6 +527,14 @@ pub(crate) async fn read(ctx: &Ctx, names: &BTreeSet<String>, learn: bool) -> Sn
                 value,
             },
         );
+    }
+    for p in parts.into_iter().filter_map(|p| ctx.w.part(p)) {
+        let t = now_ms();
+        for (field, value) in super::parts::read(ctx, p).await {
+            if let Some(fact) = ctx.w.fact(&format!("{}.{}", p.name, field.as_str())) {
+                ctx.observe.push(fact, Obs { t, value });
+            }
+        }
     }
     Snapshot::now()
 }

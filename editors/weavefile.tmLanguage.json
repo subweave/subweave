@@ -11,6 +11,7 @@
     { "include": "#heredoc-add" },
     { "include": "#run-line" },
     { "include": "#fact-command-line" },
+    { "include": "#part-line" },
     { "include": "#instruction" },
     { "include": "#option" }
   ],
@@ -106,6 +107,18 @@
       "contentName": "meta.embedded.line.shell",
       "patterns": [{ "include": "source.shell" }]
     },
+    "part-line": {
+      "begin": "^\\s*(PART)\\s+([a-z_][a-z0-9_]*)\\s+((?:github|docker|apt):\\S+)\\s+(VERSION)\\s+",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.instruction.weavefile" },
+        "2": { "name": "entity.name.part.weavefile" },
+        "3": { "name": "string.unquoted.source.weavefile" },
+        "4": { "name": "keyword.other.weavefile" }
+      },
+      "end": "(?<!\\\\)\\n",
+      "contentName": "meta.embedded.line.shell",
+      "patterns": [{ "include": "source.shell" }]
+    },
     "instruction": {
       "patterns": [
         {
@@ -167,7 +180,8 @@
     "keyword": {
       "patterns": [
         { "match": "\\b(MUST|SHOULD|MAY)\\b", "name": "storage.modifier.level.weavefile" },
-        { "match": "\\b(AFTER|EVERY|OVER|TRIES|PER|FOR|WITHIN|IF|BEFORE|BECAUSE|THEN|DECIDE|CODE|NORMAL|TROUBLE)\\b", "name": "keyword.other.weavefile" },
+        { "match": "\\b(AFTER|EVERY|OVER|TRIES|PER|FOR|WITHIN|CHANGES|UNDO|IF|BEFORE|BECAUSE|THEN|DECIDE|CODE|NORMAL|TROUBLE)\\b", "name": "keyword.other.weavefile" },
+        { "match": "(?<=CHANGES\\s|,\\s|,)(restart|config|version|data|network|nothing)\\b", "name": "constant.language.effect.weavefile" },
         { "match": "\\b(BOOL|NUMBER|TEXT|VERSION|LINES)\\b", "name": "storage.type.fact.weavefile" },
         { "match": "\\b(AND|OR|NOT)\\b", "name": "keyword.operator.logical.weavefile" },
         { "match": "\\b(CPU|GPU|GB|TB|RAM|DISK)\\b", "name": "support.type.unit.weavefile" }

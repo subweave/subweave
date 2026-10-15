@@ -44,6 +44,7 @@ pub(crate) async fn list(Svc(s): Svc) -> Result<Json<Value>, ApiError> {
         .map(|f| {
             let title = match &f.source {
                 FactSource::Command(c) | FactSource::Quoted(c) => c.clone(),
+                FactSource::Part { part, .. } => format!("PART {part}"),
             };
             json!({"name": f.name, "title": title, "source": "fact"})
         })
@@ -221,6 +222,9 @@ pub(crate) async fn stream(
                 .ok_or_else(|| {
                     ApiError::conflict(format!("this box has not learned the command of {name} yet"))
                 })?,
+            FactSource::Part { .. } => {
+                return Err(ApiError::not_found(format!("{s} has no LINES fact {name}")));
+            }
         };
         let lines = crate::daemon::journal::events(&s);
         // Each check event holds the lines new since the one before: each line once.

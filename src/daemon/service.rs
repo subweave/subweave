@@ -684,15 +684,41 @@ impl Loop {
         let mut job = match next.and_then(|i| self.pending.remove(i)) {
             Some(j) => j,
             None => {
-                let Some(goal) = failing else {
-                    return;
+                // A goal that held before an action with an UNDO and fails within its
+                // WITHIN: the undo runs first, through the rules.
+                let regressed = {
+                    let j = ctx.journal();
+                    j.state()
+                        .regressed(super::epoch())
+                        .filter(|(_, g)| !parked.contains(*g))
+                        .map(|(u, g)| (u.action.clone(), u.undo.clone(), g.to_string()))
                 };
-                Job::Repair(Repair {
-                    goal,
-                    forced: None,
-                    ignore_tries: false,
-                    by: None,
-                })
+                if let Some((action, undo, goal)) = regressed {
+                    ctx.journal().note(
+                        Some(&goal),
+                        format!("{goal} held before {action} and fails since: {undo} undoes it"),
+                    );
+                    Job::Repair(Repair {
+                        goal,
+                        forced: Some(Forced {
+                            action: undo,
+                            approved: false,
+                            rules_ok: Vec::new(),
+                        }),
+                        ignore_tries: true,
+                        by: None,
+                    })
+                } else {
+                    let Some(goal) = failing else {
+                        return;
+                    };
+                    Job::Repair(Repair {
+                        goal,
+                        forced: None,
+                        ignore_tries: false,
+                        by: None,
+                    })
+                }
             }
         };
         let box_approved = ctx.journal().state().box_approved();

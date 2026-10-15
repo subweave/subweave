@@ -13,7 +13,7 @@ use crate::service::{TASK, WEAVE};
 use crate::weave::Class;
 
 use super::epoch_of;
-use super::memory::{Memory, Told};
+use super::memory::{Memory, Told, ToldRelease};
 
 /// One journal line: when, what happened, who caused it, the episode it belongs to, and
 /// what its step cost and took.
@@ -101,6 +101,18 @@ pub enum Kind {
         goal: String,
         text: String,
         class: Option<Class>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why: Option<String>,
+    },
+    /// Whether release `text` of PART `part` fixes a security issue or is high priority:
+    /// the model's verdict (`p`, no `by`), or a person's or an agent's word (`by`).
+    Release {
+        part: String,
+        #[serde(rename = "text")]
+        version: String,
+        security: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        p: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         why: Option<String>,
     },
@@ -287,6 +299,13 @@ pub enum Act {
         /// them.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         on: Vec<String>,
+        /// The action's UNDO, which this run arms: it runs when the goal does not hold
+        /// within `within`, or a goal that held before fails then. None for an undo.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        undo: Option<String>,
+        /// This run undoes that action.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        undoes: Option<String>,
     },
 }
 
@@ -340,6 +359,7 @@ impl Kind {
             Kind::Check { .. } => "check",
             Kind::Verdict { .. } => "verdict",
             Kind::Known { .. } => "known",
+            Kind::Release { .. } => "release",
             Kind::Off { .. } => "off",
             Kind::Waiting { .. } => "waiting",
             Kind::Wait { .. } => "wait",
@@ -381,9 +401,11 @@ impl Kind {
                 Act::Ended { goal, .. } | Act::Stopped { goal, .. } | Act::Started { goal, .. },
             ) => goal.as_deref(),
             Kind::Refused { refused, .. } => refused.goal(),
-            Kind::Goals { .. } | Kind::Sent { .. } | Kind::Watch { .. } | Kind::Unwatch { .. } => {
-                None
-            }
+            Kind::Goals { .. }
+            | Kind::Release { .. }
+            | Kind::Sent { .. }
+            | Kind::Watch { .. }
+            | Kind::Unwatch { .. } => None,
         }
     }
 
@@ -407,6 +429,7 @@ impl Kind {
             | Kind::Check { .. }
             | Kind::Verdict { .. }
             | Kind::Known { .. }
+            | Kind::Release { .. }
             | Kind::Off { .. }
             | Kind::Waiting { .. }
             | Kind::Wait { .. }
@@ -429,6 +452,7 @@ impl Kind {
             | Kind::Note { text, .. }
             | Kind::Verdict { text, .. }
             | Kind::Known { text, .. }
+            | Kind::Release { version: text, .. }
             | Kind::Off { why: text, .. }
             | Kind::Withdraw { why: text, .. }
             | Kind::Refused { why: text, .. }
@@ -513,6 +537,7 @@ impl Kind {
                 each(text);
                 why.iter_mut().for_each(&mut each);
             }
+            Kind::Release { why, .. } => why.iter_mut().for_each(&mut each),
             Kind::Command { text, output, .. } | Kind::Learn { text, output, .. } => {
                 each(text);
                 output.iter_mut().for_each(&mut each);
@@ -569,6 +594,9 @@ pub struct ServiceState {
     /// What the box knows of kinds of log lines, and which actions fixed them.
     #[serde(default)]
     pub memory: Memory,
+    /// The newest action with an UNDO that ended, until another action starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo: Option<Undoable>,
 }
 
 /// Outcomes kept per goal: more than any TRIES counts and the decider's 10.
@@ -615,6 +643,28 @@ pub struct Attempt {
     /// Lines of the known trouble kinds the goal failed on when it started.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub on: Vec<String>,
+    /// The action's UNDO, armed by this run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo: Option<String>,
+    /// The other goals that held when it started.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<String>,
+}
+
+/// An action with an UNDO that ended: a goal in `held` that fails within `within`
+/// seconds of `ended` makes the loop run `undo`, and a run of `undo` is the undo of
+/// `action`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Undoable {
+    pub action: String,
+    pub undo: String,
+    pub goal: String,
+    /// The action passed: its goal held within its WITHIN.
+    pub ok: bool,
+    /// The other goals that held when it started.
+    pub held: Vec<String>,
+    pub ended: String,
+    pub within: u64,
 }
 
 impl GoalState {
@@ -901,6 +951,25 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
             });
             s.memory.told(goal, text, told);
         }
+        Kind::Release {
+            part,
+            version,
+            security,
+            p,
+            why,
+        } => match &e.by {
+            Some(by) => s.memory.release_told(
+                part,
+                version,
+                ToldRelease {
+                    security: *security,
+                    by: Some(by.clone()),
+                    why: why.clone(),
+                    t: e.t.clone(),
+                },
+            ),
+            None => s.memory.release_judged(part, version, p.unwrap_or(if *security { 1.0 } else { 0.0 })),
+        },
         Kind::Wait { goal, until } => {
             goal_mut(s, goal)?;
             s.waits.insert(goal.clone(), until.clone());
@@ -913,6 +982,8 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
             text,
             within,
             on,
+            undo,
+            undoes: _,
         }) => {
             if action == TASK {
                 if let Some(ep) = &e.ep {
@@ -928,12 +999,22 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
                     );
                 }
             } else if let Some(goal) = goal {
+                // A newer action makes a regression no longer the older one's.
+                s.undo = None;
+                let held = s
+                    .goals
+                    .iter()
+                    .filter(|(g, st)| *g != goal && st.holds())
+                    .map(|(g, _)| g.clone())
+                    .collect();
                 let attempt = Attempt {
                     action: action.clone(),
                     started: e.t.clone(),
                     within: within.unwrap_or_default(),
                     ep: e.ep.clone(),
                     on: on.clone(),
+                    undo: undo.clone(),
+                    held,
                 };
                 match s.goals.get_mut(goal) {
                     Some(GoalState::Failing { attempt: a, .. }) => *a = Some(attempt),
@@ -959,8 +1040,22 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
                     if all.len() > OUTCOMES {
                         all.remove(0);
                     }
-                    let on = attempt_of(s, goal, action).map(|a| a.on.clone()).unwrap_or_default();
+                    let attempt = attempt_of(s, goal, action).cloned();
+                    let on = attempt.as_ref().map(|a| a.on.clone()).unwrap_or_default();
                     s.memory.ran(goal, &on, action, *ok);
+                    if let Some(a) = attempt {
+                        if let Some(undo) = a.undo {
+                            s.undo = Some(Undoable {
+                                action: action.clone(),
+                                undo,
+                                goal: goal.clone(),
+                                ok: *ok,
+                                held: a.held,
+                                ended: e.t.clone(),
+                                within: a.within,
+                            });
+                        }
+                    }
                     end_attempt(s, goal, action);
                 }
                 if *ok {
@@ -1229,6 +1324,23 @@ impl ServiceState {
     /// When `action` last passed.
     pub fn passed(&self, action: &str) -> Option<&str> {
         self.passed.get(action).map(String::as_str)
+    }
+
+    /// The action a run of `action` undoes: the newest action with an UNDO names it.
+    pub fn undoing(&self, action: &str) -> Option<&Undoable> {
+        self.undo.as_ref().filter(|u| u.undo == action)
+    }
+
+    /// A goal that held before the newest action with an UNDO passed, and fails within
+    /// its WITHIN after it (`now` in epoch seconds): the undo to run, and that goal.
+    pub fn regressed(&self, now: i64) -> Option<(&Undoable, &str)> {
+        let u = self.undo.as_ref().filter(|u| u.ok)?;
+        let until = epoch_of(&u.ended)? + u.within as i64;
+        if now > until {
+            return None;
+        }
+        let g = u.held.iter().find(|g| self.goal(g).is_some_and(GoalState::fails))?;
+        Some((u, g.as_str()))
     }
 
     /// The newest `always` or `never` the person gave for this rule: it covers every

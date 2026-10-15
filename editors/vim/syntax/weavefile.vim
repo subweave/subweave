@@ -6,10 +6,11 @@ endif
 syn case match
 
 syn match   weaveComment     "^\s*#.*$"
-syn match   weaveInstruction "^\s*\zs\(ABOUT\|FROM\|NEEDS\|MODEL\|ARG\|SECRET\|FACT\|GOAL\|ACTION\|WHEN\|RUN\|DO\|ADD\|NEVER\|ASK\|SKILL\|KNOWN\)\>"
-syn match   weaveName        "\(^\s*\(ARG\|SECRET\|FACT\|GOAL\|ACTION\|SKILL\)\s\+\)\@<=[A-Za-z_][A-Za-z0-9_-]*"
+syn match   weaveInstruction "^\s*\zs\(ABOUT\|FROM\|NEEDS\|MODEL\|ARG\|SECRET\|FACT\|PART\|GOAL\|ACTION\|WHEN\|RUN\|DO\|ADD\|NEVER\|ASK\|SKILL\|KNOWN\)\>"
+syn match   weaveName        "\(^\s*\(ARG\|SECRET\|FACT\|PART\|GOAL\|ACTION\|SKILL\)\s\+\)\@<=[A-Za-z_][A-Za-z0-9_-]*"
 syn keyword weaveLevel       MUST SHOULD MAY
-syn keyword weaveKeyword     AFTER EVERY OVER TRIES PER FOR WITHIN IF BEFORE BECAUSE THEN DECIDE CODE NORMAL TROUBLE
+syn keyword weaveKeyword     AFTER EVERY OVER TRIES PER FOR WITHIN CHANGES UNDO IF BEFORE BECAUSE THEN DECIDE CODE NORMAL TROUBLE
+syn match   weaveEffect      "\(CHANGES\s\+\([a-z]\+,\s*\)*\)\@<=\(restart\|config\|version\|data\|network\|nothing\)\>"
 syn keyword weaveType        BOOL NUMBER TEXT VERSION LINES
 syn keyword weaveLogic       AND OR NOT
 syn keyword weaveUnit        CPU GPU GB TB RAM DISK
@@ -36,6 +37,7 @@ hi def link weaveName        Identifier
 hi def link weaveLevel       StorageClass
 hi def link weaveKeyword     Keyword
 hi def link weaveLogic       Operator
+hi def link weaveEffect      Constant
 hi def link weaveUnit        Type
 hi def link weaveFunction    Function
 hi def link weaveType        Type

@@ -46,6 +46,8 @@ fn heredoc_start(line: &str) -> Option<String> {
             }
             at
         }
+        // PART <name> <source> VERSION <<EOF
+        "PART" => 4,
         "SKILL" => toks.len() - 1,
         _ => return None,
     };

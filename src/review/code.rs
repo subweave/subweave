@@ -109,11 +109,16 @@ pub fn check(id: &str, w: &Weave, el: &Element) -> bool {
                     })
             })
         }
-        "catch-all" => w.actions.iter().any(|a| a.for_goals.is_empty()),
-        "asked-before" => w
-            .rules
+        "catch-all" => w
+            .actions
             .iter()
-            .any(|r| matches!(r, Rule::AskBefore { action, .. } if action == name)),
+            .any(|a| a.for_goals.is_empty() && !w.undoes(&a.name)),
+        "asked-before" => w.action(name).is_some_and(|a| {
+            w.rules.iter().any(|r| match r {
+                Rule::AskBefore { on, .. } | Rule::NeverBefore { on, .. } => on.gates(a),
+                _ => false,
+            })
+        }),
         "no-default" => el.state.get("default").is_none_or(Value::is_null),
         "no-do" => !w
             .actions
@@ -213,7 +218,9 @@ fn texts(w: &Weave) -> Vec<String> {
         match r {
             Rule::Never { text, .. } | Rule::Ask { text, .. } => t.push(text.clone()),
             Rule::NeverIf { expr, .. } | Rule::AskIf { expr, .. } => t.push(expr.to_string()),
-            Rule::AskBefore { cond, .. } => t.extend(cond.as_ref().map(Expr::to_string)),
+            Rule::AskBefore { cond, .. } | Rule::NeverBefore { cond, .. } => {
+                t.extend(cond.as_ref().map(Expr::to_string))
+            }
         }
     }
     for s in &w.skills {

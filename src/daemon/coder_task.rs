@@ -20,7 +20,7 @@ use super::asks::AskReq;
 use super::card;
 use super::observe::{self, Values};
 use super::goals;
-use super::repair::{command, command_output, rule_text};
+use super::repair::{command, command_output};
 use super::service::Ctx;
 use super::state::{Event, Kind};
 use super::{cap, cap_to, ms, sh};
@@ -919,7 +919,7 @@ async fn gate_and_run(
         if p < 0.5 {
             continue;
         }
-        let rule = rule_text(r);
+        let rule = r.text();
         let kept = ctx.journal().state().kept(&rule);
         let gate = |ok: bool| Kind::Gate {
             goal: work.goal_name(),

@@ -441,7 +441,12 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
             }
             c if c.is_ascii_alphabetic() || c == b'_' => {
                 let start = i;
-                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                // `lighthouse.running`: a PART's fact.
+                while i < b.len()
+                    && (b[i].is_ascii_alphanumeric()
+                        || b[i] == b'_'
+                        || (b[i] == b'.' && b.get(i + 1).is_some_and(u8::is_ascii_lowercase)))
+                {
                     i += 1;
                 }
                 let w = &src[start..i];

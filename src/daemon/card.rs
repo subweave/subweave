@@ -144,7 +144,7 @@ pub(crate) fn label(ctx: &Ctx, a: &Action) -> String {
 fn why(ctx: &Ctx, r: &Rule) -> String {
     match r.because() {
         Some(b) => weave::subst(b, &ctx.spec.args),
-        None => weave::subst(&super::repair::rule_text(r), &ctx.spec.args),
+        None => weave::subst(&r.text(), &ctx.spec.args),
     }
 }
 
@@ -216,18 +216,16 @@ pub(crate) fn tries(
     }
 }
 
-/// No action fits the goal: a rule refuses each one that does, the `IF` of each one
-/// written for it keeps it off on this box, or `decided` says why the decider picked none.
+/// No action fits the goal: a rule refuses each one that does, or the `IF` of each one
+/// written for it is not true now, which says what that fix would need.
 pub(crate) fn no_fit(
     ctx: &Ctx,
     g: &Goal,
     refused: &[(&Action, &Rule, bool)],
     off: &[&Action],
-    decided: Option<&str>,
     now: &BTreeMap<String, String>,
 ) -> Card {
     let mut lines = goal_lines(ctx, g, now);
-    lines.extend(decided.map(str::to_string));
     for (a, r, kept) in refused {
         lines.push(if *kept {
             format!("{} is off: you answered Never run it for it before.", label(ctx, a))
@@ -237,7 +235,7 @@ pub(crate) fn no_fit(
     }
     for a in off {
         if let Some(e) = &a.when_if {
-            lines.push(format!("{} does not run on this box: `IF {e}`.", label(ctx, a)));
+            lines.push(format!("{} would fit, but it needs `{e}`, which is not true now.", label(ctx, a)));
         }
     }
     lines.push(if refused.is_empty() && off.is_empty() {
@@ -252,24 +250,26 @@ pub(crate) fn no_fit(
     }
 }
 
-/// The decider's fix is an action this box's ARGs keep off: the person makes it.
-/// `yes` checks the goal again; it never runs the action.
-pub(crate) fn by_hand(ctx: &Ctx, g: &Goal, a: &Action, now: &BTreeMap<String, String>) -> Card {
+/// The undo of `of` failed or could not run, for `why`.
+pub(crate) fn undo_failed(
+    ctx: &Ctx,
+    g: &Goal,
+    of: &str,
+    undo: &Action,
+    why: &str,
+    now: &BTreeMap<String, String>,
+) -> Card {
     let mut lines = goal_lines(ctx, g, now);
-    let when = weave::subst(&a.when, &ctx.spec.args);
-    let when = when.trim().trim_end_matches('.');
-    lines.push(if when.is_empty() {
-        format!("Subweave's fix: {}.", label(ctx, a))
-    } else {
-        format!("Subweave's fix: {}. It is right when {when}.", label(ctx, a))
-    });
-    if let Some(e) = &a.when_if {
-        lines.push(format!("This box is set up so Subweave does not run it: `IF {e}`."));
-    }
+    lines.push(format!(
+        "{} did not help or broke what held, so Subweave tried to undo it: {}.",
+        action_name(ctx, of),
+        label(ctx, undo)
+    ));
+    lines.push(format!("The undo failed: {}.", why.trim_end_matches('.')));
     Card {
-        title: format!("{} yourself?", label(ctx, a).trim_end_matches(['.', '?'])),
+        title: format!("Undo failed. Can you make this true: {}?", short(&subject(ctx, g), SUBJECT)),
         lines,
-        buttons: buttons(&[("yes", "Done, check again"), ("no", &later(Some(g)))]),
+        buttons: buttons(&[("yes", "Fixed it, check again"), ("no", &later(Some(g)))]),
     }
 }
 
@@ -324,6 +324,9 @@ pub(crate) fn gate(
     } else {
         format!("To fix it, Subweave wants to {}.", dos.join("; then ").trim_end_matches('.'))
     });
+    if let Rule::AskBefore { on: weave::Before::Changes(_), .. } = rule {
+        lines.push(format!("It changes {}.", weave::show_effects(a.effects())));
+    }
     lines.push(format!("The weave asks you first: {}.", why(ctx, rule)));
     Card {
         title: match &a.label {

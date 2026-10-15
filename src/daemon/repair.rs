@@ -20,7 +20,7 @@ use super::goals::{self, Scope};
 use super::memory;
 use super::observe::{self, Span, Values};
 use super::service::Ctx;
-use super::state::{Act, Event, JobKind, Kind};
+use super::state::{Act, Event, JobKind, Kind, Undoable};
 use super::{Out, cap, epoch, last, learned, lock, ms, now, sh};
 
 const RUN_LIMIT: Duration = Duration::from_secs(30 * 60);
@@ -116,6 +116,8 @@ impl TaskJob {
                 text: Some(self.text.clone()),
                 within: None,
                 on: Vec::new(),
+                undo: None,
+                undoes: None,
             })
         }
     }
@@ -154,8 +156,8 @@ enum Gate<'a> {
     Ask(&'a Rule),
 }
 
-enum Pick {
-    Action(String),
+enum Pick<'a> {
+    Action(&'a Action),
     Wait,
     Ask(String),
 }
@@ -218,7 +220,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
     let shown = observe::shown(&values);
     // The known trouble lines it fails on: a pass is remembered for their kinds.
     let on = goals::trouble(ctx, goal, span);
-    let (action, rules_ok) = match &job.forced {
+    let (a, rules_ok) = match &job.forced {
         Some(f) => {
             let Some(a) = ctx.w.action(&f.action) else {
                 ctx.journal()
@@ -228,22 +230,22 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
             if is_off(ctx, a, span) {
                 ctx.journal().note(
                     Some(&goal.name),
-                    format!("{} does not run on this box: its IF is not true", f.action),
+                    format!("{} does not run now: its IF is not true", f.action),
                 );
                 return Outcome::Nothing;
             }
-            match gate(ctx, goal, &f.action, span, f.approved) {
+            match gate(ctx, goal, a, span, f.approved) {
                 Gate::Pass => {}
                 Gate::Refused(rule, _) => {
-                    refused(ctx, goal, &f.action, &rule_text(rule));
+                    refused(ctx, goal, a, rule);
                     return Outcome::Nothing;
                 }
                 Gate::Ask(rule) => {
-                    ask_gate(ctx, goal, &f.action, rule, &shown);
+                    ask_gate(ctx, goal, a, rule, &shown);
                     return Outcome::Asked;
                 }
             }
-            (f.action.clone(), f.rules_ok.clone())
+            (a, f.rules_ok.clone())
         }
         None => {
             if goals::check_fresh(ctx, goal, None).await == Some(true) {
@@ -266,105 +268,138 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
             let mut refusals: Vec<(&Action, &Rule, bool)> = Vec::new();
             loop {
                 let (cands, off) = candidates(ctx, goal, span, &out);
-                if cands.is_empty() && off.is_empty() {
+                if cands.is_empty() {
                     ctx.ask(AskReq {
                         goal: Some(goal.name.clone()),
                         action: None,
                         rule: None,
                         signed: false,
-                        card: card::no_fit(ctx, goal, &refusals, &[], None, &shown),
+                        card: card::no_fit(ctx, goal, &refusals, &off, &shown),
                         facts: shown,
                     });
                     return Outcome::Asked;
                 }
-                // An action its IF keeps off still takes part in the diagnosis: when it is
-                // the fix, the person gets its steps instead of a bare "make this true".
-                let remembered = remembered(ctx, goal, &on, &cands);
-                let pick = if let Some((a, why)) = remembered {
+                let pick = if let Some((a, why)) = remembered(ctx, goal, &on, &cands) {
                     ctx.journal().note(Some(&goal.name), why);
                     a
-                } else if cands.len() == 1 && off.is_empty() {
-                    cands[0].name.clone()
+                } else if cands.len() == 1 {
+                    cands[0]
                 } else {
-                    let all: Vec<&Action> = cands.iter().chain(&off).copied().collect();
-                    match decide(ctx, goal, &all, &values, span).await {
-                        Pick::Action(a) => match off.iter().find(|o| o.name == a) {
-                            Some(o) => {
-                                ctx.ask(AskReq {
-                                    goal: Some(goal.name.clone()),
-                                    action: None,
-                                    rule: None,
-                                    signed: false,
-                                    card: card::by_hand(ctx, goal, o, &shown),
-                                    facts: shown,
-                                });
-                                return Outcome::Asked;
-                            }
-                            None => a,
-                        },
+                    match decide(ctx, goal, &cands, &values, span).await {
+                        Pick::Action(a) => a,
                         Pick::Wait => return Outcome::Wait,
                         Pick::Ask(why) => {
-                            let card = if cands.is_empty() {
-                                card::no_fit(ctx, goal, &refusals, &off, Some(&why), &shown)
-                            } else {
-                                card::which(ctx, goal, &cands, &why, &shown)
-                            };
                             ctx.ask(AskReq {
                                 goal: Some(goal.name.clone()),
                                 action: None,
                                 rule: None,
                                 signed: false,
-                                card,
+                                card: card::which(ctx, goal, &cands, &why, &shown),
                                 facts: shown,
                             });
                             return Outcome::Asked;
                         }
                     }
                 };
-                match gate(ctx, goal, &pick, span, false) {
+                match gate(ctx, goal, pick, span, false) {
                     Gate::Pass => break (pick, Vec::new()),
                     Gate::Refused(rule, kept) => {
-                        refused(ctx, goal, &pick, &rule_text(rule));
-                        if let Some(a) = ctx.w.action(&pick) {
-                            refusals.push((a, rule, kept));
-                        }
-                        out.insert(pick);
+                        refused(ctx, goal, pick, rule);
+                        refusals.push((pick, rule, kept));
+                        out.insert(pick.name.clone());
                     }
                     Gate::Ask(rule) => {
-                        ask_gate(ctx, goal, &pick, rule, &shown);
+                        ask_gate(ctx, goal, pick, rule, &shown);
                         return Outcome::Asked;
                     }
                 }
             }
         }
     };
-    let a = ctx.w.action(&action).expect("an action checked above");
-    run_action(ctx, goal, a, &rules_ok, &on).await;
+    // A run of the action the newest action's UNDO names is that undo.
+    let undoes = ctx.journal().state().undoing(&a.name).cloned();
+    let ok = run_action(ctx, goal, a, &rules_ok, &on, undoes.as_ref()).await;
+    match (ok, &undoes) {
+        (Some(false), Some(u)) => undo_failed(ctx, goal, &u.action, a, "it did not work".into(), &shown),
+        (Some(false), None) => undo(ctx, goal, a, span, &shown).await,
+        _ => {}
+    }
     Outcome::Done
+}
+
+/// `a` failed: its UNDO runs through the rules, as the undo of `a`. An undo never arms an
+/// undo of its own; one that fails, or cannot run, escalates.
+async fn undo(ctx: &Ctx, goal: &Goal, a: &Action, span: Span, shown: &BTreeMap<String, String>) {
+    let Some(u) = a.undo.as_deref().and_then(|n| ctx.w.action(n)) else {
+        return;
+    };
+    if is_off(ctx, u, span) {
+        let why = format!("its IF is not true: `{}`", u.when_if.as_ref().map(|e| e.to_string()).unwrap_or_default());
+        undo_failed(ctx, goal, &a.name, u, why, shown);
+        return;
+    }
+    match gate(ctx, goal, u, span, false) {
+        Gate::Pass => {
+            let watch = ctx.journal().state().undoing(&u.name).cloned();
+            if run_action(ctx, goal, u, &[], &[], watch.as_ref()).await == Some(false) {
+                undo_failed(ctx, goal, &a.name, u, "it did not work".into(), shown);
+            }
+        }
+        Gate::Refused(rule, _) => {
+            refused(ctx, goal, u, rule);
+            undo_failed(ctx, goal, &a.name, u, format!("a rule refuses it: {}", rule.text()), shown);
+        }
+        Gate::Ask(rule) => ask_gate(ctx, goal, u, rule, shown),
+    }
+}
+
+/// The undo of `of` failed or could not run, for `why`: the person decides.
+fn undo_failed(
+    ctx: &Ctx,
+    goal: &Goal,
+    of: &str,
+    u: &Action,
+    why: String,
+    shown: &BTreeMap<String, String>,
+) {
+    ctx.journal()
+        .note(Some(&goal.name), format!("undo of {of} by {} failed: {why}", u.name));
+    ctx.ask(AskReq {
+        goal: Some(goal.name.clone()),
+        action: None,
+        rule: None,
+        signed: false,
+        card: card::undo_failed(ctx, goal, of, u, &why, shown),
+        facts: shown.clone(),
+    });
 }
 
 /// The action memory picks for `goal` failing on the known trouble lines `on`, with why:
 /// one that passed `CHOICE_PASSES` times in a row for one of their kinds and is a
 /// candidate now. The decider is not asked; the rules still are.
-fn remembered(ctx: &Ctx, goal: &Goal, on: &[String], cands: &[&Action]) -> Option<(String, String)> {
+fn remembered<'a>(
+    ctx: &Ctx,
+    goal: &Goal,
+    on: &[String],
+    cands: &[&'a Action],
+) -> Option<(&'a Action, String)> {
     let j = ctx.journal();
     let mem = &j.state().memory;
     on.iter().find_map(|line| {
         let (a, n) = mem.choice(&goal.name, &memory::template(line))?;
-        cands.iter().any(|c| c.name == a).then(|| {
-            let why = format!(
-                "memory: {a} passed {n} times in a row for {} failing on lines like `{line}`",
-                goal.name
-            );
-            (a.to_string(), why)
-        })
+        let c = cands.iter().find(|c| c.name == a)?;
+        let why = format!(
+            "memory: {a} passed {n} times in a row for {} failing on lines like `{line}`",
+            goal.name
+        );
+        Some((*c, why))
     })
 }
 
-/// The actions for this goal, not ruled out yet: those that run on this box, then the
-/// ones that are the person's here: written for it (`FOR` names it), with an `IF` that
-/// reads only ARGs and is false. An `IF` on facts or `SINCE` is a precondition: while
-/// false or unknown, the action is no fix at all.
+/// The actions for this goal, not ruled out yet: those whose `FOR` names it, and those
+/// with no `FOR` that are not only an undo (named by an UNDO). An `IF` is a precondition:
+/// while false or unknown the action is no candidate. The second list: the ones written
+/// for this goal that their `IF` keeps out now, for the card that says what a fix needs.
 fn candidates<'a>(
     ctx: &'a Ctx,
     goal: &Goal,
@@ -372,22 +407,22 @@ fn candidates<'a>(
     out: &BTreeSet<String>,
 ) -> (Vec<&'a Action>, Vec<&'a Action>) {
     let mut runs = Vec::new();
-    let mut theirs = Vec::new();
+    let mut off = Vec::new();
     for a in &ctx.w.actions {
         if out.contains(&a.name) {
             continue;
         }
         let named = a.for_goals.contains(&goal.name);
-        if !named && !a.for_goals.is_empty() {
+        if !named && (!a.for_goals.is_empty() || ctx.w.undoes(&a.name)) {
             continue;
         }
         if !is_off(ctx, a, span) {
             runs.push(a);
-        } else if named && a.when_if.as_ref().is_some_and(|e| args_only(&ctx.w, e)) {
-            theirs.push(a);
+        } else if named {
+            off.push(a);
         }
     }
-    (runs, theirs)
+    (runs, off)
 }
 
 /// The action's `IF` keeps it off now: false, or unknown.
@@ -398,63 +433,44 @@ fn is_off(ctx: &Ctx, a: &Action, span: Span) -> bool {
         .is_some_and(|e| expr::holds(e, &scope) != Some(true))
 }
 
-/// The expression reads only ARGs: it says how this box is set up, not how it is now.
-fn args_only(w: &weave::Weave, e: &weave::Expr) -> bool {
-    let mut only = true;
-    e.walk(&mut |x| match x {
-        weave::Expr::Since(_) | weave::Expr::Window(..) => only = false,
-        weave::Expr::Name(n) if w.fact(n).is_some() => only = false,
-        _ => {}
-    });
-    only
-}
-
-/// A rule as written, the key its `always` and `never` answers are kept under.
-pub(crate) fn rule_text(r: &Rule) -> String {
-    match r {
-        Rule::Never { text, .. } => format!("NEVER \"{text}\""),
-        Rule::NeverIf { expr, .. } => format!("NEVER IF {expr}"),
-        Rule::Ask { text, .. } => format!("ASK \"{text}\""),
-        Rule::AskBefore { action, cond, .. } => match cond {
-            Some(c) => format!("ASK BEFORE {action} IF {c}"),
-            None => format!("ASK BEFORE {action}"),
-        },
-        Rule::AskIf { expr, .. } => format!("ASK IF {expr}"),
-    }
-}
-
-/// The code rules on one action. Quoted rules never gate an author's action. A rule the
-/// person answered `always` for passes with an `ok` gate line. A rule that cannot be
-/// judged (a fact with no value) applies: not knowing is not safe.
-fn gate<'a>(ctx: &'a Ctx, goal: &Goal, action: &str, span: Span, approved: bool) -> Gate<'a> {
+/// The code rules on one action: `NEVER IF` and `NEVER BEFORE` refuse it, `ASK BEFORE`
+/// and `ASK IF` hold it for the person. A `BEFORE` rule gates the action it names, or
+/// every action with one of its effects. Quoted rules never gate an author's action. A
+/// rule the person answered `always` for passes with an `ok` gate line. A rule that
+/// cannot be judged (a fact with no value) applies: not knowing is not safe.
+fn gate<'a>(ctx: &'a Ctx, goal: &Goal, a: &Action, span: Span, approved: bool) -> Gate<'a> {
     let scope = Scope { ctx, span };
     let applies = |e: &weave::Expr| expr::holds(e, &scope) != Some(false);
+    let before = |on: &weave::Before, cond: &Option<weave::Expr>| {
+        on.gates(a) && cond.as_ref().is_none_or(applies)
+    };
     for r in &ctx.w.rules {
-        if let Rule::NeverIf { expr: e, .. } = r {
-            if applies(e) {
-                return Gate::Refused(r, false);
-            }
+        let refuses = match r {
+            Rule::NeverIf { expr: e, .. } => applies(e),
+            Rule::NeverBefore { on, cond, .. } => before(on, cond),
+            _ => false,
+        };
+        if refuses {
+            return Gate::Refused(r, false);
         }
     }
     for r in &ctx.w.rules {
-        let applies = match r {
-            Rule::AskBefore {
-                action: a, cond, ..
-            } => a == action && cond.as_ref().is_none_or(applies),
+        let holds = match r {
+            Rule::AskBefore { on, cond, .. } => before(on, cond),
             Rule::AskIf { expr: e, .. } => applies(e),
             _ => false,
         };
-        if !applies {
+        if !holds {
             continue;
         }
-        let text = rule_text(r);
+        let text = r.text();
         let kept = ctx.journal().state().kept(&text);
         match kept {
             Some("never") => return Gate::Refused(r, true),
             Some(_) => {
                 ctx.journal().add(Kind::Gate {
                     goal: Some(goal.name.clone()),
-                    action: action.to_string(),
+                    action: a.name.clone(),
                     text,
                     ok: true,
                     p: BTreeMap::new(),
@@ -471,23 +487,22 @@ fn gate<'a>(ctx: &'a Ctx, goal: &Goal, action: &str, span: Span, approved: bool)
     Gate::Pass
 }
 
-fn refused(ctx: &Ctx, goal: &Goal, action: &str, rule: &str) {
+fn refused(ctx: &Ctx, goal: &Goal, a: &Action, rule: &Rule) {
     ctx.journal().add(Kind::Gate {
         goal: Some(goal.name.clone()),
-        action: action.to_string(),
-        text: rule.to_string(),
+        action: a.name.clone(),
+        text: rule.text(),
         ok: false,
         p: BTreeMap::new(),
         n: None,
     });
 }
 
-fn ask_gate(ctx: &Ctx, goal: &Goal, action: &str, rule: &Rule, shown: &BTreeMap<String, String>) {
-    let a = ctx.w.action(action).expect("a gated action is in the weave");
+fn ask_gate(ctx: &Ctx, goal: &Goal, a: &Action, rule: &Rule, shown: &BTreeMap<String, String>) {
     ctx.ask(AskReq {
         goal: Some(goal.name.clone()),
-        action: Some(action.to_string()),
-        rule: Some(rule_text(rule)),
+        action: Some(a.name.clone()),
+        rule: Some(rule.text()),
         signed: false,
         card: card::gate(ctx, goal, a, rule, shown),
         facts: shown.clone(),
@@ -498,7 +513,13 @@ fn ask_gate(ctx: &Ctx, goal: &Goal, action: &str, rule: &Rule, shown: &BTreeMap<
 /// `steered`. Under 0.5 confidence, steered at 0.5 or more, or no answer: ask. A goal
 /// that judges lines shows the window's kinds of line with what is known of each, under
 /// `program_output["line kinds"]`.
-async fn decide(ctx: &Ctx, goal: &Goal, cands: &[&Action], values: &Values, span: Span) -> Pick {
+async fn decide<'a>(
+    ctx: &Ctx,
+    goal: &Goal,
+    cands: &[&'a Action],
+    values: &Values,
+    span: Span,
+) -> Pick<'a> {
     let Some(decider) = &ctx.decider else {
         return Pick::Ask("No decider to pick an action.".into());
     };
@@ -580,13 +601,25 @@ async fn decide(ctx: &Ctx, goal: &Goal, cands: &[&Action], values: &Values, span
     match choice {
         "wait" => Pick::Wait,
         "ask" => Pick::Ask("The decider says only you can fix it.".into()),
-        a if cands.iter().any(|c| c.name == a) => Pick::Action(a.to_string()),
-        other => Pick::Ask(format!("The decider chose {other}, which is no candidate.")),
+        a => match cands.iter().find(|c| c.name == a) {
+            Some(c) => Pick::Action(*c),
+            None => Pick::Ask(format!("The decider chose {a}, which is no candidate.")),
+        },
     }
 }
 
 /// The steps: learned ones first, then RUN, ADD and DO in order; then the WITHIN wait.
-async fn run_action(ctx: &Ctx, goal: &Goal, a: &Action, rules_ok: &[String], on: &[String]) {
+/// A run that `undoes` an action passes when every goal that held before that action
+/// holds within WITHIN; any other run, when its goal does. Whether it passed; `None`
+/// when its coder asked the person.
+async fn run_action(
+    ctx: &Ctx,
+    goal: &Goal,
+    a: &Action,
+    rules_ok: &[String],
+    on: &[String],
+    undoes: Option<&Undoable>,
+) -> Option<bool> {
     let within = a.within.unwrap_or(WITHIN);
     ctx.journal().add(Kind::Action(Act::Started {
         goal: Some(goal.name.clone()),
@@ -594,6 +627,8 @@ async fn run_action(ctx: &Ctx, goal: &Goal, a: &Action, rules_ok: &[String], on:
         text: None,
         within: Some(within.as_secs()),
         on: on.to_vec(),
+        undo: a.undo.clone().filter(|_| undoes.is_none()),
+        undoes: undoes.map(|u| u.action.clone()),
     }));
     let key = learned::steps_key(ctx, a);
     let slot = format!("{}/{}", a.name, goal.name);
@@ -617,9 +652,9 @@ async fn run_action(ctx: &Ctx, goal: &Goal, a: &Action, rules_ok: &[String], on:
             }
             ok = command(ctx, work, c, &mut prior).await;
         }
-        if ok && wait_within(ctx, goal, a, within).await {
+        if ok && passed(ctx, goal, undoes, a, within).await {
             action_line(ctx, goal, a, true, start);
-            return;
+            return Some(true);
         }
         {
             let mut l = ctx.learned();
@@ -652,13 +687,13 @@ async fn run_action(ctx: &Ctx, goal: &Goal, a: &Action, rules_ok: &[String], on:
                 made.push(script.clone());
                 if !ok {
                     action_line(ctx, goal, a, false, start);
-                    return;
+                    return Some(false);
                 }
             }
             Step::Add { path, content, .. } => {
                 if !add(ctx, goal, a, path, content).await {
                     action_line(ctx, goal, a, false, start);
-                    return;
+                    return Some(false);
                 }
             }
             Step::Do { task, .. } => {
@@ -669,17 +704,17 @@ async fn run_action(ctx: &Ctx, goal: &Goal, a: &Action, rules_ok: &[String], on:
                 };
                 match coder_task::do_task(ctx, work, task, &mut prior, rules_ok, &[]).await {
                     DoResult::Pass { commands, .. } => made.extend(commands),
-                    DoResult::Asked => return,
+                    DoResult::Asked => return None,
                     DoResult::Failed(why) => {
                         ctx.journal().note(Some(&goal.name), why);
                         action_line(ctx, goal, a, false, start);
-                        return;
+                        return Some(false);
                     }
                 }
             }
         }
     }
-    let ok = wait_within(ctx, goal, a, within).await;
+    let ok = passed(ctx, goal, undoes, a, within).await;
     action_line(ctx, goal, a, ok, start);
     if ok && has_do && !made.is_empty() {
         let n = made.len();
@@ -712,6 +747,30 @@ async fn run_action(ctx: &Ctx, goal: &Goal, a: &Action, rules_ok: &[String], on:
             ),
             BTreeMap::new(),
         );
+    }
+    Some(ok)
+}
+
+/// Whether the run passed: its goal holds within `within`. For an undo, every goal that
+/// held before the undone action holds again, each judged fresh over its whole window.
+async fn passed(ctx: &Ctx, goal: &Goal, undoes: Option<&Undoable>, a: &Action, within: Duration) -> bool {
+    let Some(u) = undoes else {
+        return wait_within(ctx, goal, a, within).await;
+    };
+    let start = Instant::now();
+    loop {
+        let mut all = true;
+        for g in u.held.iter().filter_map(|g| ctx.w.goal(g)) {
+            if goals::check_fresh(ctx, g, None).await != Some(true) {
+                all = false;
+                break;
+            }
+        }
+        let spent = start.elapsed();
+        if all || spent >= within {
+            return all;
+        }
+        tokio::time::sleep(RECHECK.min(within - spent)).await;
     }
 }
 

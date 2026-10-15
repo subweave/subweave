@@ -489,8 +489,8 @@ fn norm(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Every bash text with where it is and its line: FACT commands, RUN scripts, and each
-/// ```` ```recipe ```` block of a skill.
+/// Every bash text with where it is and its line: FACT and PART VERSION commands, RUN
+/// scripts, and each ```` ```recipe ```` block of a skill.
 pub fn commands(w: &Weave) -> Vec<(String, &str, u32)> {
     let mut out = Vec::new();
     for f in &w.facts {
@@ -499,6 +499,9 @@ pub fn commands(w: &Weave) -> Vec<(String, &str, u32)> {
         {
             out.push((format!("fact {}", f.name), c.as_str(), f.line));
         }
+    }
+    for p in &w.parts {
+        out.push((format!("part {}", p.name), p.version.as_str(), p.line));
     }
     for a in &w.actions {
         for s in &a.steps {
@@ -531,7 +534,8 @@ pub fn exprs(w: &Weave) -> Vec<&Expr> {
     for r in &w.rules {
         match r {
             WeaveRule::NeverIf { expr, .. } | WeaveRule::AskIf { expr, .. } => out.push(expr),
-            WeaveRule::AskBefore { cond: Some(e), .. } => out.push(e),
+            WeaveRule::AskBefore { cond: Some(e), .. }
+            | WeaveRule::NeverBefore { cond: Some(e), .. } => out.push(e),
             _ => {}
         }
     }
@@ -579,7 +583,9 @@ fn condition(c: &Condition) -> String {
 
 fn rule_kind(r: &WeaveRule) -> &'static str {
     match r {
-        WeaveRule::Never { .. } | WeaveRule::NeverIf { .. } => "NEVER",
+        WeaveRule::Never { .. } | WeaveRule::NeverIf { .. } | WeaveRule::NeverBefore { .. } => {
+            "NEVER"
+        }
         _ => "ASK",
     }
 }
@@ -629,7 +635,7 @@ pub fn elements(w: &Weave) -> IndexMap<&'static str, Vec<Element>> {
             WeaveRule::Never { text, .. } | WeaveRule::Ask { text, .. } => {
                 format!("{} \"{}\"", rule_kind(r), norm(text))
             }
-            WeaveRule::AskBefore { action, .. } => format!("ASK BEFORE {action}"),
+            WeaveRule::AskBefore { .. } | WeaveRule::NeverBefore { .. } => r.text(),
             WeaveRule::NeverIf { expr, .. } | WeaveRule::AskIf { expr, .. } => {
                 format!("{} IF {expr}", rule_kind(r))
             }
@@ -741,6 +747,9 @@ pub fn elements(w: &Weave) -> IndexMap<&'static str, Vec<Element>> {
     }
 
     for f in &w.facts {
+        if matches!(f.source, FactSource::Part { .. }) {
+            continue;
+        }
         add("fact", f.name.clone(), f.line, json!({ "name": f.name }));
         match &f.source {
             FactSource::Command(c) | FactSource::Quoted(c) if f.ty == FactType::Lines => add(
@@ -764,6 +773,7 @@ pub fn elements(w: &Weave) -> IndexMap<&'static str, Vec<Element>> {
                 f.line,
                 json!({ "name": f.name, "command": c }),
             ),
+            FactSource::Part { .. } => {}
         }
     }
     for (place, c, line) in &cmds {

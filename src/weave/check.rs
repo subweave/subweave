@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::Problem;
-use super::ast::{ArgKind, Condition, Rule, Weave};
+use super::ast::{ArgKind, Before, Condition, Rule, Weave};
 use super::expr::{Expr, Op, Window};
 use super::value::{Dim, FactType, Version};
 
@@ -52,7 +52,7 @@ fn known(w: &Weave, problems: &mut Vec<Problem>) {
     }
 }
 
-/// Each name once across ARGs, slots, SECRETs, FACTs, GOALs, ACTIONs and SKILLs.
+/// Each name once across ARGs, slots, SECRETs, FACTs, PARTs, GOALs, ACTIONs and SKILLs.
 fn names(w: &Weave, problems: &mut Vec<Problem>) {
     let mut all: Vec<(&str, u32, &str)> = Vec::new();
     for a in &w.args {
@@ -71,6 +71,7 @@ fn names(w: &Weave, problems: &mut Vec<Problem>) {
             .map(|s| (s.name.as_str(), s.line, "SECRET")),
     );
     all.extend(w.facts.iter().map(|f| (f.name.as_str(), f.line, "FACT")));
+    all.extend(w.parts.iter().map(|p| (p.name.as_str(), p.line, "PART")));
     all.extend(w.goals.iter().map(|g| (g.name.as_str(), g.line, "GOAL")));
     all.extend(
         w.actions
@@ -107,13 +108,22 @@ fn references(w: &Weave, problems: &mut Vec<Problem>) {
                 problems.push(Problem::new(act.line, format!("FOR {g}: no GOAL {g}")));
             }
         }
+        if let Some(u) = &act.undo {
+            if w.action(u).is_none() {
+                problems.push(Problem::new(act.line, format!("UNDO {u}: no ACTION {u}")));
+            } else if *u == act.name {
+                problems.push(Problem::new(act.line, format!("ACTION {u}: UNDO names itself")));
+            }
+        }
     }
     for r in &w.rules {
-        if let Rule::AskBefore { action, line, .. } = r {
+        if let Rule::AskBefore { on: Before::Action(action), line, .. }
+        | Rule::NeverBefore { on: Before::Action(action), line, .. } = r
+        {
             if w.action(action).is_none() {
                 problems.push(Problem::new(
                     *line,
-                    format!("ASK BEFORE {action}: no ACTION {action}"),
+                    format!("{}: no ACTION {action}", r.text()),
                 ));
             }
         }
@@ -241,11 +251,8 @@ fn expressions(w: &Weave, problems: &mut Vec<Problem>) {
             Rule::NeverIf { expr, line, .. } | Rule::AskIf { expr, line, .. } => {
                 conds.push((*line, expr, false))
             }
-            Rule::AskBefore {
-                cond: Some(e),
-                line,
-                ..
-            } => conds.push((*line, e, false)),
+            Rule::AskBefore { cond: Some(e), line, .. }
+            | Rule::NeverBefore { cond: Some(e), line, .. } => conds.push((*line, e, false)),
             _ => {}
         }
     }

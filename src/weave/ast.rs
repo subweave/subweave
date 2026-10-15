@@ -15,6 +15,8 @@ pub struct Weave {
     pub args: Vec<Arg>,
     pub secrets: Vec<Secret>,
     pub facts: Vec<Fact>,
+    /// Components with releases; each adds its derived facts to `facts`.
+    pub parts: Vec<Part>,
     pub goals: Vec<Goal>,
     pub actions: Vec<Action>,
     pub rules: Vec<Rule>,
@@ -165,6 +167,163 @@ pub struct Fact {
 pub enum FactSource {
     Command(String),
     Quoted(String),
+    /// `<part>.<field>`: derived from a PART's releases and running version.
+    Part { part: String, field: PartField },
+}
+
+/// `PART <name> <source> VERSION <command>`: a component with releases.
+#[derive(Debug, Clone, Serialize)]
+pub struct Part {
+    pub name: String,
+    pub source: PartSource,
+    /// Prints the running version.
+    pub version: String,
+    pub line: u32,
+}
+
+/// Where a part's releases are listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartSource {
+    /// `github:<org>/<repo>`: its GitHub releases, with their notes.
+    Github { org: String, repo: String },
+    /// `docker:<image>`: its image tags, which carry no notes.
+    Docker { image: String },
+    /// `apt:<package>`: the versions apt can install, with their changelog entries.
+    Apt { package: String },
+}
+
+impl PartSource {
+    pub fn parse(s: &str) -> Result<PartSource, String> {
+        const FORM: &str = "github:<org>/<repo>, docker:<image> or apt:<package>";
+        let (kind, rest) = s.split_once(':').ok_or_else(|| format!("`{s}` is no source: {FORM}"))?;
+        let word = |w: &str| {
+            !w.is_empty()
+                && w.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        };
+        match kind {
+            "github" => match rest.split_once('/') {
+                Some((org, repo)) if word(org) && word(repo) => Ok(PartSource::Github {
+                    org: org.into(),
+                    repo: repo.into(),
+                }),
+                _ => Err(format!("`{s}`: github:<org>/<repo>, like github:sigp/lighthouse")),
+            },
+            "docker" if !rest.is_empty() && rest.split(['/', ':']).all(word) && !rest.contains('@') => {
+                Ok(PartSource::Docker { image: rest.into() })
+            }
+            "docker" => Err(format!("`{s}`: docker:<image>, like docker:sigp/lighthouse")),
+            "apt" if word(rest) => Ok(PartSource::Apt { package: rest.into() }),
+            "apt" => Err(format!("`{s}`: apt:<package>, like apt:openssl")),
+            _ => Err(format!("`{s}` is no source: {FORM}")),
+        }
+    }
+}
+
+impl std::fmt::Display for PartSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PartSource::Github { org, repo } => write!(f, "github:{org}/{repo}"),
+            PartSource::Docker { image } => write!(f, "docker:{image}"),
+            PartSource::Apt { package } => write!(f, "apt:{package}"),
+        }
+    }
+}
+
+impl Serialize for PartSource {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+/// The facts a PART derives, `<part>.<field>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PartField {
+    /// The version the VERSION command prints.
+    Running,
+    /// The newest release.
+    Newest,
+    /// Releases newer than the running one.
+    Behind,
+    /// A release newer than the running one fixes a security issue or is high priority.
+    Security,
+    /// The notes of the releases newer than the running one, trimmed.
+    Notes,
+}
+
+impl PartField {
+    pub const ALL: [PartField; 5] = [
+        PartField::Running,
+        PartField::Newest,
+        PartField::Behind,
+        PartField::Security,
+        PartField::Notes,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PartField::Running => "running",
+            PartField::Newest => "newest",
+            PartField::Behind => "behind",
+            PartField::Security => "security",
+            PartField::Notes => "notes",
+        }
+    }
+
+    pub fn ty(self) -> FactType {
+        match self {
+            PartField::Running | PartField::Newest => FactType::Version,
+            PartField::Behind => FactType::Number(None),
+            PartField::Security => FactType::Bool,
+            PartField::Notes => FactType::Text,
+        }
+    }
+}
+
+/// What an action changes: a blast radius every weave shares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effect {
+    /// The service restarts: a brief outage.
+    Restart,
+    /// Settings.
+    Config,
+    /// The installed release.
+    Version,
+    /// Stored data.
+    Data,
+    /// Exposure: listeners, firewall.
+    Network,
+}
+
+impl Effect {
+    pub const ALL: [Effect; 5] = [
+        Effect::Restart,
+        Effect::Config,
+        Effect::Version,
+        Effect::Data,
+        Effect::Network,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Effect::Restart => "restart",
+            Effect::Config => "config",
+            Effect::Version => "version",
+            Effect::Data => "data",
+            Effect::Network => "network",
+        }
+    }
+
+    pub fn parse(w: &str) -> Option<Effect> {
+        Effect::ALL.into_iter().find(|e| e.as_str() == w)
+    }
+}
+
+/// `restart, version`: effects as a Weavefile lists them.
+pub fn show_effects(es: &[Effect]) -> String {
+    es.iter().map(|e| e.as_str()).collect::<Vec<_>>().join(", ")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -201,11 +360,22 @@ pub struct Action {
     pub for_goals: Vec<String>,
     #[serde(serialize_with = "dur_opt")]
     pub within: Option<Duration>,
-    /// The trailing `IF`.
+    /// `CHANGES`: `None` unsaid, which counts as every effect; empty: `CHANGES nothing`.
+    pub changes: Option<Vec<Effect>>,
+    /// `UNDO`: the action that puts back what this one changed.
+    pub undo: Option<String>,
+    /// The trailing `IF`: a precondition. While false or unknown the action is no fix.
     pub when_if: Option<Expr>,
     pub when: String,
     pub steps: Vec<Step>,
     pub line: u32,
+}
+
+impl Action {
+    /// What it changes: its `CHANGES`, else every effect.
+    pub fn effects(&self) -> &[Effect] {
+        self.changes.as_deref().unwrap_or(&Effect::ALL)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -226,6 +396,37 @@ pub enum Step {
     },
 }
 
+/// What a `BEFORE` rule gates: one action, or every action with one of the effects.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Before {
+    Action(String),
+    Changes(Vec<Effect>),
+}
+
+impl Before {
+    pub fn gates(&self, a: &Action) -> bool {
+        match self {
+            Before::Action(n) => *n == a.name,
+            Before::Changes(es) => a.effects().iter().any(|e| es.contains(e)),
+        }
+    }
+}
+
+impl std::fmt::Display for Before {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Before::Action(a) => f.write_str(a),
+            Before::Changes(es) => write!(f, "CHANGES {}", show_effects(es)),
+        }
+    }
+}
+
+impl Serialize for Before {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Rule {
@@ -238,12 +439,20 @@ pub enum Rule {
         because: Option<String>,
         line: u32,
     },
+    /// `NEVER BEFORE <action> | CHANGES <effects>`: refuses what it gates.
+    NeverBefore {
+        on: Before,
+        cond: Option<Expr>,
+        because: Option<String>,
+        line: u32,
+    },
     Ask {
         text: String,
         line: u32,
     },
+    /// `ASK BEFORE <action> | CHANGES <effects>`: the person says yes first.
     AskBefore {
-        action: String,
+        on: Before,
         cond: Option<Expr>,
         because: Option<String>,
         line: u32,
@@ -260,6 +469,7 @@ impl Rule {
         match self {
             Rule::Never { line, .. }
             | Rule::NeverIf { line, .. }
+            | Rule::NeverBefore { line, .. }
             | Rule::Ask { line, .. }
             | Rule::AskBefore { line, .. }
             | Rule::AskIf { line, .. } => *line,
@@ -270,9 +480,27 @@ impl Rule {
     pub fn because(&self) -> Option<&str> {
         match self {
             Rule::NeverIf { because, .. }
+            | Rule::NeverBefore { because, .. }
             | Rule::AskBefore { because, .. }
             | Rule::AskIf { because, .. } => because.as_deref(),
             Rule::Never { .. } | Rule::Ask { .. } => None,
+        }
+    }
+
+    /// As written, without BECAUSE: the key its `always` and `never` answers are kept
+    /// under.
+    pub fn text(&self) -> String {
+        let before = |kw: &str, on: &Before, cond: &Option<Expr>| match cond {
+            Some(c) => format!("{kw} BEFORE {on} IF {c}"),
+            None => format!("{kw} BEFORE {on}"),
+        };
+        match self {
+            Rule::Never { text, .. } => format!("NEVER \"{text}\""),
+            Rule::NeverIf { expr, .. } => format!("NEVER IF {expr}"),
+            Rule::NeverBefore { on, cond, .. } => before("NEVER", on, cond),
+            Rule::Ask { text, .. } => format!("ASK \"{text}\""),
+            Rule::AskBefore { on, cond, .. } => before("ASK", on, cond),
+            Rule::AskIf { expr, .. } => format!("ASK IF {expr}"),
         }
     }
 }
@@ -303,6 +531,15 @@ impl Weave {
 
     pub fn fact(&self, name: &str) -> Option<&Fact> {
         self.facts.iter().find(|f| f.name == name)
+    }
+
+    pub fn part(&self, name: &str) -> Option<&Part> {
+        self.parts.iter().find(|p| p.name == name)
+    }
+
+    /// Named by another action's UNDO.
+    pub fn undoes(&self, name: &str) -> bool {
+        self.actions.iter().any(|a| a.undo.as_deref() == Some(name))
     }
 
     /// Every slot of every option ARG, in file order.

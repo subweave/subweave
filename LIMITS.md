@@ -206,3 +206,12 @@ Subweave repairs in minutes, not milliseconds. A service that needs sub-second f
 - Two lines that differ only in a value can mean opposite things: `exit status 0` and `exit status 1`. Teach the kind trouble and every exit fails the goal; teach it normal and a failure passes. Keep such lines out of a goal over log lines: write a fact that reads the status.
 - The model's 2 verdicts judge 2 samples of the kind. A kind whose meaning turns on its values may get 2 lucky samples.
 - A known kind stays known until someone forgets it or a weave changes its `KNOWN`; a new version of the program that gives an old kind of line a new meaning is not noticed.
+
+## 14. A release is as secure as its notes say
+
+`<part>.security` is the decider's reading of each newer release's notes ([PART](WEAVEFILE.md#part)), once per release.
+
+- A Docker tag has no notes: its releases are never security fixes unless someone says so with `subweave known`.
+- Notes that bury a fix under routine changes, or call a security fix a "bug fix", read as routine.
+- A verdict stays: notes edited after the first read are not read again.
+- Release lists are read every 6 hours: a release published since then is not seen yet.

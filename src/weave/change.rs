@@ -50,6 +50,7 @@ pub fn compare(old_text: &str, old: &Weave, new_text: &str, new: &Weave) -> Chan
     let mut change = Change::default();
     for (what, o, n) in [
         ("FACT", named(&old.facts, |f| &f.name), named(&new.facts, |f| &f.name)),
+        ("PART", named(&old.parts, |p| &p.name), named(&new.parts, |p| &p.name)),
         ("GOAL", named(&old.goals, |g| &g.name), named(&new.goals, |g| &g.name)),
         ("ACTION", named(&old.actions, |a| &a.name), named(&new.actions, |a| &a.name)),
         ("SKILL", named(&old.skills, |s| &s.name), named(&new.skills, |s| &s.name)),
@@ -83,13 +84,21 @@ pub fn compare(old_text: &str, old: &Weave, new_text: &str, new: &Weave) -> Chan
 }
 
 /// The weave without its facts, goals, actions, skills and KNOWN lines and without line
-/// numbers, each list in a fixed order: moving an item is no change.
+/// numbers, each list in a fixed order: moving an item is no change. An action's
+/// `CHANGES` stays: it decides which rules by effect gate the action, so saying less
+/// than every effect is a rule change.
 fn rest(w: &Weave) -> Value {
     let mut v = unlined(w);
     if let Value::Object(map) = &mut v {
-        for free in ["facts", "goals", "actions", "skills", "known"] {
+        for free in ["facts", "parts", "goals", "actions", "skills", "known"] {
             map.remove(free);
         }
+        let changes: Vec<Value> = w
+            .actions
+            .iter()
+            .filter_map(|a| Some(serde_json::json!([a.name, a.changes.as_ref()?])))
+            .collect();
+        map.insert("changes".into(), Value::Array(changes));
         for item in map.values_mut() {
             if let Value::Array(items) = item {
                 items.sort_by_cached_key(Value::to_string);

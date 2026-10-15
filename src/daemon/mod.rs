@@ -13,6 +13,7 @@ pub(crate) mod journal;
 mod learned;
 pub(crate) mod memory;
 mod observe;
+mod parts;
 mod repair;
 mod service;
 pub(crate) mod state;
@@ -522,6 +523,30 @@ impl Daemon {
                         goal,
                         text: line,
                         class,
+                        why,
+                    }
+                    .into()
+                });
+            }
+            Command::Release {
+                service,
+                part,
+                version,
+                security,
+                why,
+                by,
+            } => {
+                if svc::spec(&service).is_err() {
+                    tracing::warn!(service = %service, "release: no such service");
+                    return;
+                }
+                lock(&self.shared.journal(&service)).add(Event {
+                    by: Some(by).filter(|b| !b.is_empty()),
+                    ..Kind::Release {
+                        part,
+                        version,
+                        security,
+                        p: None,
                         why,
                     }
                     .into()

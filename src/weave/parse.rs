@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use super::Problem;
 use super::ast::{
-    Action, Arg, ArgKind, ArgOption, Class, Condition, Fact, FactSource, Goal, Known, Level,
-    ModelHint, Needs, Rule, Secret, Skill, Step, Weave,
+    Action, Arg, ArgKind, ArgOption, Before, Class, Condition, Effect, Fact, FactSource, Goal,
+    Known, Level, ModelHint, Needs, Part, PartField, PartSource, Rule, Secret, Skill, Step, Weave,
 };
 use super::expr::{self, Expr};
 use super::lex::{self, Line};
@@ -14,17 +14,18 @@ use super::value::{FactType, Unit};
 
 /// Instruction keywords: a line starts with one of these.
 pub const INSTRUCTIONS: &[&str] = &[
-    "ABOUT", "FROM", "NEEDS", "MODEL", "ARG", "SECRET", "FACT", "GOAL", "ACTION", "WHEN", "RUN",
-    "DO", "ADD", "NEVER", "ASK", "SKILL", "KNOWN",
+    "ABOUT", "FROM", "NEEDS", "MODEL", "ARG", "SECRET", "FACT", "PART", "GOAL", "ACTION", "WHEN",
+    "RUN", "DO", "ADD", "NEVER", "ASK", "SKILL", "KNOWN",
 ];
 
 /// Every capital word with a meaning; none of them can be a name.
 pub const KEYWORDS: &[&str] = &[
-    "ABOUT", "FROM", "NEEDS", "MODEL", "ARG", "SECRET", "FACT", "GOAL", "ACTION", "WHEN", "RUN",
-    "DO", "ADD", "NEVER", "ASK", "SKILL", "KNOWN", "AFTER", "EVERY", "OVER", "TRIES", "PER",
-    "FOR", "WITHIN", "IF", "AND", "OR", "NOT", "SINCE", "MIN", "MAX", "AVG", "DELTA", "COUNT",
-    "BOOL", "NUMBER", "TEXT", "VERSION", "LINES", "MUST", "SHOULD", "MAY", "BEFORE", "DECIDE",
-    "CODE", "THEN", "CPU", "GPU", "GB", "TB", "RAM", "DISK", "BECAUSE", "NORMAL", "TROUBLE",
+    "ABOUT", "FROM", "NEEDS", "MODEL", "ARG", "SECRET", "FACT", "PART", "GOAL", "ACTION", "WHEN",
+    "RUN", "DO", "ADD", "NEVER", "ASK", "SKILL", "KNOWN", "AFTER", "EVERY", "OVER", "TRIES",
+    "PER", "FOR", "WITHIN", "CHANGES", "UNDO", "IF", "AND", "OR", "NOT", "SINCE", "MIN", "MAX",
+    "AVG", "DELTA", "COUNT", "BOOL", "NUMBER", "TEXT", "VERSION", "LINES", "MUST", "SHOULD",
+    "MAY", "BEFORE", "DECIDE", "CODE", "THEN", "CPU", "GPU", "GB", "TB", "RAM", "DISK",
+    "BECAUSE", "NORMAL", "TROUBLE",
 ];
 
 /// An ACTION's label is a button on a phone.
@@ -230,6 +231,49 @@ fn split_because(s: &str) -> Result<(&str, Option<String>), String> {
     Ok((head, Some(text)))
 }
 
+/// `restart, config` after CHANGES; `nothing` alone when `nothing` may say no effect.
+fn effects(c: &mut Cur, nothing: bool) -> Result<Vec<Effect>, String> {
+    let words = c.names();
+    if nothing && words == ["nothing"] {
+        return Ok(Vec::new());
+    }
+    if words.is_empty() {
+        return Err("CHANGES names no effect".into());
+    }
+    let mut out = Vec::new();
+    for w in words {
+        let e = Effect::parse(w).ok_or_else(|| {
+            format!(
+                "`{w}` is no effect: restart, config, version, data or network{}",
+                if nothing { ", or nothing alone" } else { "" }
+            )
+        })?;
+        if !out.contains(&e) {
+            out.push(e);
+        }
+    }
+    Ok(out)
+}
+
+/// The rest of `NEVER BEFORE` or `ASK BEFORE`: what it gates, its IF and its BECAUSE.
+fn before<'a>(
+    kw: &str,
+    rest: &'a str,
+) -> Result<(Before, Option<&'a str>, Option<String>), String> {
+    let (rest, because) = split_because(rest)?;
+    let (head, cond) = split_if(rest);
+    let mut h = Cur::new(head);
+    let on = if h.eat("CHANGES") {
+        Before::Changes(effects(&mut h, false)?)
+    } else {
+        Before::Action(name(h.word().unwrap_or_default(), is_item_name, ITEM_FORM)?)
+    };
+    if !h.at_end() {
+        return Err(format!("{kw} BEFORE {on}: `{}` is not IF or BECAUSE", h.rest()));
+    }
+    Ok((on, cond, because))
+}
+
 struct Parser {
     w: Weave,
     problems: Vec<Problem>,
@@ -253,6 +297,7 @@ pub fn parse(name: &str, text: &str) -> (Weave, Vec<Problem>) {
             args: Vec::new(),
             secrets: Vec::new(),
             facts: Vec::new(),
+            parts: Vec::new(),
             goals: Vec::new(),
             actions: Vec::new(),
             rules: Vec::new(),
@@ -411,65 +456,93 @@ impl Parser {
                     line: no,
                 });
             }
+            "PART" => {
+                const FORM: &str = "PART <name> <source> VERSION <command>";
+                let n = name(c.word().unwrap_or_default(), is_value_name, VALUE_FORM)?;
+                let source = PartSource::parse(c.word().ok_or(FORM)?)?;
+                if !c.eat("VERSION") {
+                    return Err(format!("{FORM}: PART {n} has no VERSION command"));
+                }
+                let version = match Self::heredoc(line, c.peek()) {
+                    Some(body) => body.to_string(),
+                    None => c.rest().to_string(),
+                };
+                if version.trim().is_empty() {
+                    return Err(format!("PART {n}: VERSION has no command"));
+                }
+                for field in PartField::ALL {
+                    self.w.facts.push(Fact {
+                        name: format!("{n}.{}", field.as_str()),
+                        ty: field.ty(),
+                        source: FactSource::Part {
+                            part: n.clone(),
+                            field,
+                        },
+                        line: no,
+                    });
+                }
+                self.w.parts.push(Part {
+                    name: n,
+                    source,
+                    version,
+                    line: no,
+                });
+            }
             "GOAL" => self.goal(no, c.rest())?,
             "ACTION" => self.action_line(no, c.rest())?,
             "WHEN" | "RUN" | "DO" | "ADD" => self.step(kw, line, &mut c)?,
-            "NEVER" => {
+            "NEVER" | "ASK" => {
+                let never = kw == "NEVER";
                 if c.starts_quoted() {
                     let text = c.quoted()?;
                     if !c.at_end() {
-                        return Err("NEVER: text after the quoted line".into());
+                        return Err(format!("{kw}: text after the quoted line"));
                     }
-                    self.w.rules.push(Rule::Never { text, line: no });
-                } else if c.eat("IF") {
-                    let (src, because) = split_because(c.rest())?;
-                    if let Some(expr) = self.expr(no, src) {
-                        self.w.rules.push(Rule::NeverIf {
-                            expr,
+                    self.w.rules.push(if never {
+                        Rule::Never { text, line: no }
+                    } else {
+                        Rule::Ask { text, line: no }
+                    });
+                } else if c.eat("BEFORE") {
+                    let (on, cond, because) = before(kw, c.rest())?;
+                    let cond = cond.and_then(|src| self.expr(no, src));
+                    self.w.rules.push(if never {
+                        Rule::NeverBefore {
+                            on,
+                            cond,
                             because,
                             line: no,
-                        });
-                    }
-                } else {
-                    return Err("NEVER takes quoted text or IF <expr>".into());
-                }
-            }
-            "ASK" => {
-                if c.starts_quoted() {
-                    let text = c.quoted()?;
-                    if !c.at_end() {
-                        return Err("ASK: text after the quoted line".into());
-                    }
-                    self.w.rules.push(Rule::Ask { text, line: no });
-                } else if c.eat("BEFORE") {
-                    let (rest, because) = split_because(c.rest())?;
-                    let (head, cond) = split_if(rest);
-                    let mut h = Cur::new(head);
-                    let action = name(h.word().unwrap_or_default(), is_item_name, ITEM_FORM)?;
-                    if !h.at_end() {
-                        return Err(format!(
-                            "ASK BEFORE {action}: `{}` is not IF or BECAUSE",
-                            h.rest()
-                        ));
-                    }
-                    let cond = cond.and_then(|src| self.expr(no, src));
-                    self.w.rules.push(Rule::AskBefore {
-                        action,
-                        cond,
-                        because,
-                        line: no,
+                        }
+                    } else {
+                        Rule::AskBefore {
+                            on,
+                            cond,
+                            because,
+                            line: no,
+                        }
                     });
                 } else if c.eat("IF") {
                     let (src, because) = split_because(c.rest())?;
                     if let Some(expr) = self.expr(no, src) {
-                        self.w.rules.push(Rule::AskIf {
-                            expr,
-                            because,
-                            line: no,
+                        self.w.rules.push(if never {
+                            Rule::NeverIf {
+                                expr,
+                                because,
+                                line: no,
+                            }
+                        } else {
+                            Rule::AskIf {
+                                expr,
+                                because,
+                                line: no,
+                            }
                         });
                     }
                 } else {
-                    return Err("ASK takes quoted text, BEFORE <action> or IF <expr>".into());
+                    return Err(format!(
+                        "{kw} takes quoted text, BEFORE <action>, BEFORE CHANGES <effects> or \
+                         IF <expr>"
+                    ));
                 }
             }
             "SKILL" => {
@@ -739,6 +812,8 @@ impl Parser {
             label: None,
             for_goals: Vec::new(),
             within: None,
+            changes: None,
+            undo: None,
             when_if: None,
             when: String::new(),
             steps: Vec::new(),
@@ -763,9 +838,15 @@ impl Parser {
             if c.eat("WITHIN") {
                 action.within = Some(dur(c.word().unwrap_or_default())?);
             }
+            if c.eat("CHANGES") {
+                action.changes = Some(effects(&mut c, true).map_err(|e| format!("ACTION {n}: {e}"))?);
+            }
+            if c.eat("UNDO") {
+                action.undo = Some(name(c.word().unwrap_or_default(), is_item_name, ITEM_FORM)?);
+            }
             if !c.at_end() {
                 return Err(format!(
-                    "ACTION {n}: `{}` is not FOR, WITHIN or IF",
+                    "ACTION {n}: `{}` is not FOR, WITHIN, CHANGES, UNDO or IF, in that order",
                     c.rest()
                 ));
             }

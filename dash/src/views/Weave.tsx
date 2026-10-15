@@ -4,7 +4,7 @@ import { Panel } from "../components/ui";
 import type { ServiceProps } from "./ServiceView";
 
 const KEYWORDS: Record<string, true> = Object.fromEntries(
-  "ABOUT ACTION ADD AFTER AND ARG ASK AVG BECAUSE BEFORE BOOL CODE COUNT CPU DECIDE DELTA DISK DO EVERY FACT FOR FROM GB GOAL GPU IF KNOWN LINES MAX MAY MIN MODEL MUST NEEDS NEVER NORMAL NOT NUMBER OR OVER PER RAM RUN SECRET SHOULD SINCE SKILL TB TEXT THEN TRIES TROUBLE VERSION WHEN WITHIN"
+  "ABOUT ACTION ADD AFTER AND ARG ASK AVG BECAUSE BEFORE BOOL CHANGES CODE COUNT CPU DECIDE DELTA DISK DO EVERY FACT FOR FROM GB GOAL GPU IF KNOWN LINES MAX MAY MIN MODEL MUST NEEDS NEVER NORMAL NOT NUMBER OR OVER PART PER RAM RUN SECRET SHOULD SINCE SKILL TB TEXT THEN TRIES TROUBLE UNDO VERSION WHEN WITHIN"
     .split(" ")
     .map((w) => [w, true]),
 );
@@ -21,7 +21,7 @@ function inline(line: string, key: string, open: boolean): { nodes: ReactNode[];
     if (!end) return { nodes: out, open: true };
     line = line.slice(part.length);
   }
-  const re = /("(?:[^"\\]|\\.)*"?)|(\$[A-Za-z_][A-Za-z0-9_]*)|\b([A-Z]{2,})\b|(\b\d+(?:\.\d+)?(?:%|(?:ms|s|m|h|d|B|KB|MB|GB|TB)\b))/g;
+  const re = /("(?:[^"\\]|\\.)*"?)|(\$[A-Za-z_][A-Za-z0-9_]*)|\b([A-Z]{2,})\b|(\b\d+(?:\.\d+)?(?:%|(?:ms|s|m|h|d|B|KB|MB|GB|TB)\b))|(?<=\bCHANGES\s+(?:[a-z]+,\s*)*)(restart|config|version|data|network|nothing)\b/g;
   let at = 0;
   let m: RegExpExecArray | null;
   let k = 0;
@@ -35,6 +35,7 @@ function inline(line: string, key: string, open: boolean): { nodes: ReactNode[];
     } else if (m[2]) out.push(<span key={`${key}-${k++}`} className="w-name">{m[2]}</span>);
     else if (m[3] && KEYWORDS[m[3]]) out.push(<span key={`${key}-${k++}`} className="w-key">{m[3]}</span>);
     else if (m[4]) out.push(<span key={`${key}-${k++}`} className="w-num">{m[4]}</span>);
+    else if (m[5]) out.push(<span key={`${key}-${k++}`} className="w-num">{m[5]}</span>);
     else out.push(m[3]);
     at = m.index + m[0].length;
   }

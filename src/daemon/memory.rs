@@ -2,8 +2,9 @@
 //! time. A log line's kind is its template; each kind is known normal or trouble by a
 //! person's or agent's word, the weave's KNOWN, or two agreeing model verdicts. An action
 //! that fixed a goal failing on a known trouble kind twice runs for it without the
-//! decider. The state lives in the journal's fold (`state.rs`), from `verdict`, `known`
-//! and `action` events.
+//! decider. A PART's release is a security fix or not by a person's or agent's word, or
+//! the model's one verdict on its notes. The state lives in the journal's fold
+//! (`state.rs`), from `verdict`, `known`, `release` and `action` events.
 
 use std::collections::BTreeMap;
 
@@ -20,6 +21,9 @@ pub const NORMAL_P: f64 = 0.2;
 /// Passes of one action for (goal, known trouble kind) after which it runs without the
 /// decider.
 pub const CHOICE_PASSES: u32 = 2;
+/// A model verdict at or above this p says a release is a security fix; one verdict per
+/// release decides.
+pub const SECURITY_P: f64 = 0.5;
 
 /// What a template shows where a value was.
 const MASK: &str = "<*>";
@@ -195,11 +199,32 @@ impl Source {
     }
 }
 
-/// What the box knows of kinds of lines, folded from the journal.
+/// What the box knows of kinds of lines and of releases, folded from the journal.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Memory {
     /// Per goal, per template.
     pub goals: BTreeMap<String, BTreeMap<String, Entry>>,
+    /// Per PART, per release version: whether it fixes a security issue.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub releases: BTreeMap<String, BTreeMap<String, Release>>,
+}
+
+/// One release of a part: the model's verdict on its notes, and a person's word.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Release {
+    /// The model's p that the notes show a security fix or a high priority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub told: Option<ToldRelease>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToldRelease {
+    pub security: bool,
+    pub by: Option<String>,
+    pub why: Option<String>,
+    pub t: String,
 }
 
 /// One kind of line for one goal.
@@ -313,5 +338,33 @@ impl Memory {
             .filter(|(_, n)| **n >= CHOICE_PASSES)
             .max_by_key(|(_, n)| **n)
             .map(|(a, n)| (a.as_str(), *n))
+    }
+
+    fn release(&mut self, part: &str, version: &str) -> &mut Release {
+        self.releases
+            .entry(part.to_string())
+            .or_default()
+            .entry(version.to_string())
+            .or_default()
+    }
+
+    /// The model judged release `version` of `part`: `p` that it is a security fix.
+    pub fn release_judged(&mut self, part: &str, version: &str, p: f64) {
+        self.release(part, version).p = Some(p);
+    }
+
+    /// A person or an agent said whether release `version` of `part` is a security fix.
+    pub fn release_told(&mut self, part: &str, version: &str, told: ToldRelease) {
+        self.release(part, version).told = Some(told);
+    }
+
+    /// Whether release `version` of `part` is a security fix, and who says so: told on
+    /// this box, then the model's one verdict.
+    pub fn security(&self, part: &str, version: &str) -> Option<(bool, Source)> {
+        let r = self.releases.get(part)?.get(version)?;
+        if let Some(t) = &r.told {
+            return Some((t.security, Source::Told { by: t.by.clone() }));
+        }
+        r.p.map(|p| (p >= SECURITY_P, Source::Model))
     }
 }
