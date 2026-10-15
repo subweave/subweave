@@ -151,7 +151,10 @@ impl Counts {
     }
 
     fn check(&mut self, l: &Event, t: Option<i64>) {
-        let Kind::Check { goal: g, ok, facts } = &l.kind else {
+        let Kind::Check {
+            goal: g, ok, facts, ..
+        } = &l.kind
+        else {
             return;
         };
         let shown = match ok {

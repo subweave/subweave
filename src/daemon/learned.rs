@@ -12,8 +12,7 @@ use crate::model::coder::{Msg, Tally, Tool};
 use crate::model::decider::Question;
 use crate::paths;
 use crate::service::{self as svc, Learned, LearnedFact};
-use crate::weave::expr::Op;
-use crate::weave::{self, Action, Condition, Expr, Fact, FactSource, Rule, Step, Weave};
+use crate::weave::{self, Action, Fact, FactSource, FactType, Step, Weave};
 
 use super::service::Ctx;
 use super::state::{Event, JobKind, Kind};
@@ -33,7 +32,7 @@ fn note(text: String) -> Event {
 const TRIES: usize = 3;
 /// After a quoted fact could not be learned, the next try waits this long.
 const RELEARN: Duration = Duration::from_secs(600);
-/// A FOLLOW command still running after this long follows; one that ended does not.
+/// A LINES command still running after this long follows; one that ended does not.
 const FOLLOW_PROBE: Duration = Duration::from_secs(5);
 /// The coder's reasoning effort for a learn. On the 14 number and text facts of
 /// weaves/postgres, twice each on the test box: `low` passed 21 of 28 as the default did,
@@ -51,6 +50,31 @@ const FACT_SYSTEM: &str = "You write one bash command that reads a fact on this 
 
 pub(crate) fn key(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
+}
+
+/// The key a quoted fact's learned command is kept under: its type and its text after
+/// `$name` replacement. A changed type, text or ARG learns again.
+fn fact_key(fact: &Fact, args: &std::collections::BTreeMap<String, String>) -> Option<String> {
+    let FactSource::Quoted(text) = &fact.source else {
+        return None;
+    };
+    Some(key(&format!("{}\n{}", fact.ty, weave::subst(text, args))))
+}
+
+/// Drops each learned fact command the weave no longer reads as learned: its fact left
+/// the weave, or its type or text changed. Whether any was dropped.
+pub(crate) fn prune(
+    l: &mut Learned,
+    w: &Weave,
+    args: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    let before = l.facts.len();
+    l.facts.retain(|name, learned| {
+        w.fact(name)
+            .and_then(|f| fact_key(f, args))
+            .is_some_and(|k| k == learned.key)
+    });
+    l.facts.len() != before
 }
 
 /// The key of an action's learned steps: its DO texts after `$name` replacement.
@@ -90,77 +114,9 @@ pub(crate) fn forget_file(service: &str, name: &str) -> Result<bool> {
     Ok(dropped)
 }
 
-/// How the weave reads a fact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Form {
-    Exit,
-    Number,
-    Text,
-}
-
-fn form(w: &Weave, fact: &str) -> Form {
-    let mut exprs: Vec<&Expr> = Vec::new();
-    for g in &w.goals {
-        if let Condition::Code(e) = &g.cond {
-            exprs.push(e);
-        }
-        exprs.extend(&g.when);
-    }
-    for a in &w.actions {
-        exprs.extend(&a.when_if);
-    }
-    for r in &w.rules {
-        match r {
-            Rule::NeverIf { expr, .. } | Rule::AskIf { expr, .. } => exprs.push(expr),
-            Rule::AskBefore { cond: Some(e), .. } => exprs.push(e),
-            _ => {}
-        }
-    }
-    let mut found = Form::Text;
-    for e in exprs {
-        scan(e, fact, false, &mut found);
-    }
-    found
-}
-
-/// `value`: the expression sits where a value is read (inside a comparison or arithmetic),
-/// not where a condition holds.
-fn scan(e: &Expr, fact: &str, value: bool, found: &mut Form) {
-    match e {
-        Expr::Name(n) if n == fact => {
-            if !value && *found == Form::Text {
-                *found = Form::Exit;
-            }
-        }
-        Expr::Group(x) => scan(x, fact, value, found),
-        Expr::Not(x) => scan(x, fact, false, found),
-        Expr::Bin(l, Op::And | Op::Or, r) => {
-            scan(l, fact, false, found);
-            scan(r, fact, false, found);
-        }
-        Expr::Bin(l, op, r) => {
-            let text = matches!(op, Op::Eq | Op::Ne)
-                && (matches!(**l, Expr::Str(_)) || matches!(**r, Expr::Str(_)));
-            for side in [l, r] {
-                if matches!(&**side, Expr::Name(n) if n == fact) {
-                    if !text {
-                        *found = Form::Number;
-                    }
-                } else {
-                    scan(side, fact, true, found);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
 /// The learned command of a quoted fact while its key holds.
 pub(crate) fn learned_command(ctx: &Ctx, fact: &Fact) -> Option<String> {
-    let FactSource::Quoted(text) = &fact.source else {
-        return None;
-    };
-    let k = key(&weave::subst(text, &ctx.spec.args));
+    let k = fact_key(fact, &ctx.spec.args)?;
     ctx.learned()
         .facts
         .get(&fact.name)
@@ -184,19 +140,14 @@ pub(crate) async fn fact_command(ctx: &Ctx, fact: &Fact) -> Option<String> {
     super::episode::scope(JobKind::Learn, learn_and_keep(ctx, fact, None)).await
 }
 
-/// Whether a nonzero exit of this fact's command is a failed read, not a value: true for
-/// a quoted fact read as a number or text. An exit-status fact says "no" with it.
-pub(crate) fn exits_zero(w: &Weave, fact: &Fact) -> bool {
-    matches!(fact.source, FactSource::Quoted(_)) && !fact.follow && form(w, &fact.name) != Form::Exit
-}
-
-/// A learned command that failed on this box: forgotten, and learned again with its
-/// error, at most once per `RELEARN` for the same fact.
+/// A learned command whose read broke on this box (`why`): forgotten, and learned again
+/// with its error, at most once per `RELEARN` for the same fact.
 pub(crate) async fn relearn(
     ctx: &Ctx,
     fact: &Fact,
     command: &str,
     failed: &super::Out,
+    why: &str,
 ) -> Option<String> {
     let _one = ctx.learning.lock().await;
     let now_learned = ctx.learned().facts.get(&fact.name).cloned();
@@ -204,7 +155,7 @@ pub(crate) async fn relearn(
         // Another check learned it again meanwhile.
         return learned_command(ctx, fact);
     };
-    let code = failed.code.map_or("killed".to_string(), |c| format!("exit {c}"));
+    let code = why;
     let output = ctx.redact(&super::cap(&failed.both(), 1000));
     ctx.journal().add(Kind::Learn {
         goal: None,
@@ -239,7 +190,7 @@ async fn learn_and_keep(ctx: &Ctx, fact: &Fact, hint: Option<&str>) -> Option<St
         return None;
     };
     let text = weave::subst(text, &ctx.spec.args);
-    let k = key(&text);
+    let k = fact_key(fact, &ctx.spec.args)?;
     if ctx
         .learn_wait
         .lock()
@@ -336,16 +287,17 @@ async fn learn(
         .decider
         .as_ref()
         .ok_or_else(|| anyhow!("no decider to check the command"))?;
-    let form = form(&ctx.w, &fact.name);
-    let reads = if fact.follow {
-        "it keeps running and prints new lines as they come, never old ones (`tail -n 0 -F`, \
-         `journalctl -f -n 0`); each check reads the lines printed since the last one"
-    } else {
-        match form {
-            Form::Exit => "its exit status: exit 0 when it holds, non-zero when not",
-            Form::Number => "a number: print one number and nothing else",
-            Form::Text => "the text it prints",
+    let reads = match fact.ty {
+        FactType::Lines => {
+            "lines: it keeps running and prints new lines as they come, never old ones \
+             (`tail -n 0 -F`, `journalctl -f -n 0`)"
+                .to_string()
         }
+        FactType::Bool => "its exit status: exit 0 when it holds, non-zero when not".into(),
+        FactType::Number(Some(u)) => format!("a number in {u}: print one number and nothing else"),
+        FactType::Number(None) => "a number: print one number and nothing else".into(),
+        FactType::Version => "a version like 1.2.3: print it and nothing else".into(),
+        FactType::Text => "the text it prints".into(),
     };
     // What every learn of this service shares comes first, so the provider's prompt
     // cache can hold it; only the skills the decider picks for this fact go along.
@@ -432,7 +384,7 @@ async fn learn(
                     .into(),
             },
         );
-        if !fact.follow && form != Form::Exit {
+        if !matches!(fact.ty, FactType::Bool | FactType::Lines) {
             q.insert(
                 "hides".to_string(),
                 Question::Noul {
@@ -476,14 +428,14 @@ async fn learn(
             last = format!("`{command}` prints a value when its read fails ({p:.2})");
             continue;
         }
-        if fact.follow {
+        if fact.ty == FactType::Lines {
             let o = sh(&command, &ctx.env, FOLLOW_PROBE).await;
             if let Some(c) = o.code {
                 let shown = ctx.redact(&super::cap(&o.both(), 2000));
                 answer(
                     &mut msgs,
                     format!(
-                        "It ended with exit {c} within {}s and printed this:\n{shown}\nA FOLLOW \
+                        "It ended with exit {c} within {}s and printed this:\n{shown}\nA LINES \
                          command keeps running and prints new lines as they come.",
                         FOLLOW_PROBE.as_secs()
                     ),
@@ -491,23 +443,26 @@ async fn learn(
                 last = format!("`{command}` ended with exit {c}: it does not follow");
                 continue;
             }
-        } else if form != Form::Exit {
+        } else if fact.ty != FactType::Bool {
             let o = sh(&command, &ctx.env, Duration::from_secs(60)).await;
             let printed = o.stdout.trim();
-            if form == Form::Number
-                && crate::weave::Value::Text(printed.to_string())
-                    .num()
-                    .is_none()
-            {
+            let parsed = if o.ok() {
+                fact.ty.parse(printed)
+            } else {
+                Err("it exited non-zero".to_string())
+            };
+            if let Err(why) = parsed {
                 let code = o.code.map_or("killed".to_string(), |c| format!("exit {c}"));
                 let shown = ctx.redact(&super::cap(&o.both(), 2000));
                 answer(
                     &mut msgs,
                     format!(
-                        "It ended with {code} and printed this, not one number:\n{shown}\nPrint one number."
+                        "It ended with {code} and printed this:\n{shown}\nThat is no {} value: \
+                         {why}. The weave reads it as {reads}.",
+                        fact.ty
                     ),
                 );
-                last = format!("`{command}` printed no number ({code})");
+                last = format!("`{command}` printed no {} value ({code})", fact.ty);
                 continue;
             }
             // A command can read the right thing in the wrong form: an HTTP status for a

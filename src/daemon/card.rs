@@ -124,14 +124,9 @@ fn short(s: &str, n: usize) -> String {
     }
 }
 
-/// What the goal keeps true, in the weave's words: its sentence, else its quoted
-/// condition, else its name.
+/// What the goal keeps true, in the weave's words: its sentence.
 pub(crate) fn subject(ctx: &Ctx, g: &Goal) -> String {
-    match (&g.plain, &g.cond) {
-        (Some(p), _) => weave::subst(p, &ctx.spec.args),
-        (None, Condition::Quoted(t)) => weave::subst(t, &ctx.spec.args),
-        (None, Condition::Code(_)) => format!("`{}` holds", g.name),
-    }
+    weave::subst(&g.sentence, &ctx.spec.args)
 }
 
 /// An action's button: its label, `$name` replaced, else its name.
@@ -153,20 +148,22 @@ fn why(ctx: &Ctx, r: &Rule) -> String {
 /// A goal that does not hold: what it keeps true and how it is checked, then each fact
 /// it reads as it is now.
 pub(crate) fn goal_lines(ctx: &Ctx, g: &Goal, now: &BTreeMap<String, String>) -> Vec<String> {
-    let mut out = vec![match (&g.plain, &g.cond) {
-        (None, Condition::Code(e)) => format!("Goal `{}` does not hold: `{e}`.", g.name),
-        _ => format!("Not true now: {}.", subject(ctx, g).trim_end_matches('.')),
-    }];
-    if g.plain.is_some() {
-        out.push(match &g.cond {
-            Condition::Code(e) => format!("Goal `{}` checks `{e}`.", g.name),
+    let window = if ctx.w.windowed(g) {
+        format!(" over the last {}", weave::show_duration(g.over()))
+    } else {
+        String::new()
+    };
+    let mut out = vec![
+        format!("Not true now: {}.", subject(ctx, g).trim_end_matches('.')),
+        match &g.cond {
+            Condition::Code(e) => format!("Goal `{}` checks `{e}`{window}.", g.name),
             Condition::Quoted(t) => format!(
-                "Goal `{}` asks a model: {}.",
+                "Goal `{}` asks a model{window}: {}.",
                 g.name,
                 weave::subst(t, &ctx.spec.args).trim_end_matches('.')
             ),
-        });
-    }
+        },
+    ];
     for f in goals::needs(&ctx.w, g) {
         if let Some(v) = now.get(&f) {
             let v = v.trim();

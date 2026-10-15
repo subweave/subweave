@@ -16,8 +16,8 @@ use crate::weave::{self, Action, Goal, Rule, Step, expr, show_duration};
 use super::asks::AskReq;
 use super::card;
 use super::coder_task::{self, DoResult, Work};
-use super::facts::{self, Values};
 use super::goals::{self, Scope};
+use super::observe::{self, Span, Values};
 use super::service::Ctx;
 use super::state::{Act, Event, JobKind, Kind};
 use super::{Out, cap, epoch, last, learned, lock, ms, now, sh};
@@ -211,8 +211,9 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
     let Some(goal) = ctx.w.goal(&job.goal) else {
         return Outcome::Nothing;
     };
-    let values = facts::known(ctx, &facts::all(&ctx.w)).await;
-    let shown = facts::shown(&values);
+    let span = goals::fresh(ctx, Some(goal)).await;
+    let values = ctx.observe.values(&goals::all(&ctx.w), span);
+    let shown = observe::shown(&values);
     let (action, rules_ok) = match &job.forced {
         Some(f) => {
             let Some(a) = ctx.w.action(&f.action) else {
@@ -220,14 +221,14 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                     .note(Some(&goal.name), format!("no action {}", f.action));
                 return Outcome::Nothing;
             };
-            if is_off(ctx, a, &values) {
+            if is_off(ctx, a, span) {
                 ctx.journal().note(
                     Some(&goal.name),
-                    format!("{} does not run on this box: its IF is false", f.action),
+                    format!("{} does not run on this box: its IF is not true", f.action),
                 );
                 return Outcome::Nothing;
             }
-            match gate(ctx, goal, &f.action, &values, f.approved) {
+            match gate(ctx, goal, &f.action, span, f.approved) {
                 Gate::Pass => {}
                 Gate::Refused(rule, _) => {
                     refused(ctx, goal, &f.action, &rule_text(rule));
@@ -241,7 +242,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
             (f.action.clone(), f.rules_ok.clone())
         }
         None => {
-            if goals::check_fresh(ctx, goal).await == Some(true) {
+            if goals::check_fresh(ctx, goal, None).await == Some(true) {
                 return Outcome::Nothing;
             }
             let (n, per) = goal.tries.unwrap_or(TRIES);
@@ -260,7 +261,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
             let mut out: BTreeSet<String> = BTreeSet::new();
             let mut refusals: Vec<(&Action, &Rule, bool)> = Vec::new();
             loop {
-                let (cands, off) = candidates(ctx, goal, &values, &out);
+                let (cands, off) = candidates(ctx, goal, span, &out);
                 if cands.is_empty() && off.is_empty() {
                     ctx.ask(AskReq {
                         goal: Some(goal.name.clone()),
@@ -312,7 +313,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                         }
                     }
                 };
-                match gate(ctx, goal, &pick, &values, false) {
+                match gate(ctx, goal, &pick, span, false) {
                     Gate::Pass => break (pick, Vec::new()),
                     Gate::Refused(rule, kept) => {
                         refused(ctx, goal, &pick, &rule_text(rule));
@@ -336,12 +337,12 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
 
 /// The actions for this goal, not ruled out yet: those that run on this box, then the
 /// ones that are the person's here: written for it (`FOR` names it), with an `IF` that
-/// reads only ARGs and is false. An `IF` on facts, `SINCE` or `PREV` is a precondition:
-/// while false, the action is no fix at all.
+/// reads only ARGs and is false. An `IF` on facts or `SINCE` is a precondition: while
+/// false or unknown, the action is no fix at all.
 fn candidates<'a>(
     ctx: &'a Ctx,
     goal: &Goal,
-    values: &Values,
+    span: Span,
     out: &BTreeSet<String>,
 ) -> (Vec<&'a Action>, Vec<&'a Action>) {
     let mut runs = Vec::new();
@@ -354,7 +355,7 @@ fn candidates<'a>(
         if !named && !a.for_goals.is_empty() {
             continue;
         }
-        if !is_off(ctx, a, values) {
+        if !is_off(ctx, a, span) {
             runs.push(a);
         } else if named && a.when_if.as_ref().is_some_and(|e| args_only(&ctx.w, e)) {
             theirs.push(a);
@@ -363,21 +364,19 @@ fn candidates<'a>(
     (runs, theirs)
 }
 
-/// The action's `IF` keeps it off now.
-fn is_off(ctx: &Ctx, a: &Action, values: &Values) -> bool {
-    let scope = Scope {
-        ctx,
-        facts: values,
-        prev: None,
-    };
-    a.when_if.as_ref().is_some_and(|e| !expr::holds(e, &scope))
+/// The action's `IF` keeps it off now: false, or unknown.
+fn is_off(ctx: &Ctx, a: &Action, span: Span) -> bool {
+    let scope = Scope { ctx, span };
+    a.when_if
+        .as_ref()
+        .is_some_and(|e| expr::holds(e, &scope) != Some(true))
 }
 
 /// The expression reads only ARGs: it says how this box is set up, not how it is now.
 fn args_only(w: &weave::Weave, e: &weave::Expr) -> bool {
     let mut only = true;
     e.walk(&mut |x| match x {
-        weave::Expr::Since(_) | weave::Expr::Prev(_) => only = false,
+        weave::Expr::Since(_) | weave::Expr::Window(..) => only = false,
         weave::Expr::Name(n) if w.fact(n).is_some() => only = false,
         _ => {}
     });
@@ -399,22 +398,14 @@ pub(crate) fn rule_text(r: &Rule) -> String {
 }
 
 /// The code rules on one action. Quoted rules never gate an author's action. A rule the
-/// person answered `always` for passes with an `ok` gate line.
-fn gate<'a>(
-    ctx: &'a Ctx,
-    goal: &Goal,
-    action: &str,
-    values: &Values,
-    approved: bool,
-) -> Gate<'a> {
-    let scope = Scope {
-        ctx,
-        facts: values,
-        prev: None,
-    };
+/// person answered `always` for passes with an `ok` gate line. A rule that cannot be
+/// judged (a fact with no value) applies: not knowing is not safe.
+fn gate<'a>(ctx: &'a Ctx, goal: &Goal, action: &str, span: Span, approved: bool) -> Gate<'a> {
+    let scope = Scope { ctx, span };
+    let applies = |e: &weave::Expr| expr::holds(e, &scope) != Some(false);
     for r in &ctx.w.rules {
         if let Rule::NeverIf { expr: e, .. } = r {
-            if expr::holds(e, &scope) {
+            if applies(e) {
                 return Gate::Refused(r, false);
             }
         }
@@ -423,8 +414,8 @@ fn gate<'a>(
         let applies = match r {
             Rule::AskBefore {
                 action: a, cond, ..
-            } => a == action && cond.as_ref().is_none_or(|c| expr::holds(c, &scope)),
-            Rule::AskIf { expr: e, .. } => expr::holds(e, &scope),
+            } => a == action && cond.as_ref().is_none_or(applies),
+            Rule::AskIf { expr: e, .. } => applies(e),
             _ => false,
         };
         if !applies {
@@ -503,7 +494,7 @@ async fn decide(ctx: &Ctx, goal: &Goal, cands: &[&Action], values: &Values) -> P
             instructions: STEERED.into(),
         },
     );
-    let (f, o) = facts::for_decider(values);
+    let (f, o) = observe::for_decider(values);
     let journal = ctx.journal().state().recent(&goal.name, 10);
     let state = json!({
         "service": ctx.name,
@@ -769,22 +760,41 @@ async fn add(ctx: &Ctx, goal: &Goal, a: &Action, path: &str, content: &str) -> b
     r.is_ok()
 }
 
-/// Checks the goal with fresh facts every 10 s until it holds or `within` ends. While
-/// it waits, `SINCE(<action>)` counts from the end of the steps: a goal such as
-/// `SINCE(backup) < 25h` holds only once its action passed.
+/// Checks the goal with fresh facts every 10 s until it holds or `within` ends, over the
+/// part of its window after the steps ended: lines from before the fix do not count
+/// against it. A windowed goal is judged only once that part is its whole window, or
+/// `within` is spent: an empty window says nothing. While it waits, `SINCE(<action>)`
+/// counts from the end of the steps: a goal such as `SINCE(backup) < 25h` holds only once
+/// its action passed. A fix that holds before the whole window is after the steps leaves
+/// the goal alone (a `wait`) until it is: the loop judges the whole window only then.
 async fn wait_within(ctx: &Ctx, goal: &Goal, a: &Action, within: Duration) -> bool {
     let start = Instant::now();
+    let ended = observe::now_ms();
+    let settle = if ctx.w.windowed(goal) {
+        goal.over().min(within)
+    } else {
+        Duration::ZERO
+    };
     *ctx.ran.lock().unwrap_or_else(|e| e.into_inner()) = Some((a.name.clone(), start));
     let held = loop {
-        if goals::check_fresh(ctx, goal).await == Some(true) {
+        let spent = start.elapsed();
+        if spent >= settle && goals::check_fresh(ctx, goal, Some(ended)).await == Some(true) {
             break true;
         }
         let spent = start.elapsed();
         if spent >= within {
             break false;
         }
-        tokio::time::sleep(RECHECK.min(within - spent)).await;
+        let next = if spent < settle { settle - spent } else { RECHECK };
+        tokio::time::sleep(next.min(within - spent)).await;
     };
     *ctx.ran.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    let whole = ended + goal.over().as_millis() as i64;
+    if held && whole > observe::now_ms() {
+        ctx.journal().add(Kind::Wait {
+            goal: goal.name.clone(),
+            until: super::rfc3339(whole),
+        });
+    }
     held
 }

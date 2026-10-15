@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::Problem;
 use super::ast::{ArgKind, Condition, Rule, Weave};
-use super::expr::Expr;
+use super::expr::{Expr, Op, Window};
+use super::value::{Dim, FactType, Version};
 
 pub fn check(w: &Weave, problems: &mut Vec<Problem>) {
     if w.from.is_none() {
@@ -173,65 +174,218 @@ fn args(w: &Weave, problems: &mut Vec<Problem>) {
     }
 }
 
+/// Every code expression is typed: units, versions and LINES are checked here, before
+/// anything runs. A goal's condition and IF may read its window; nothing else may.
 fn expressions(w: &Weave, problems: &mut Vec<Problem>) {
-    let values: BTreeSet<&str> = w
-        .args
-        .iter()
-        .map(|a| a.name.as_str())
-        .chain(w.slots())
-        .chain(w.facts.iter().map(|f| f.name.as_str()))
-        .collect();
-    let mut exprs: Vec<(u32, &Expr)> = Vec::new();
+    let words: BTreeSet<&str> = w.args.iter().map(|a| a.name.as_str()).chain(w.slots()).collect();
+    let typer = |windows| Typer {
+        w,
+        words: &words,
+        windows,
+    };
+    let mut conds: Vec<(u32, &Expr, bool)> = Vec::new();
     for s in &w.secrets {
-        exprs.extend(s.cond.iter().map(|e| (s.line, e)));
+        conds.extend(s.cond.iter().map(|e| (s.line, e, false)));
     }
     for g in &w.goals {
         if let Condition::Code(e) = &g.cond {
-            exprs.push((g.line, e));
+            conds.push((g.line, e, true));
         }
-        exprs.extend(g.when.iter().map(|e| (g.line, e)));
+        conds.extend(g.when.iter().map(|e| (g.line, e, true)));
+        if g.over.is_some() && !w.windowed(g) {
+            problems.push(Problem::new(
+                g.line,
+                format!(
+                    "GOAL {}: OVER needs a window to judge: a LINES fact, or MIN, MAX, AVG, \
+                     DELTA or COUNT",
+                    g.name
+                ),
+            ));
+        }
     }
     for a in &w.actions {
-        exprs.extend(a.when_if.iter().map(|e| (a.line, e)));
+        conds.extend(a.when_if.iter().map(|e| (a.line, e, false)));
     }
     for r in &w.rules {
         match r {
             Rule::NeverIf { expr, line, .. } | Rule::AskIf { expr, line, .. } => {
-                exprs.push((*line, expr))
+                conds.push((*line, expr, false))
             }
             Rule::AskBefore {
                 cond: Some(e),
                 line,
                 ..
-            } => exprs.push((*line, e)),
+            } => conds.push((*line, e, false)),
             _ => {}
         }
     }
-    for (line, e) in exprs {
-        e.walk(&mut |node| match node {
-            Expr::Name(n) => {
-                if !values.contains(n.as_str()) {
-                    problems.push(Problem::new(line, format!("`{n}` is no ARG, slot or FACT")));
-                } else if w.fact(n).is_some_and(|f| f.follow) {
-                    problems.push(Problem::new(
-                        line,
-                        format!("`{n}` is a FOLLOW fact: only a quoted condition reads it"),
+    for (line, e, windows) in conds {
+        if let Err(msg) = typer(windows).cond(e) {
+            problems.push(Problem::new(line, msg));
+        }
+    }
+}
+
+/// An expression's type. ARG and slot words are `Any`: they take the other side's type.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Ty {
+    Bool,
+    Num(Dim),
+    Text,
+    Version,
+    Any,
+}
+
+impl std::fmt::Display for Ty {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Ty::Bool => f.write_str("a BOOL"),
+            Ty::Num(d) => write!(f, "{d}"),
+            Ty::Text => f.write_str("a TEXT"),
+            Ty::Version => f.write_str("a VERSION"),
+            Ty::Any => f.write_str("an ARG"),
+        }
+    }
+}
+
+struct Typer<'a> {
+    w: &'a Weave,
+    words: &'a BTreeSet<&'a str>,
+    /// Window functions are allowed: a goal's condition or IF.
+    windows: bool,
+}
+
+impl Typer<'_> {
+    /// `e` is a condition: a BOOL fact, an ARG, a comparison, or those joined.
+    fn cond(&self, e: &Expr) -> Result<(), String> {
+        match e {
+            Expr::Group(x) | Expr::Not(x) => self.cond(x),
+            Expr::Bin(l, Op::And | Op::Or, r) => {
+                self.cond(l)?;
+                self.cond(r)
+            }
+            Expr::Bin(_, op, _) if op.compares() => self.ty(e).map(drop),
+            Expr::Name(n) => match self.ty(e)? {
+                Ty::Bool | Ty::Any => Ok(()),
+                t => Err(format!("`{n}` is {t}, not a condition: compare it")),
+            },
+            _ => {
+                self.ty(e)?;
+                Err(format!("`{e}` is a value, not a condition: compare it"))
+            }
+        }
+    }
+
+    fn ty(&self, e: &Expr) -> Result<Ty, String> {
+        Ok(match e {
+            Expr::Name(n) => match self.w.fact(n) {
+                Some(f) => match f.ty {
+                    FactType::Bool => Ty::Bool,
+                    FactType::Number(u) => Ty::Num(u.map_or(Dim::Plain, |u| u.dim())),
+                    FactType::Text => Ty::Text,
+                    FactType::Version => Ty::Version,
+                    FactType::Lines => {
+                        return Err(format!(
+                            "`{n}` is LINES: COUNT({n}) counts its lines in the goal's window, \
+                             and a quoted condition reads them"
+                        ));
+                    }
+                },
+                None if self.words.contains(n.as_str()) => Ty::Any,
+                None => return Err(format!("`{n}` is no ARG, slot or FACT")),
+            },
+            Expr::Num(_, u) => Ty::Num(u.map_or(Dim::Plain, |u| u.dim())),
+            Expr::Str(_) => Ty::Text,
+            Expr::Since(a) => {
+                if self.w.action(a).is_none() {
+                    return Err(format!("SINCE({a}): no ACTION {a}"));
+                }
+                Ty::Num(Dim::Time)
+            }
+            Expr::Window(f, n) => {
+                let call = format!("{}({n})", f.as_str());
+                if !self.windows {
+                    return Err(format!(
+                        "`{call}` reads a goal's window: only a GOAL's condition and IF take it"
                     ));
                 }
+                let Some(fact) = self.w.fact(n) else {
+                    return Err(format!("`{call}`: no FACT {n}"));
+                };
+                match (f, fact.ty) {
+                    (Window::Count, _) => Ty::Num(Dim::Plain),
+                    (_, FactType::Number(u)) => Ty::Num(u.map_or(Dim::Plain, |u| u.dim())),
+                    (_, t) => {
+                        return Err(format!(
+                            "`{call}`: {n} is {t}; MIN, MAX, AVG and DELTA take a NUMBER"
+                        ));
+                    }
+                }
             }
-            Expr::Since(a) if w.action(a).is_none() => {
-                problems.push(Problem::new(line, format!("SINCE({a}): no ACTION {a}")));
+            Expr::Group(x) => self.ty(x)?,
+            Expr::Not(_) | Expr::Bin(_, Op::And | Op::Or, _) => {
+                self.cond(e)?;
+                Ty::Bool
             }
-            Expr::Prev(f) => match w.fact(f) {
-                None => problems.push(Problem::new(line, format!("PREV({f}): no FACT {f}"))),
-                Some(fact) if fact.follow => problems.push(Problem::new(
-                    line,
-                    format!("`{f}` is a FOLLOW fact: only a quoted condition reads it"),
-                )),
-                Some(_) => {}
+            Expr::Bin(l, op, r) if op.compares() => {
+                self.compare(e, l, *op, r)?;
+                Ty::Bool
+            }
+            Expr::Bin(l, op, r) => match (self.ty(l)?, self.ty(r)?) {
+                (Ty::Any, _) | (_, Ty::Any) => Ty::Any,
+                (Ty::Num(a), Ty::Num(b)) => {
+                    let t = match op {
+                        Op::Add | Op::Sub if a == b => Some(a),
+                        Op::Mul if b == Dim::Plain => Some(a),
+                        Op::Mul if a == Dim::Plain => Some(b),
+                        Op::Div if b == Dim::Plain => Some(a),
+                        Op::Div if a == b => Some(Dim::Plain),
+                        _ => None,
+                    };
+                    match t {
+                        Some(d) => Ty::Num(d),
+                        None => {
+                            return Err(format!(
+                                "`{e}`: `{l}` is {a} and `{r}` is {b}: `{}` does not join them",
+                                op.as_str()
+                            ));
+                        }
+                    }
+                }
+                (a, b) => {
+                    return Err(format!(
+                        "`{e}`: arithmetic takes numbers, and this has {a} and {b}"
+                    ));
+                }
             },
-            _ => {}
-        });
+        })
+    }
+
+    fn compare(&self, e: &Expr, l: &Expr, op: Op, r: &Expr) -> Result<(), String> {
+        let (a, b) = (self.ty(l)?, self.ty(r)?);
+        for (side, t) in [(l, a), (r, b)] {
+            if t == Ty::Bool {
+                return Err(format!("`{side}` is a BOOL: use it bare or with NOT"));
+            }
+        }
+        let version_literal = |side: &Expr| match side {
+            Expr::Str(s) if Version::parse(s).is_none() => {
+                Err(format!("`{e}`: '{s}' is no version, like '1.2.3'"))
+            }
+            Expr::Str(_) => Ok(()),
+            _ => Err(format!("`{e}`: a VERSION compares with a VERSION or a quoted version")),
+        };
+        match (a, b) {
+            (Ty::Any, _) | (_, Ty::Any) | (Ty::Version, Ty::Version) => Ok(()),
+            (Ty::Num(x), Ty::Num(y)) if x == y => Ok(()),
+            (Ty::Text, Ty::Text) if matches!(op, Op::Eq | Op::Ne) => Ok(()),
+            (Ty::Text, Ty::Text) => Err(format!("`{e}`: TEXT compares only with == and !=")),
+            (Ty::Version, Ty::Text) => version_literal(r),
+            (Ty::Text, Ty::Version) => version_literal(l),
+            (a, b) => Err(format!(
+                "`{e}`: `{l}` is {a} and `{r}` is {b}, which do not compare"
+            )),
+        }
     }
 }
 
@@ -241,10 +395,7 @@ fn backticks(w: &Weave, problems: &mut Vec<Problem>) {
         let Condition::Quoted(text) = &g.cond else {
             continue;
         };
-        for (k, part) in text.split('`').enumerate() {
-            if k % 2 == 0 || k == text.split('`').count() - 1 {
-                continue;
-            }
+        for part in super::ast::backticked(text) {
             let known =
                 w.fact(part).is_some() || w.arg(part).is_some() || w.slots().any(|s| s == part);
             if !known {

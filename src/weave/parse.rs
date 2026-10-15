@@ -10,6 +10,7 @@ use super::ast::{
 };
 use super::expr::{self, Expr};
 use super::lex::{self, Line};
+use super::value::{FactType, Unit};
 
 /// Instruction keywords: a line starts with one of these.
 pub const INSTRUCTIONS: &[&str] = &[
@@ -20,9 +21,10 @@ pub const INSTRUCTIONS: &[&str] = &[
 /// Every capital word with a meaning; none of them can be a name.
 pub const KEYWORDS: &[&str] = &[
     "ABOUT", "FROM", "NEEDS", "MODEL", "ARG", "SECRET", "FACT", "GOAL", "ACTION", "WHEN", "RUN",
-    "DO", "ADD", "NEVER", "ASK", "SKILL", "AFTER", "EVERY", "TRIES", "PER", "FOR", "WITHIN", "IF",
-    "AND", "OR", "NOT", "SINCE", "PREV", "FOLLOW", "MUST", "SHOULD", "MAY", "BEFORE", "DECIDE",
-    "CODE", "THEN", "CPU", "GPU", "GB", "TB", "RAM", "DISK", "BECAUSE",
+    "DO", "ADD", "NEVER", "ASK", "SKILL", "AFTER", "EVERY", "OVER", "TRIES", "PER", "FOR",
+    "WITHIN", "IF", "AND", "OR", "NOT", "SINCE", "MIN", "MAX", "AVG", "DELTA", "COUNT", "BOOL",
+    "NUMBER", "TEXT", "VERSION", "LINES", "MUST", "SHOULD", "MAY", "BEFORE", "DECIDE", "CODE",
+    "THEN", "CPU", "GPU", "GB", "TB", "RAM", "DISK", "BECAUSE",
 ];
 
 /// An ACTION's label is a button on a phone.
@@ -374,7 +376,19 @@ impl Parser {
             }
             "FACT" => {
                 let n = name(c.word().unwrap_or_default(), is_value_name, VALUE_FORM)?;
-                let follow = c.eat("FOLLOW");
+                let Some(mut ty) = c.peek().and_then(FactType::word) else {
+                    return Err(format!(
+                        "FACT {n} needs a type after its name: BOOL, NUMBER [<unit>], TEXT, \
+                         VERSION or LINES"
+                    ));
+                };
+                c.word();
+                if ty == FactType::Number(None) {
+                    if let Some(u) = c.peek().and_then(Unit::parse) {
+                        c.word();
+                        ty = FactType::Number(Some(u));
+                    }
+                }
                 let rest = c.rest();
                 let source = if let Some(body) = Self::heredoc(line, c.peek()) {
                     FactSource::Command(body.to_string())
@@ -391,7 +405,7 @@ impl Parser {
                 };
                 self.w.facts.push(Fact {
                     name: n,
-                    follow,
+                    ty,
                     source,
                     line: no,
                 });
@@ -618,20 +632,26 @@ impl Parser {
         let n = name(c.word().unwrap_or_default(), is_item_name, ITEM_FORM)?;
         let mut goal = Goal {
             name: n.clone(),
-            plain: None,
+            sentence: String::new(),
             after: Vec::new(),
             every: None,
+            over: None,
             tries: None,
             cond: Condition::Quoted(String::new()),
             when: None,
             line: no,
         };
-        // Quoted text right after the name is the plain sentence when a condition follows
-        // it, else the quoted condition itself.
-        let mut first = None;
+        // The first quoted text is the sentence; the condition comes after the clauses.
         let res = (|| {
-            if c.starts_quoted() {
-                first = Some(c.quoted()?);
+            if !c.starts_quoted() {
+                return Err(format!(
+                    "GOAL {n} needs its sentence first: GOAL {n} \"<what it keeps true>\" … \
+                     <condition>"
+                ));
+            }
+            goal.sentence = c.quoted()?;
+            if goal.sentence.trim().is_empty() {
+                return Err(format!("GOAL {n}: the sentence is empty"));
             }
             if c.eat("AFTER") {
                 goal.after = c.names().into_iter().map(String::from).collect();
@@ -641,6 +661,9 @@ impl Parser {
             }
             if c.eat("EVERY") {
                 goal.every = Some(dur(c.word().unwrap_or_default())?);
+            }
+            if c.eat("OVER") {
+                goal.over = Some(dur(c.word().unwrap_or_default())?);
             }
             if c.eat("TRIES") {
                 let t = c.word().unwrap_or_default();
@@ -654,19 +677,8 @@ impl Parser {
             }
             Ok(())
         })();
-        let rest = c.rest();
-        let cond_src = match first {
-            Some(text) if rest.is_empty() => {
-                goal.cond = Condition::Quoted(text);
-                None
-            }
-            Some(text) => {
-                goal.plain = Some(text);
-                Some(rest)
-            }
-            None => Some(rest),
-        };
-        if let (Ok(()), Some(cond_src)) = (&res, cond_src) {
+        let cond_src = c.rest();
+        if res.is_ok() {
             if cond_src.is_empty() {
                 self.problems
                     .push(Problem::new(no, format!("GOAL {n} has no condition")));

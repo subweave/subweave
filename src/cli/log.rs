@@ -205,6 +205,16 @@ pub(crate) fn human(service: Option<&str>, e: &Event) -> String {
             extra.push(facts.join(" "));
         }
     }
+    if let Kind::Check { lines, p, .. } = &e.kind {
+        for (k, ls) in lines {
+            let n = ls.len();
+            let last = ls.last().map(|l| one_line(&l.text, 60)).unwrap_or_default();
+            extra.push(format!("{k}: {n} new line{}, last: {last}", if n == 1 { "" } else { "s" }));
+        }
+        if let Some(p) = p {
+            extra.push(format!("p {p:.2}"));
+        }
+    }
     if let Kind::Decide { p, .. } | Kind::Gate { p, .. } = &e.kind {
         if !p.is_empty() {
             let mut p: Vec<(&String, &f64)> = p.iter().collect();

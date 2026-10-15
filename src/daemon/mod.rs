@@ -7,11 +7,11 @@ mod asks;
 mod card;
 mod coder_task;
 mod episode;
-mod facts;
 mod goals;
 mod inbox;
 pub(crate) mod journal;
 mod learned;
+mod observe;
 mod repair;
 mod service;
 pub(crate) mod state;
@@ -758,6 +758,14 @@ fn heartbeat() {
 /// RFC 3339 in UTC, to the second.
 pub(crate) fn now() -> String {
     jiff::Timestamp::now()
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+}
+
+/// RFC 3339 in UTC, to the second, of Unix milliseconds `ms`.
+pub(crate) fn rfc3339(ms: i64) -> String {
+    jiff::Timestamp::from_millisecond(ms)
+        .unwrap_or(jiff::Timestamp::MAX)
         .strftime("%Y-%m-%dT%H:%M:%SZ")
         .to_string()
 }

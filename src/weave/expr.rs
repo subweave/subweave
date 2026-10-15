@@ -1,22 +1,61 @@
-//! Code expressions: conditions after `GOAL`, `IF`, `NEVER IF` and `ASK IF`.
+//! Code expressions: conditions after `GOAL`, `IF`, `NEVER IF` and `ASK IF`. A value
+//! that is not known (a fact not read) makes what reads it unknown, not false.
 
 use std::fmt;
 use std::time::Duration;
 
 use serde::{Serialize, Serializer};
 
+use super::value::{self, Dim, Unit, Version};
+
+pub use super::value::Value;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Name(String),
-    Num(f64),
-    /// `25h`: kept as written so it prints back the same.
-    Dur(u64, char),
+    /// `85`, `85%`, `25h`: kept as written so it prints back the same.
+    Num(f64, Option<Unit>),
     Str(String),
     Since(String),
-    Prev(String),
+    /// `MIN(disk)`: over the goal's window.
+    Window(Window, String),
     Bin(Box<Expr>, Op, Box<Expr>),
     Not(Box<Expr>),
     Group(Box<Expr>),
+}
+
+/// A window function: over the observations of a fact in the goal's window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Window {
+    Min,
+    Max,
+    Avg,
+    /// The newest value minus the value at the window's start.
+    Delta,
+    /// Lines, or reads.
+    Count,
+}
+
+const WINDOWS: &[(&str, Window)] = &[
+    ("MIN", Window::Min),
+    ("MAX", Window::Max),
+    ("AVG", Window::Avg),
+    ("DELTA", Window::Delta),
+    ("COUNT", Window::Count),
+];
+
+impl Window {
+    pub fn word(w: &str) -> Option<Window> {
+        WINDOWS.iter().find(|(k, _)| *k == w).map(|(_, f)| *f)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        WINDOWS
+            .iter()
+            .find(|(_, f)| *f == self)
+            .map(|(k, _)| *k)
+            .expect("every window function is in WINDOWS")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,23 +91,20 @@ impl Op {
             Op::Or => "OR",
         }
     }
+
+    pub fn compares(self) -> bool {
+        matches!(self, Op::Lt | Op::Le | Op::Gt | Op::Ge | Op::Eq | Op::Ne)
+    }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Value {
-    Text(String),
-    Num(f64),
-    Dur(Duration),
-    Bool(bool),
-}
-
-/// What an expression reads. Facts, ARGs and slots answer `value`; `truthy` is a
-/// bare name: a command fact that exits 0, or an ARG that is not empty.
+/// What an expression reads.
 pub trait Env {
+    /// A fact's newest value, or an ARG's or a slot's words (empty when unsaid). `None`: a
+    /// fact with no value now.
     fn value(&self, name: &str) -> Option<Value>;
-    fn truthy(&self, name: &str) -> bool;
     fn since(&self, action: &str) -> Option<Duration>;
-    fn prev(&self, fact: &str) -> Option<Value>;
+    /// `f` over the fact's observations in the goal's window; `None` with none to read.
+    fn window(&self, f: Window, fact: &str) -> Option<Value>;
 }
 
 /// `90s`, `10m`, `25h`, `30d`.
@@ -91,148 +127,131 @@ pub fn duration(s: &str) -> Option<Duration> {
     Some(Duration::from_secs(n.checked_mul(secs)?))
 }
 
-impl Value {
-    /// Text that reads as a number is a number.
-    pub fn num(&self) -> Option<f64> {
-        match self {
-            Value::Num(n) => Some(*n),
-            Value::Text(t) => {
-                let t = t.trim();
-                let first = t.bytes().next()?;
-                if !(first.is_ascii_digit() || matches!(first, b'-' | b'+' | b'.')) {
-                    return None;
-                }
-                t.parse::<f64>().ok().filter(|n| n.is_finite())
-            }
-            _ => None,
-        }
-    }
-
-    /// Text that reads as a duration is a duration.
-    pub fn dur(&self) -> Option<Duration> {
-        match self {
-            Value::Dur(d) => Some(*d),
-            Value::Text(t) => duration(t.trim()),
-            _ => None,
-        }
-    }
-
-    pub fn truthy(&self) -> bool {
-        match self {
-            Value::Text(t) => !t.is_empty(),
-            Value::Num(n) => *n != 0.0,
-            Value::Dur(d) => !d.is_zero(),
-            Value::Bool(b) => *b,
-        }
-    }
-}
-
-impl fmt::Display for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Value::Text(t) => f.write_str(t),
-            Value::Num(n) => write!(f, "{n}"),
-            Value::Dur(d) => f.write_str(&super::ast::show_duration(*d)),
-            Value::Bool(b) => write!(f, "{b}"),
-        }
-    }
-}
-
-/// The value of an expression: a comparison or a logic expression gives `Bool`, a
-/// missing value gives empty text. Use [`holds`] for a condition.
-pub fn eval(e: &Expr, env: &dyn Env) -> Value {
-    value(e, env).unwrap_or(Value::Text(String::new()))
-}
-
-/// Whether a condition holds. A bare name asks `Env::truthy`.
-pub fn holds(e: &Expr, env: &dyn Env) -> bool {
+/// Whether a condition holds; `None` when a value it needs is unknown. `AND` with one
+/// false side is false, `OR` with one true side is true, whatever the other side.
+pub fn holds(e: &Expr, env: &dyn Env) -> Option<bool> {
     match e {
-        Expr::Name(n) => env.truthy(n),
+        Expr::Name(n) => match env.value(n)? {
+            Value::Bool(b) => Some(b),
+            Value::Text(t) => Some(!t.is_empty()),
+            Value::Num(..) | Value::Version(_) => None,
+        },
         Expr::Group(inner) => holds(inner, env),
-        Expr::Not(inner) => !holds(inner, env),
-        Expr::Bin(l, Op::And, r) => holds(l, env) && holds(r, env),
-        Expr::Bin(l, Op::Or, r) => holds(l, env) || holds(r, env),
-        Expr::Bin(l, op @ (Op::Lt | Op::Le | Op::Gt | Op::Ge | Op::Eq | Op::Ne), r) => {
-            match (value(l, env), value(r, env)) {
-                (Some(a), Some(b)) => compare(&a, *op, &b),
-                _ => false,
-            }
+        Expr::Not(inner) => holds(inner, env).map(|b| !b),
+        Expr::Bin(l, Op::And, r) => match holds(l, env) {
+            Some(false) => Some(false),
+            a => match (a, holds(r, env)?) {
+                (_, false) => Some(false),
+                (a, true) => a,
+            },
+        },
+        Expr::Bin(l, Op::Or, r) => match holds(l, env) {
+            Some(true) => Some(true),
+            a => match (a, holds(r, env)?) {
+                (_, true) => Some(true),
+                (a, false) => a,
+            },
+        },
+        Expr::Bin(l, op, r) if op.compares() => {
+            Some(compare(&value(l, env)?, *op, &value(r, env)?))
         }
-        _ => value(e, env).is_some_and(|v| v.truthy()),
+        _ => None,
     }
 }
 
 fn value(e: &Expr, env: &dyn Env) -> Option<Value> {
     match e {
         Expr::Name(n) => env.value(n),
-        Expr::Num(n) => Some(Value::Num(*n)),
-        Expr::Dur(n, unit) => duration(&format!("{n}{unit}")).map(Value::Dur),
+        Expr::Num(n, unit) => Some(match unit {
+            Some(u) => Value::Num(n * u.scale(), u.dim()),
+            None => Value::Num(*n, Dim::Plain),
+        }),
         Expr::Str(s) => Some(Value::Text(s.clone())),
-        Expr::Since(a) => env.since(a).map(Value::Dur),
-        Expr::Prev(f) => env.prev(f),
+        Expr::Since(a) => env.since(a).map(|d| Value::Num(d.as_secs_f64(), Dim::Time)),
+        Expr::Window(f, n) => env.window(*f, n),
         Expr::Group(inner) => value(inner, env),
         Expr::Bin(l, op @ (Op::Add | Op::Sub | Op::Mul | Op::Div), r) => {
             arith(&value(l, env)?, *op, &value(r, env)?)
         }
-        Expr::Bin(..) | Expr::Not(_) => Some(Value::Bool(holds(e, env))),
+        Expr::Bin(..) | Expr::Not(_) => holds(e, env).map(Value::Bool),
+    }
+}
+
+/// An ARG's words read as a number of kind `dim`: a bare number takes its base unit.
+fn as_num(t: &str, dim: Dim) -> Option<(f64, Dim)> {
+    value::number(t, dim.base()).filter(|(_, d)| *d == dim)
+}
+
+fn num(v: &Value, dim: Dim) -> Option<(f64, Dim)> {
+    match v {
+        Value::Num(n, d) => Some((*n, *d)),
+        Value::Text(t) => as_num(t, dim),
+        Value::Bool(_) | Value::Version(_) => None,
     }
 }
 
 fn arith(a: &Value, op: Op, b: &Value) -> Option<Value> {
-    if let (Some(x), Some(y)) = (a.num(), b.num()) {
-        let n = match op {
-            Op::Add => x + y,
-            Op::Sub => x - y,
-            Op::Mul => x * y,
-            Op::Div if y != 0.0 => x / y,
-            _ => return None,
-        };
-        return Some(Value::Num(n));
-    }
-    match (a.dur(), b.dur(), a.num(), b.num()) {
-        (Some(x), Some(y), ..) => match op {
-            Op::Add => Some(Value::Dur(x + y)),
-            Op::Sub => x.checked_sub(y).map(Value::Dur),
-            _ => None,
-        },
-        (Some(x), None, _, Some(y)) => match op {
-            Op::Mul => Duration::try_from_secs_f64(x.as_secs_f64() * y)
-                .ok()
-                .map(Value::Dur),
-            Op::Div if y != 0.0 => Duration::try_from_secs_f64(x.as_secs_f64() / y)
-                .ok()
-                .map(Value::Dur),
-            _ => None,
-        },
-        (None, Some(y), Some(x), _) if op == Op::Mul => {
-            Duration::try_from_secs_f64(y.as_secs_f64() * x)
-                .ok()
-                .map(Value::Dur)
-        }
-        _ => None,
+    // ARG words take the other side's kind when added or subtracted, none when scaling.
+    let hint = |other: &Value| match (op, other) {
+        (Op::Add | Op::Sub, Value::Num(_, d)) => *d,
+        _ => Dim::Plain,
+    };
+    let (x, d) = num(a, hint(b))?;
+    let (y, e) = num(b, hint(a))?;
+    let n = match op {
+        Op::Add if d == e => Value::Num(x + y, d),
+        Op::Sub if d == e => Value::Num(x - y, d),
+        Op::Mul if e == Dim::Plain => Value::Num(x * y, d),
+        Op::Mul if d == Dim::Plain => Value::Num(x * y, e),
+        Op::Div if y == 0.0 => return None,
+        Op::Div if e == Dim::Plain => Value::Num(x / y, d),
+        Op::Div if d == e => Value::Num(x / y, Dim::Plain),
+        _ => return None,
+    };
+    Some(n)
+}
+
+fn ord<T: PartialOrd>(x: T, op: Op, y: T) -> bool {
+    match op {
+        Op::Lt => x < y,
+        Op::Le => x <= y,
+        Op::Gt => x > y,
+        Op::Ge => x >= y,
+        Op::Eq => x == y,
+        Op::Ne => x != y,
+        _ => false,
     }
 }
 
-/// Two numbers compare as numbers, two durations as durations; otherwise only
-/// `==` and `!=` hold, on the text.
+/// Numbers of one kind compare as numbers, versions as semver. An ARG's words take the
+/// other side's type. Anything else only compares `==` and `!=`, as text.
 pub fn compare(a: &Value, op: Op, b: &Value) -> bool {
-    fn ord<T: PartialOrd>(x: T, op: Op, y: T) -> bool {
-        match op {
-            Op::Lt => x < y,
-            Op::Le => x <= y,
-            Op::Gt => x > y,
-            Op::Ge => x >= y,
-            Op::Eq => x == y,
-            Op::Ne => x != y,
-            _ => false,
+    match (a, b) {
+        (Value::Num(x, d), Value::Num(y, e)) => d == e && ord(x, op, y),
+        (Value::Version(x), Value::Version(y)) => ord(x, op, y),
+        (Value::Num(_, d), Value::Text(t)) | (Value::Text(t), Value::Num(_, d)) => {
+            match as_num(t, *d) {
+                Some((n, d)) if matches!(a, Value::Num(..)) => compare(a, op, &Value::Num(n, d)),
+                Some((n, d)) => compare(&Value::Num(n, d), op, b),
+                None => text(a, op, b),
+            }
         }
+        (Value::Version(_), Value::Text(t)) | (Value::Text(t), Value::Version(_)) => {
+            match Version::parse(t) {
+                Some(v) if matches!(a, Value::Version(_)) => compare(a, op, &Value::Version(v)),
+                Some(v) => compare(&Value::Version(v), op, b),
+                None => text(a, op, b),
+            }
+        }
+        (Value::Text(x), Value::Text(y)) => match (value::number(x, None), value::number(y, None)) {
+            (Some((p, d)), Some((q, e))) if d == e => ord(p, op, q),
+            _ => text(a, op, b),
+        },
+        _ => text(a, op, b),
     }
-    if let (Some(x), Some(y)) = (a.num(), b.num()) {
-        return ord(x, op, y);
-    }
-    if let (Some(x), Some(y)) = (a.dur(), b.dur()) {
-        return ord(x, op, y);
-    }
+}
+
+fn text(a: &Value, op: Op, b: &Value) -> bool {
     match op {
         Op::Eq => a.to_string() == b.to_string(),
         Op::Ne => a.to_string() != b.to_string(),
@@ -254,7 +273,7 @@ impl Expr {
         }
     }
 
-    /// The names it reads, in order, without `SINCE` and `PREV` arguments.
+    /// The names it reads, in order, without `SINCE` and window function arguments.
     pub fn names(&self) -> Vec<&str> {
         let mut out = Vec::new();
         self.walk(&mut |e| {
@@ -263,6 +282,13 @@ impl Expr {
             }
         });
         out
+    }
+
+    /// It reads a window: a window function.
+    pub fn windowed(&self) -> bool {
+        let mut found = false;
+        self.walk(&mut |e| found |= matches!(e, Expr::Window(..)));
+        found
     }
 
     /// Prints the expression with each name that `lookup` knows replaced by its value:
@@ -284,11 +310,11 @@ impl Expr {
                 Some(v) => f.write_str(&v),
                 None => f.write_str(n),
             },
-            Expr::Num(n) => write!(f, "{n}"),
-            Expr::Dur(n, unit) => write!(f, "{n}{unit}"),
+            Expr::Num(n, None) => write!(f, "{n}"),
+            Expr::Num(n, Some(u)) => write!(f, "{n}{u}"),
             Expr::Str(s) => write!(f, "'{s}'"),
             Expr::Since(a) => write!(f, "SINCE({a})"),
-            Expr::Prev(a) => write!(f, "PREV({a})"),
+            Expr::Window(w, a) => write!(f, "{}({a})", w.as_str()),
             Expr::Bin(l, op, r) => {
                 l.write(f, lookup)?;
                 write!(f, " {} ", op.as_str())?;
@@ -322,13 +348,12 @@ impl Serialize for Expr {
 #[derive(Debug, Clone, PartialEq)]
 enum Tok {
     Name(String),
-    Num(f64),
-    Dur(u64, char),
+    Num(f64, Option<Unit>),
     Str(String),
     Op(Op),
     Not,
     Since,
-    Prev,
+    Win(Window),
     Open,
     Close,
 }
@@ -392,26 +417,27 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                     i += 1;
                 }
                 let digits = &src[start..i];
-                let unit = b.get(i).copied();
-                let word_follows = |j: usize| {
-                    b.get(j)
-                        .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_')
-                };
-                if matches!(unit, Some(b's' | b'm' | b'h' | b'd')) && !word_follows(i + 1) {
-                    let n = digits.parse::<u64>().map_err(|_| {
-                        format!("`{digits}{}` is no duration", unit.unwrap() as char)
-                    })?;
-                    out.push(Tok::Dur(n, unit.unwrap() as char));
-                    i += 1;
-                } else if word_follows(i) {
-                    let end = (i..b.len()).find(|&j| !word_follows(j)).unwrap_or(b.len());
-                    return Err(format!("`{}` is no number or duration", &src[start..end]));
+                let n = digits
+                    .parse::<f64>()
+                    .map_err(|_| format!("`{digits}` is no number"))?;
+                let unit_end = if b.get(i) == Some(&b'%') {
+                    i + 1
                 } else {
-                    let n = digits
-                        .parse::<f64>()
-                        .map_err(|_| format!("`{digits}` is no number"))?;
-                    out.push(Tok::Num(n));
-                }
+                    (i..b.len())
+                        .find(|&j| !(b[j].is_ascii_alphanumeric() || b[j] == b'_'))
+                        .unwrap_or(b.len())
+                };
+                let unit = match &src[i..unit_end] {
+                    "" => None,
+                    u => Some(Unit::parse(u).ok_or_else(|| {
+                        format!(
+                            "`{}` is no number: units are %, ms, s, m, h, d, B, KB, MB, GB and TB",
+                            &src[start..unit_end]
+                        )
+                    })?),
+                };
+                out.push(Tok::Num(n, unit));
+                i = unit_end;
             }
             c if c.is_ascii_alphabetic() || c == b'_' => {
                 let start = i;
@@ -424,8 +450,13 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                     "OR" => Tok::Op(Op::Or),
                     "NOT" => Tok::Not,
                     "SINCE" => Tok::Since,
-                    "PREV" => Tok::Prev,
-                    _ => Tok::Name(w.to_string()),
+                    "PREV" => {
+                        return Err("PREV is gone: DELTA(name) reads the change over the goal's window".into());
+                    }
+                    w => match Window::word(w) {
+                        Some(f) => Tok::Win(f),
+                        None => Tok::Name(w.to_string()),
+                    },
                 });
             }
             _ => {
@@ -481,13 +512,13 @@ impl Parser {
 
     fn cmp(&mut self) -> Result<Expr, String> {
         let l = self.sum()?;
-        if let Some(Tok::Op(op @ (Op::Lt | Op::Le | Op::Gt | Op::Ge | Op::Eq | Op::Ne))) =
-            self.peek().cloned()
+        if let Some(Tok::Op(op)) = self.peek().cloned()
+            && op.compares()
         {
             self.at += 1;
             let r = self.sum()?;
-            if let Some(Tok::Op(next @ (Op::Lt | Op::Le | Op::Gt | Op::Ge | Op::Eq | Op::Ne))) =
-                self.peek()
+            if let Some(Tok::Op(next)) = self.peek()
+                && next.compares()
             {
                 return Err(format!(
                     "`{}` after a comparison: join comparisons with AND or OR",
@@ -520,8 +551,7 @@ impl Parser {
     fn atom(&mut self) -> Result<Expr, String> {
         match self.next() {
             Some(Tok::Name(n)) => Ok(Expr::Name(n)),
-            Some(Tok::Num(n)) => Ok(Expr::Num(n)),
-            Some(Tok::Dur(n, u)) => Ok(Expr::Dur(n, u)),
+            Some(Tok::Num(n, u)) => Ok(Expr::Num(n, u)),
             Some(Tok::Str(s)) => Ok(Expr::Str(s)),
             Some(Tok::Open) => {
                 let e = self.or()?;
@@ -530,17 +560,19 @@ impl Parser {
                     _ => Err("a `(` has no closing `)`".into()),
                 }
             }
-            Some(f @ (Tok::Since | Tok::Prev)) => {
-                let word = if f == Tok::Since { "SINCE" } else { "PREV" };
+            Some(f @ (Tok::Since | Tok::Win(_))) => {
+                let word = match f {
+                    Tok::Win(w) => w.as_str(),
+                    _ => "SINCE",
+                };
                 let (Some(Tok::Open), Some(Tok::Name(n)), Some(Tok::Close)) =
                     (self.next(), self.next(), self.next())
                 else {
                     return Err(format!("{word} takes one name: {word}(name)"));
                 };
-                Ok(if f == Tok::Since {
-                    Expr::Since(n)
-                } else {
-                    Expr::Prev(n)
+                Ok(match f {
+                    Tok::Win(w) => Expr::Window(w, n),
+                    _ => Expr::Since(n),
                 })
             }
             Some(t) => Err(format!("expected a value, found {}", show_tok(&t))),
@@ -552,13 +584,13 @@ impl Parser {
 fn show_tok(t: &Tok) -> String {
     match t {
         Tok::Name(n) => format!("`{n}`"),
-        Tok::Num(n) => format!("`{n}`"),
-        Tok::Dur(n, u) => format!("`{n}{u}`"),
+        Tok::Num(n, None) => format!("`{n}`"),
+        Tok::Num(n, Some(u)) => format!("`{n}{u}`"),
         Tok::Str(s) => format!("`'{s}'`"),
         Tok::Op(op) => format!("`{}`", op.as_str()),
         Tok::Not => "`NOT`".into(),
         Tok::Since => "`SINCE`".into(),
-        Tok::Prev => "`PREV`".into(),
+        Tok::Win(w) => format!("`{}`", w.as_str()),
         Tok::Open => "`(`".into(),
         Tok::Close => "`)`".into(),
     }

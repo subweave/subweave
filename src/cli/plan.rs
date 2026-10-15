@@ -6,7 +6,7 @@ use anyhow::Result;
 
 use crate::model::{self, decider::Decider};
 use crate::plan::{self, Level};
-use crate::weave::{ArgKind, Weave, graph};
+use crate::weave::{ArgKind, FactSource, Weave, graph};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -48,7 +48,7 @@ pub async fn run(args: Args) -> Result<ExitCode> {
     })
 }
 
-/// The ARGs, the SECRETs and the goal tree.
+/// The ARGs, the SECRETs, the FACTs with their types and the goal tree.
 fn overview(w: &Weave) -> String {
     let mut out = String::new();
     let nw = w.args.iter().map(|a| a.name.len()).max().unwrap_or(0);
@@ -83,6 +83,19 @@ fn overview(w: &Weave) -> String {
                 let _ = write!(out, "   IF {e}");
             }
             out.push('\n');
+        }
+    }
+    if !w.facts.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        let fw = w.facts.iter().map(|f| f.name.len()).max().unwrap_or(0);
+        for f in &w.facts {
+            let how = match &f.source {
+                FactSource::Command(_) => "command",
+                FactSource::Quoted(_) => "learned",
+            };
+            let _ = writeln!(out, "{:fw$}  {:9}  {how}", f.name, f.ty.to_string());
         }
     }
     if !w.goals.is_empty() {

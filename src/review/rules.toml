@@ -149,17 +149,17 @@ on = "fact-number"
 ask = "A command will print the value described in `what`. What will it print?"
 choices = { number = "one number", other = "a word, text, lines or several values" }
 pass = "number"
-says = "a quoted FACT compared with a number says it prints one number"
+says = "a quoted NUMBER fact describes one number"
 
 [[rule]]
 id = "fact-exit"
 area = "facts"
 weight = 2
 on = "fact-exit"
-ask = "This fact is used as a condition: it holds when its command exits 0. Which describes `what`?"
+ask = "This fact is a BOOL: it holds when its command exits 0. Which describes `what`?"
 choices = { exit = "says when the command succeeds or exits 0, or names a condition that is true or false", other = "names a thing or a value, without saying when it holds" }
 pass = "exit"
-says = "a quoted FACT used as a condition says when it exits 0"
+says = "a quoted BOOL fact says when it exits 0"
 
 [[rule]]
 id = "fact-reads"
@@ -188,7 +188,7 @@ on = "fact-follow"
 ask = "Whose words can the lines described in `source` contain?"
 choices = { service = "only messages the service and the system write about their own work, such as warnings and errors", outsiders = "also words chosen by outside people, such as chat messages, request paths, user agents or queries sent by an app" }
 pass = "service"
-says = "a FOLLOW fact reads only lines the service writes about itself"
+says = "a LINES fact reads only lines the service writes about itself"
 why = "Text on the box can steer the decider: LIMITS.md#3."
 
 [[rule]]

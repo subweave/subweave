@@ -148,11 +148,11 @@ fn backticked(text: &str) -> bool {
     })
 }
 
-/// Whether the expression reads `name`, as a name or through `PREV`.
+/// Whether the expression reads `name`, as a name or through a window function.
 fn reads(e: &Expr, name: &str) -> bool {
     let mut found = false;
     e.walk(&mut |x| {
-        if let Expr::Name(n) | Expr::Prev(n) = x {
+        if let Expr::Name(n) | Expr::Window(_, n) = x {
             found |= n == name;
         }
     });

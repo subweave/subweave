@@ -3,6 +3,7 @@ use std::time::Duration;
 use serde::{Serialize, Serializer};
 
 use super::expr::Expr;
+use super::value::FactType;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Weave {
@@ -107,7 +108,8 @@ pub struct Secret {
 #[derive(Debug, Clone, Serialize)]
 pub struct Fact {
     pub name: String,
-    pub follow: bool,
+    #[serde(rename = "type")]
+    pub ty: FactType,
     pub source: FactSource,
     pub line: u32,
 }
@@ -123,10 +125,13 @@ pub enum FactSource {
 pub struct Goal {
     pub name: String,
     /// What it keeps true, for a person: `GOAL current "reth runs its newest release" …`.
-    pub plain: Option<String>,
+    pub sentence: String,
     pub after: Vec<String>,
     #[serde(serialize_with = "dur_opt")]
     pub every: Option<Duration>,
+    /// The window it is judged over; `None`: its EVERY.
+    #[serde(serialize_with = "dur_opt")]
+    pub over: Option<Duration>,
     #[serde(serialize_with = "tries_opt")]
     pub tries: Option<(u32, Duration)>,
     pub cond: Condition,
@@ -264,6 +269,44 @@ impl Weave {
             })
             .flat_map(|o| o.slots.iter().map(String::as_str))
     }
+
+    /// A goal judged over a window: its condition reads a window function, or a LINES
+    /// fact in backticks.
+    pub fn windowed(&self, g: &Goal) -> bool {
+        match &g.cond {
+            Condition::Code(e) => e.windowed(),
+            Condition::Quoted(t) => {
+                backticked(t).any(|n| self.fact(n).is_some_and(|f| f.ty == FactType::Lines))
+            }
+        }
+    }
+}
+
+/// How often a goal is checked with no EVERY: code is cheap, a quoted goal asks a model.
+const CODE_EVERY: Duration = Duration::from_secs(60);
+const QUOTED_EVERY: Duration = Duration::from_secs(300);
+
+impl Goal {
+    pub fn every(&self) -> Duration {
+        self.every.unwrap_or(match self.cond {
+            Condition::Code(_) => CODE_EVERY,
+            Condition::Quoted(_) => QUOTED_EVERY,
+        })
+    }
+
+    /// The window it is judged over: its OVER, else its EVERY.
+    pub fn over(&self) -> Duration {
+        self.over.unwrap_or_else(|| self.every())
+    }
+}
+
+/// The names a quoted text gives in backticks: `` `logs` ``.
+pub fn backticked(text: &str) -> impl Iterator<Item = &str> {
+    let ticks = text.matches('`').count();
+    text.split('`')
+        .enumerate()
+        .filter(move |(k, _)| k % 2 == 1 && *k < ticks)
+        .map(|(_, p)| p)
 }
 
 /// `5m`, `25h`, `30d`, `90s`: the largest unit that divides the duration.

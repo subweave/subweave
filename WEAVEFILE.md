@@ -15,11 +15,11 @@ NEVER IF version < 14
 NEVER "drop or truncate a database"
 ASK   BEFORE restore
 
-FACT up        runuser -u postgres -- pg_isready -q
-FACT archived  "1 when WAL archiving is on and has no failure newer than its last success, else 0"
+FACT up        BOOL  runuser -u postgres -- pg_isready -q
+FACT archived  BOOL  "exits 0 when WAL archiving is on and has no failure newer than its last success"
 
-GOAL running                               up
-GOAL archiving  AFTER running  EVERY 5m    archived == 1     IF bucket
+GOAL running    "PostgreSQL is running"                                   up
+GOAL archiving  "every change is copied"  AFTER running  EVERY 5m         archived  IF bucket
 
 ACTION restart FOR running WITHIN 2m
   WHEN "postgres crashed once, and nothing on disk is wrong"
@@ -68,8 +68,8 @@ a goal fails ──► the decider picks an action
 | `MODEL DECIDE <id>`, `MODEL CODE <id> [THEN <id>]` | a model hint; the run decides |
 | `ARG <name>[=<default>] MUST\|SHOULD\|MAY ["<what>"]` | a setting the request chooses |
 | `SECRET <NAME> "<what>"` | a value the person types once |
-| `FACT <name> [FOLLOW] <command>\|"<what>"` | what the box shows |
-| `GOAL <name> ["<sentence>"] ... <condition>` | what must hold |
+| `FACT <name> <TYPE> <command>\|"<what>"` | what the box shows: `BOOL`, `NUMBER [<unit>]`, `TEXT`, `VERSION` or `LINES` |
+| `GOAL <name> "<sentence>" ... <condition>` | what must hold |
 | `ACTION <name> ["<label>"] [FOR <goals>] [WITHIN <duration>]` | what the loop may do |
 | `... IF <expr>` | at the end of a `SECRET`, `GOAL`, `ACTION` or `ASK BEFORE` line: in effect only while `<expr>` holds |
 | `RUN <command>` | a step of the action above, in code |
@@ -153,48 +153,66 @@ Each `ARG`, slot and `SECRET` is an environment variable for every command, the 
 ## FACT
 
 ```weavefile
-FACT up        runuser -u postgres -- pg_isready -q
-FACT disk      "percent used of the filesystem that holds /var/lib/postgresql, a number"
-FACT kernel    FOLLOW journalctl -k -f -n 0 -p warning
-FACT logs      FOLLOW "new WARNING, ERROR, FATAL and PANIC lines of the PostgreSQL log"
+FACT up        BOOL       runuser -u postgres -- pg_isready -q
+FACT disk      NUMBER %   "percent used of the filesystem that holds /var/lib/postgresql"
+FACT wal       NUMBER GB  "the size of the cluster's pg_wal directory, in GB"
+FACT server    VERSION    "the version of the running PostgreSQL server, like 18.1"
+FACT listen    TEXT       "the value of listen_addresses"
+FACT kernel    LINES      journalctl -k -f -n 0 -p warning
+FACT logs      LINES      "new WARNING, ERROR, FATAL and PANIC lines of the PostgreSQL log"
 ```
 
-- `FACT <name> <command>`: the daemon runs the command when a goal needs the fact.
-  - The value is the trimmed output. A bare name in a condition means "the command exits 0".
-  - A number is also a metric for `subweave stats`.
-- `FACT <name> "<what>"`: the box learns the command. See [Learned commands](#learned-commands).
-  - Say the form: "a number", "1 … else 0", or "exits 0 when …".
-- `FOLLOW`: the command keeps running. The value is the lines printed since the last check.
-  - Print only lines written after it starts: `tail -n 0 -F`, `journalctl -f -n 0`. Without `-n 0` both replay old lines, and the first check judges them as new.
+`FACT <name> <TYPE> <command>|"<what>"`. The type is required:
+
+| Type | Value |
+|---|---|
+| `BOOL` | the command exits 0 |
+| `NUMBER [<unit>]` | one number, in the unit: `%`, `ms`, `s`, `m`, `h`, `d`, `B`, `KB`, `MB`, `GB`, `TB` |
+| `TEXT` | the trimmed output |
+| `VERSION` | a release such as `1.2.3` or `v2.7.0`; compares as semver |
+| `LINES` | a stream: the command keeps running, and each line it prints is kept with its time |
+
+- `<command>`: the daemon runs it when a goal needs the fact. `"<what>"`: the box learns the command. See [Learned commands](#learned-commands).
+- The value is parsed by its type. Output that does not parse, such as no number for a `NUMBER`, is a broken read: the fact has no value until the next read.
+- A `NUMBER` prints a bare number in its unit, or the number with a unit of the same kind: `85` or `85%`. `KB` is 1024 `B`. A number is also a metric for `subweave stats`.
+- `LINES`: print only lines written after the command starts: `tail -n 0 -F`, `journalctl -f -n 0`. Without `-n 0` both replay old lines as new.
+  - A check takes no lines away. A goal reads the lines of its window ([GOAL](#goal)), and the next check reads them again while they are in it.
+  - The daemon keeps each fact's reads and lines for the longest window that reads it, at least an hour. A command that ends starts again 10 seconds later, and the kept lines stay.
+  - A `check` line in the journal holds the values the goal read and, per `LINES` fact, the lines new since that fact's last `check` line. On start the daemon rebuilds the kept reads and lines from these, so a line that failed a goal before a restart still fails it after.
 - A command that connects to the service connects as a role that exists: `runuser -u postgres -- pg_isready -q`. As root, each check writes a failed login to the log the weave reads.
 - Commands run as root in `bash -eo pipefail`, with a 60 second limit for a `FACT` and 30 minutes for a `RUN`.
-- The daemon runs a fact only when a goal that is due needs it. A goal that is off reads no facts.
-- In a decider request, numbers and exit results go under `facts`. Other text goes under `program_output`.
+- The daemon runs a fact only when a goal that is due needs it. A goal that is off reads no facts. All goals checked in one tick read one snapshot: each fact is read once.
+- In a decider request, `BOOL`, `NUMBER` and `VERSION` values go under `facts`; `TEXT` and `LINES` go under `program_output`.
 
 ## GOAL
 
 ```weavefile
-GOAL installed                                  present
-GOAL running     AFTER configured               up
-GOAL archiving   AFTER running    EVERY 5m      archived == 1        IF bucket
-GOAL backed      AFTER archiving                SINCE(backup) < 25h
-GOAL drilled     AFTER backed     EVERY 1d      SINCE(drill) < 30d
-GOAL room        AFTER installed  EVERY 5m      disk < 85
-GOAL current     "PostgreSQL runs the newest minor release" \
-                 AFTER running    EVERY 1d      behind == 0
-GOAL quiet       AFTER running    EVERY 10m \
-     "the new lines in `logs` and `kernel` show nothing that needs action"
+GOAL installed  "PostgreSQL is installed"                                     present
+GOAL running    "PostgreSQL is running"      AFTER configured                 up
+GOAL archiving  "every change is copied"     AFTER running    EVERY 5m        archived  IF bucket
+GOAL backed     "a full backup is fresh"     AFTER archiving                  SINCE(backup) < 25h
+GOAL room       "the disk has room"          AFTER installed  EVERY 5m        disk < 85%
+GOAL current    "PostgreSQL runs release $version or newer" \
+                AFTER running  EVERY 1d  server >= version
+GOAL calm       "the kernel logs no errors"  AFTER running    EVERY 1m  OVER 10m \
+                COUNT(kernel) == 0
+GOAL quiet      "the logs show no trouble"   AFTER running    EVERY 10m \
+     "the lines in `logs` and `kernel` show nothing that needs action"
 ```
 
-`GOAL <name> ["<sentence>"] [AFTER <goal>, …] [EVERY <duration>] [TRIES <n> PER <duration>] <condition> [IF <expr>]`
+`GOAL <name> "<sentence>" [AFTER <goal>, …] [EVERY <duration>] [OVER <duration>] [TRIES <n> PER <duration>] <condition> [IF <expr>]`
 
-- `"<sentence>"`: what the goal keeps true, in plain words for the person's cards. Quoted text right after the name is the sentence when a condition follows it, else it is the quoted condition. A code goal without one shows its condition on a card.
+- `"<sentence>"`: what the goal keeps true, in plain words for the person's cards. It is required and comes first. The condition comes last: code, or a second quoted text for the decider.
 - `AFTER`: the daemon checks this goal only while those goals hold. The goals make a graph; `subweave plan <weave>` draws it.
-- `IF`: off while the expression is false. A goal after an off goal is off too: with no bucket, `archiving`, `backed` and `drilled` are all off.
+- `IF`: off while the expression is false. A goal after an off goal is off too: with no bucket, `archiving` and `backed` are off.
 - `EVERY`: `1m` by default for code, `5m` for quoted conditions.
+- `OVER`: the window the goal is judged over, from now back; its `EVERY` by default. Only a goal that reads a window takes it: a `LINES` fact, or `MIN`, `MAX`, `AVG`, `DELTA` or `COUNT`.
 - `TRIES`: `3 PER 1h` by default. Past it, the daemon escalates. Code counts this, not the model. A `wait` is not a try: a first sync that waits for hours escalates nothing.
 - A goal that never held fails its first check: `SINCE(drill)` has no value until the first drill, so a new box drills right after its first backup.
-- A goal fails only when two checks in a row fail. After the first failed check the daemon checks again within 30 seconds, or after its `EVERY` when it reads `PREV()`; a goal that holds then sends no warning, runs no action and asks nobody.
+- **Fail and hold.** A goal's first failed check makes it suspect, with no warning, action or ask. The daemon checks it again 30 seconds later, or after its `EVERY` when that is sooner; a second failed check makes it fail. The re-check reads the same window, so a line that failed the first check fails the second too.
+- A goal that is suspect or failing holds again only when a check over its full window holds: a line that failed it fails each check until `OVER` has passed without it. A windowed goal that would hold over a window the daemon has not watched whole (after a start or restart) is unknown until it has.
+- After a fix's steps, the `WITHIN` wait judges a windowed goal over the part of its window after the steps, once that part is the whole window or `WITHIN` is spent. A fix that held leaves the goal alone until its whole window is after the steps.
+- A code rule (`NEVER IF`, `ASK IF`, `ASK BEFORE ... IF`) that reads a fact with no value applies: not knowing is not safe.
 
 The `postgres` weave's graph:
 
@@ -218,20 +236,24 @@ A code condition:
 
 | Form | True when |
 |---|---|
-| `up` | the fact `up` exits 0 |
-| `disk < 85` | the comparison holds: `< <= > >= == !=` |
+| `up` | the `BOOL` fact `up` exits 0 |
+| `disk < 85%` | the comparison holds: `< <= > >= == !=` |
 | `conns < max_conns * 0.8` | arithmetic: `+ - * /` |
 | `SINCE(backup) < 25h` | the action `backup` last passed under 25 hours ago |
-| `head > PREV(head)` | `head` grew since this goal's last check |
+| `server >= '18.1'`, `running < newest` | versions compare as semver |
+| `COUNT(kernel) == 0` | no line in the goal's window; `COUNT` of another fact counts its reads |
+| `DELTA(rejected) == 0` | the newest value minus the value at the window's start |
+| `MIN(free) > 1GB`, `MAX(lag) < 60s`, `AVG(load) < 4` | over the values in the window |
 | `role == 'cache'` | a string compare; strings take single quotes, because double quotes mean model |
 | `a AND b`, `a OR b`, `NOT a` | as written |
 
-- Two values that both read as numbers compare as numbers: `major == version`. Two durations compare as durations.
-- A name with no value makes its comparison false. In a command, it is an empty variable.
-- On a goal's first check, `PREV()` has no value, so the goal waits for the second check.
-- A goal that reads a quoted fact the box has not learned stays unknown, and no repair runs for it.
+- **Units.** A number carries its unit: `85%`, `60s`, `500ms`, `1GB`, `25h`. Only numbers of one kind compare, add or subtract: `plan` refuses `disk < 85` for a `NUMBER %` fact, `head_age < 1GB`, and a number against a version. A unit times or divided by a bare number keeps its kind; a size divided by a size is a bare number.
+- **Types.** `TEXT` compares only with `==` and `!=`. A `VERSION` compares with a `VERSION` or a quoted version. A `BOOL` stands bare or with `NOT`. A `LINES` fact is read only by `COUNT` and by quoted conditions.
+- **Windows.** `MIN`, `MAX`, `AVG`, `DELTA` and `COUNT` read the goal's window: only a `GOAL`'s condition and its `IF` take them. A value's window starts with the value it had at the window's start.
+- **ARGs.** An `ARG`'s words take the type of what they meet: with `lag=60`, `head_age < lag` reads 60 seconds, the base unit of a duration (`s`, `B` and `%` are the base units). An empty `ARG` is false, and makes its comparison false. In a command, it is an empty variable.
+- **Unknown.** A fact with no value (not learned yet, or a broken read) is unknown, and so is a comparison that reads it. `AND` with a false side is false and `OR` with a true side is true; otherwise the condition is unknown. An unknown goal runs no repair.
 
-A quoted condition goes to the decider as one yes/no question. Its backticked names say which facts it reads. All quoted goals due in one tick share one decider request. A threshold is code, never prose: see [LIMITS.md](LIMITS.md#1-numbers-inside-prose).
+A quoted condition goes to the decider as one yes/no question, with the facts its backticked names give: a `LINES` fact gives its lines in the goal's window. The check journals the decider's `p`. Quoted goals due in one tick with the same window share one decider request. A threshold is code, never prose: see [LIMITS.md](LIMITS.md#1-numbers-inside-prose).
 
 ## ACTION
 
@@ -256,7 +278,7 @@ ACTION fix WITHIN 30m
 - `FOR`: the goals this action may fix. Without `FOR`, any goal.
 - `WITHIN`: after the last step, the goal must hold again within this time; `5m` by default. Until then the loop does nothing else for that goal. A restore that replays WAL for hours says `WITHIN 6h`.
 - `IF`: the action does not run while the expression is false.
-  - An `IF` on facts, `SINCE` or `PREV` is a precondition: while false, the action is no fix at all.
+  - An `IF` on facts or `SINCE` is a precondition: while false, or unknown, the action is no fix at all.
   - An `IF` on ARGs only says how the box is set up: the action is the person's here. When its `FOR` names the failing goal and the decider picks it, the person gets a card that names the fix, like `Update reth and Lighthouse yourself?`. `subweave do` and an answer never run it.
 - `WHEN` says when the action is the right fix, not what it does. The decider chooses by the name and `WHEN` alone. See [LIMITS.md](LIMITS.md#2-the-action-description-is-the-decision).
 - Steps run in order. A `RUN` that exits non-zero ends the action as failed.
@@ -403,15 +425,15 @@ A weave says what; each box learns how, once, and then runs code.
 
 | Quoted | Learned | Used |
 |---|---|---|
-| `FACT disk "percent used of …, a number"` | one command, written by the coder | at every check, as code |
+| `FACT disk NUMBER % "percent used of …"` | one command, written by the coder | at every check, as code |
 | `DO "delete compressed PostgreSQL logs older than 7 days …"` | the commands of the task that passed | the next time the decider picks this action for this goal |
 
-- **A quoted fact.** The first check that reads it has the coder write a command. The decider asks whether it changes anything on the box, and whether it prints a fallback value when its read fails; at 0.5 or more, the coder writes again. Code runs it and checks the form: a fact compared with a number must print a number. A repair shows the models only facts already learned, so a first install waits on no fact its goals do not read yet.
+- **A quoted fact.** The first check that reads it has the coder write a command. The coder hears the fact's type: an exit status, one number in its unit, text, a version, or a stream. The decider asks whether it changes anything on the box, and whether it prints a fallback value when its read fails; at 0.5 or more, the coder writes again. Code runs it and parses what it prints by the type: a `NUMBER` that prints no number, or a `VERSION` that prints none, is refused. A repair shows the models only facts already learned, so a first install waits on no fact its goals do not read yet.
 - **What the fact's coder gets.** The box, the service, the ARGs, the skills the decider picks for the fact's text, and the fact. On OpenRouter it reasons at low effort: on the postgres weave's facts, low effort wrote as many working commands as the default, with half the output tokens.
-- **A learned fact that fails.** A number or text fact whose command exits non-zero is a broken read, not a value. The daemon drops the command and has the coder write a new one, with the error. Within 10 minutes of learning it, the fact waits instead.
+- **A learned fact that fails.** A learned `NUMBER`, `TEXT` or `VERSION` command that exits non-zero, or prints what its type does not parse, is a broken read, not a value. The daemon drops the command and has the coder write a new one, with the error. Within 10 minutes of learning it, the fact waits instead.
 - **A `DO` step.** When the goal holds after the task, the coder's `done` names the commands that made the fix. The daemon keeps those that exited 0, in order, under the action and the failing goal.
 - **Reuse.** The decider still picks the action by its `WHEN`. The learned steps then run first, in code, through the code rules. When the goal does not hold `WITHIN` its time, the daemon drops them and calls the coder, with their output.
-- A learned command is kept for its exact text after `$name` replacement. A changed `ARG` or a new weave version makes a new one.
+- A learned command is kept for its fact's exact type and text after `$name` replacement. When the daemon loads a weave, it drops each learned command whose fact is gone or whose type or text changed: a changed `ARG` or a new weave version makes a new one.
 - `subweave learned <service>` lists them. `subweave forget <service> <fact or action>` drops one.
 - `subweave learn <service>` turns learned steps into draft `SKILL` recipes for the weave's author.
 
@@ -810,7 +832,7 @@ postgres  100/100   48 rules, 221 checks, $0.0020
 | header | 3 | `ABOUT` says what the service is |
 | args | 7 | an ARG's description gives an example |
 | secrets | 3 | a secret never appears in a command line |
-| facts | 6 | a quoted FACT compared with a number says it prints one number |
+| facts | 6 | a quoted `NUMBER` fact describes one number |
 | goals | 4 | a quoted goal names the facts it reads in backticks |
 | actions | 11 | two actions for one goal have `WHEN`s that do not overlap |
 | rules | 2 | a quoted rule names something one command can do |
@@ -843,8 +865,8 @@ instruction
   | "MODEL" "CODE" model { "THEN" model }
   | "ARG" name [ "=" word ] level [ quoted ]
   | "SECRET" name quoted [ if ]
-  | "FACT" name [ "FOLLOW" ] ( body | quoted )
-  | "GOAL" name [ quoted ] [ "AFTER" names ] [ "EVERY" dur ]
+  | "FACT" name type ( body | quoted )
+  | "GOAL" name quoted [ "AFTER" names ] [ "EVERY" dur ] [ "OVER" dur ]
            [ "TRIES" num "PER" dur ] ( expr | quoted ) [ if ]
   | "ACTION" name [ quoted ] [ "FOR" names ] [ "WITHIN" dur ] [ if ]
   | "WHEN" quoted
@@ -855,6 +877,8 @@ instruction
   | "ASK" ( quoted | "BEFORE" name [ if ] [ because ] | if [ because ] )
   | "SKILL" name "WHEN" quoted heredoc ;
 level    = "MUST" | "SHOULD" | "MAY" ;
+type     = "BOOL" | "NUMBER" [ unit ] | "TEXT" | "VERSION" | "LINES" ;
+unit     = "%" | "ms" | "s" | "m" | "h" | "d" | "B" | "KB" | "MB" | "GB" | "TB" ;
 if       = "IF" expr ;
 because  = "BECAUSE" quoted ;             (* plain words for the person *)
 body     = command | heredoc ;
@@ -863,9 +887,10 @@ size     = num ( "CPU" | "GPU" | "GB" ( "RAM" | "DISK" ) | "TB" "DISK" ) ;
 model    = word [ "@" name ] ;
 expr     = term { ( "AND" | "OR" ) term } ;
 term     = [ "NOT" ] ( name | value op value | "(" expr ")" ) ;
-value    = name | num | dur | string
-         | "SINCE(" name ")" | "PREV(" name ")"
+value    = name | num [ unit ] | string
+         | "SINCE(" name ")" | window "(" name ")"
          | value ( "+" | "-" | "*" | "/" ) value ;
+window   = "MIN" | "MAX" | "AVG" | "DELTA" | "COUNT" ;
 string   = "'" text "'" ;                (* code *)
 quoted   = '"' text '"' ;                (* model *)
 op       = "<" | "<=" | ">" | ">=" | "==" | "!=" ;

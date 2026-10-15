@@ -33,11 +33,18 @@ fn heredoc_start(line: &str) -> Option<String> {
     let at = match *toks.first()? {
         "RUN" | "DO" | "ADD" => 1,
         "FACT" => {
-            if toks.get(2) == Some(&"FOLLOW") {
-                3
-            } else {
-                2
+            // FACT <name> <TYPE> [<unit>] <<EOF
+            let mut at = 2;
+            let ty = toks.get(at).and_then(|t| super::value::FactType::word(t));
+            if ty.is_some() {
+                at += 1;
             }
+            if ty == Some(super::value::FactType::Number(None))
+                && toks.get(at).is_some_and(|t| super::value::Unit::parse(t).is_some())
+            {
+                at += 1;
+            }
+            at
         }
         "SKILL" => toks.len() - 1,
         _ => return None,

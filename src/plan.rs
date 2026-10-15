@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::model::decider::{Answers, Decider, Question};
-use crate::weave::expr::{self, Env, Value};
+use crate::weave::expr::{self, Env, Value, Window};
 use crate::weave::{ArgKind, Rule, Weave, graph};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -95,7 +95,7 @@ fn argmax<'a>(p: impl Iterator<Item = (&'a String, f64)>) -> Option<(&'a String,
     best
 }
 
-/// Values as code reads them: an empty or missing value is no value.
+/// Values as code reads them: an unsaid ARG is empty, and a fact has no value yet.
 struct Values<'a>(&'a IndexMap<String, Option<String>>);
 
 impl Values<'_> {
@@ -109,15 +109,13 @@ impl Values<'_> {
 
 impl Env for Values<'_> {
     fn value(&self, name: &str) -> Option<Value> {
-        self.get(name).map(|v| Value::Text(v.to_string()))
-    }
-    fn truthy(&self, name: &str) -> bool {
-        self.get(name).is_some()
+        let v = self.0.get(name)?;
+        Some(Value::Text(v.clone().unwrap_or_default()))
     }
     fn since(&self, _action: &str) -> Option<Duration> {
         None
     }
-    fn prev(&self, _fact: &str) -> Option<Value> {
+    fn window(&self, _f: Window, _fact: &str) -> Option<Value> {
         None
     }
 }
@@ -538,7 +536,7 @@ pub async fn plan(
             Rule::AskIf { expr, .. } => (Level::Ask, "ASK IF", expr),
             _ => continue,
         };
-        if expr::holds(e, &env) {
+        if expr::holds(e, &env) == Some(true) {
             let shown = e.show_with(&|n| env.get(n).map(String::from));
             findings.push(finding(level, subject, shown, None));
         }
@@ -639,7 +637,7 @@ pub async fn plan(
     let secrets = w
         .secrets
         .iter()
-        .filter(|s| s.cond.as_ref().is_none_or(|e| expr::holds(e, &env)))
+        .filter(|s| s.cond.as_ref().is_none_or(|e| expr::holds(e, &env) != Some(false)))
         .map(|s| s.name.clone())
         .collect();
     let values = vals

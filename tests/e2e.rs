@@ -519,6 +519,12 @@ impl Drop for Box_ {
             let _ = c.start_kill();
         }
         kill_pidfile(&self.dir.join("toy.pid"));
+        // A killed daemon leaves its LINES follower behind.
+        let _ = std::process::Command::new("pkill")
+            .arg("-f")
+            .arg(self.dir.join("app.log"))
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
@@ -885,14 +891,16 @@ NEVER IF port < 1024
 NEVER "{FIREWALL_RULE}"
 ASK   BEFORE rotate BECAUSE "a rotate starts the server log over"
 
-FACT present  test -f $root/index.html
-FACT scene    echo "$(cat {d}/scene 2>/dev/null) $TOY_TOKEN"
-FACT served   "1 when http://127.0.0.1:$port/ answers HTTP 200 with a page that contains the word hello, else 0"
+FACT present  BOOL    test -f $root/index.html
+FACT scene    TEXT    echo "$(cat {d}/scene 2>/dev/null) $TOY_TOKEN"
+FACT served   NUMBER  "1 when http://127.0.0.1:$port/ answers HTTP 200 with a page that contains the word hello, else 0"
+FACT errors   LINES   tail -n 0 -F {d}/app.log
 
-GOAL installed                  EVERY 1s                   present
+GOAL installed "the hello page is installed"                  EVERY 1s                   present
 GOAL running   "the hello page is up" \
                AFTER installed  EVERY 1s  TRIES 10 PER 1h  served == 1
-GOAL rotated   AFTER running    EVERY 1s                   SINCE(rotate) < 1h
+GOAL rotated   "the server log is fresh"  AFTER running    EVERY 1s                   SINCE(rotate) < 1h
+GOAL calm      "the app log stays quiet"  EVERY 2s  OVER 12s  COUNT(errors) == 0
 
 ACTION install FOR installed WITHIN 5s
   WHEN "the directory or its index.html is missing: nothing is installed yet"
@@ -1633,6 +1641,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
     std::fs::create_dir_all(&weave_dir).unwrap();
     std::fs::write(weave_dir.join("Weavefile"), weavefile(&dir, &www)).unwrap();
     std::fs::write(dir.join("scene"), "calm").unwrap();
+    std::fs::write(dir.join("app.log"), "").unwrap();
     let weave = weave_dir.display().to_string();
 
     // The vendors: OpenRouter and a webhook, on one local server.
@@ -1702,6 +1711,27 @@ async fn daemon_and_cli_keep_a_toy_service() {
     assert!(inbox.is_empty(), "the inbox holds {inbox:?}");
     assert!(!b.state.join("services/toy-bad").exists());
     assert_eq!(mock.coder_requests(), 0);
+
+    // 6j. plan refuses a goal that compares a percentage with a size, before anything runs.
+    phase("6j units");
+    let units = dir.join("examples/units");
+    std::fs::create_dir_all(&units).unwrap();
+    std::fs::write(
+        units.join("Weavefile"),
+        "ABOUT \"a box whose disk has room\"\n\
+         FACT disk NUMBER % \"percent used of the root filesystem\"\n\
+         GOAL room \"the disk has room\" disk < 1GB\n",
+    )
+    .unwrap();
+    let o = b.sw(&["plan", &units.display().to_string()]).await;
+    assert!(
+        !o.status.success()
+            && both(&o).contains(
+                "Weavefile:3: `disk < 1GB`: `disk` is a percentage and `1GB` is a size, which do not compare"
+            ),
+        "{}",
+        both(&o)
+    );
 
     // The daemon, in the background.
     b.start_daemon(&mock_url);
@@ -2351,6 +2381,110 @@ async fn daemon_and_cli_keep_a_toy_service() {
     assert_eq!(asks, json!([]), "the mcp inbox is empty");
     drop(mcp);
 
+    // 6i. A LINES goal judged over its window: one routine line in app.log fails `calm`
+    // twice in a row, and again after a daemon restart; it holds only once OVER has passed
+    // without the line. No action is FOR it: one escalation, withdrawn when it holds.
+    phase("6i lines window");
+    const OVER_MS: i64 = 12_000;
+    const ROUTINE: &str = "GET /health 200 in 0.4ms";
+    // An event's `t` has whole seconds; a line's `t` has milliseconds.
+    let at_ms = |l: &Value| -> i64 {
+        l["t"]
+            .as_str()
+            .and_then(|t| t.parse::<jiff::Timestamp>().ok())
+            .map(|t| t.as_millisecond())
+            .unwrap_or_else(|| panic!("no time on {l}"))
+    };
+    let calm = |b: &Box_| b.lines("check", |l| l["goal"] == "calm");
+    b.holds(&["calm"], 30).await;
+    assert!(b.lines("ask", |l| l["goal"] == "calm").is_empty());
+    let from = calm(&b).len();
+    {
+        use std::io::Write;
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("app.log"))
+            .unwrap();
+        writeln!(log, "{ROUTINE}").unwrap();
+    }
+    let first = b
+        .until("calm's first failed check", 10, || {
+            calm(&b).into_iter().skip(from).find(|l| l["ok"] == false)
+        })
+        .await;
+    // The line is under `lines`, with the time the follower read it; never under `facts`.
+    let line_t = first["lines"]["errors"]
+        .as_array()
+        .and_then(|ls| ls.iter().find(|x| x["text"] == ROUTINE))
+        .and_then(|x| x["t"].as_i64())
+        .unwrap_or_else(|| b.fail(&format!("the first failed check lacks the line: {first}")));
+    assert!(first["facts"].get("errors").is_none(), "{first}");
+    b.until("calm to fail", 10, || (b.goal("calm") == "fails").then_some(()))
+        .await;
+    let since_line: Vec<Value> = calm(&b).into_iter().skip(from).collect();
+    assert!(
+        since_line.iter().all(|l| l["ok"] != true),
+        "calm held between its failed checks: {since_line:?}"
+    );
+    let failed: Vec<i64> = since_line
+        .iter()
+        .filter(|l| l["ok"] == false)
+        .map(|l| at_ms(l))
+        .collect();
+    assert!(
+        failed.len() >= 2 && failed[1] < line_t + OVER_MS,
+        "the re-check reads the line's window again: {since_line:?}"
+    );
+    let (n, _) = b
+        .until("calm's escalation", 10, || b.open_ask("calm"))
+        .await;
+    // A daemon restart while the line is still in the window: the rebuilt ring holds it.
+    let restarted = jiff::Timestamp::now().as_millisecond();
+    assert!(
+        restarted + 3_000 < line_t + OVER_MS,
+        "too late to restart inside the window: line at {line_t}, now {restarted}"
+    );
+    let before_restart = calm(&b).len();
+    b.restart_daemon(&mock_url).await;
+    let again = b
+        .until("calm's first check after the restart", 15, || {
+            calm(&b).into_iter().nth(before_restart)
+        })
+        .await;
+    assert!(
+        again["ok"] == false && at_ms(&again) < line_t + OVER_MS,
+        "the line fails calm after the restart: {again}"
+    );
+    assert!(again.get("lines").is_none(), "a journaled line is journaled again: {again}");
+    assert_eq!(b.goal("calm"), "fails");
+    b.holds(&["calm"], 40).await;
+    let held = calm(&b)
+        .into_iter()
+        .skip(from)
+        .find(|l| l["ok"] == true)
+        .unwrap_or_else(|| b.fail("no check of calm that holds"));
+    // OVER after the line, in the event's whole seconds.
+    assert!(
+        at_ms(&held) >= (line_t + OVER_MS) / 1000 * 1000,
+        "calm held at {} with the line at {line_t}ms, inside OVER",
+        held["t"]
+    );
+    let asks = b.lines("ask", |l| l["goal"] == "calm");
+    assert!(
+        asks.len() == 1 && asks[0]["n"] == n,
+        "the restart raised calm's escalation again: {asks:?}"
+    );
+    let withdrawn = b
+        .until("calm's escalation withdrawn", 10, || {
+            b.lines("withdraw", |l| l["n"] == n).into_iter().next()
+        })
+        .await;
+    assert_eq!(withdrawn["text"], "calm holds again", "{withdrawn}");
+    assert!(
+        b.lines("action", |l| l["goal"] == "calm").is_empty(),
+        "an action ran for calm"
+    );
+
     // 7. ps, log, learned.
     phase("7 ps, log, learned");
     let out = b.ok(&["ps"]).await;
@@ -2358,7 +2492,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .lines()
         .find(|l| l.starts_with("toy "))
         .unwrap_or_else(|| b.fail(&format!("no toy in ps:\n{out}")));
-    assert!(row.contains("3/3"), "{row}");
+    assert!(row.contains("4/4"), "{row}");
     assert!(
         row.contains("typesafe/jev-1.13@mock / deepseek/x@mock"),
         "{row}"

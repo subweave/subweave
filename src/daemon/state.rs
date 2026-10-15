@@ -59,19 +59,36 @@ impl From<Kind> for Event {
     }
 }
 
+/// One line a LINES fact printed, at `t` (Unix milliseconds).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Line {
+    pub t: i64,
+    pub text: String,
+}
+
 /// What happened. A reader shows `text`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Kind {
     /// The goals of the weave the loop runs, in graph order.
     Goals { goals: Vec<String> },
-    /// A goal checked: `ok` holds or not, none unknown; `facts` what it read.
+    /// A goal checked: `ok` holds or not, none unknown; `facts` the values it read (not
+    /// LINES); `lines` per LINES fact the lines new since the fact's last check event;
+    /// `p` how sure the decider was that a quoted goal holds. The facts' rings are
+    /// rebuilt from these on start.
     Check {
         goal: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ok: Option<bool>,
         facts: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        lines: BTreeMap<String, Vec<Line>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        p: Option<f64>,
     },
+    /// The decider chose to wait on a failing goal: the loop leaves it alone `until`
+    /// (RFC 3339), across a restart too.
+    Wait { goal: String, until: String },
     /// A goal does not apply: its IF is false, or a goal it comes AFTER is off.
     Off {
         goal: String,
@@ -298,6 +315,7 @@ impl Kind {
             Kind::Check { .. } => "check",
             Kind::Off { .. } => "off",
             Kind::Waiting { .. } => "waiting",
+            Kind::Wait { .. } => "wait",
             Kind::Decide { .. } => "decide",
             Kind::Gate { .. } => "gate",
             Kind::Action(_) => "action",
@@ -317,9 +335,10 @@ impl Kind {
 
     pub fn goal(&self) -> Option<&str> {
         match self {
-            Kind::Check { goal, .. } | Kind::Off { goal, .. } | Kind::Waiting { goal, .. } => {
-                Some(goal)
-            }
+            Kind::Check { goal, .. }
+            | Kind::Off { goal, .. }
+            | Kind::Waiting { goal, .. }
+            | Kind::Wait { goal, .. } => Some(goal),
             Kind::Decide { goal, .. }
             | Kind::Gate { goal, .. }
             | Kind::Command { goal, .. }
@@ -359,6 +378,7 @@ impl Kind {
             | Kind::Check { .. }
             | Kind::Off { .. }
             | Kind::Waiting { .. }
+            | Kind::Wait { .. }
             | Kind::Withdraw { .. }
             | Kind::Sent { .. }
             | Kind::Watch { .. }
@@ -386,6 +406,7 @@ impl Kind {
             | Kind::Action(Act::Stopped { stopped: text, .. }) => Some(text),
             Kind::Action(Act::Ended { text, .. } | Act::Started { text, .. }) => text.as_deref(),
             Kind::Goals { .. } | Kind::Check { .. } => None,
+            Kind::Wait { until: text, .. } => Some(text),
         }
     }
 
@@ -435,7 +456,13 @@ impl Kind {
     pub fn redact(&mut self, f: &dyn Fn(&str) -> String) {
         let mut each = |s: &mut String| *s = f(s);
         match self {
-            Kind::Check { facts, .. } => facts.values_mut().for_each(&mut each),
+            Kind::Check { facts, lines, .. } => {
+                facts.values_mut().for_each(&mut each);
+                lines
+                    .values_mut()
+                    .flatten()
+                    .for_each(|l| each(&mut l.text));
+            }
             Kind::Ask {
                 text, body, facts, ..
             } => {
@@ -460,6 +487,7 @@ impl Kind {
             }
             Kind::Goals { .. }
             | Kind::Waiting { .. }
+            | Kind::Wait { .. }
             | Kind::Answer { .. }
             | Kind::Sent { .. }
             | Kind::Watch { .. }
@@ -488,6 +516,10 @@ pub struct ServiceState {
     pub outside: Option<(String, Attempt)>,
     /// Per action, when it last passed.
     pub passed: BTreeMap<String, String>,
+    /// Per goal, until when (RFC 3339) the loop leaves it alone: the decider chose to
+    /// wait, or a fix held and its window has yet to pass. A check that holds ends it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub waits: BTreeMap<String, String>,
     pub spend: Spend,
 }
 
@@ -776,7 +808,14 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
         }
         Kind::Check { goal, ok, .. } => {
             let new = goal_mut(s, goal)?.after_check(*ok, &e.t);
+            if new.holds() {
+                s.waits.remove(goal);
+            }
             set_goal(s, goal, new)?;
+        }
+        Kind::Wait { goal, until } => {
+            goal_mut(s, goal)?;
+            s.waits.insert(goal.clone(), until.clone());
         }
         Kind::Off { goal, why } => set_goal(s, goal, GoalState::Off { why: why.clone() })?,
         Kind::Waiting { goal, on } => set_goal(s, goal, GoalState::Waiting { on: on.clone() })?,
@@ -1058,6 +1097,11 @@ impl ServiceState {
                     goals.insert(g.to_string());
                 }
                 (true, None) => box_parked = true,
+            }
+        }
+        for (g, until) in &self.waits {
+            if epoch_of(until).is_some_and(|u| u > now) {
+                goals.insert(g.clone());
             }
         }
         (goals, box_parked)

@@ -8,12 +8,14 @@ pub mod graph;
 pub mod lex;
 pub mod parse;
 pub mod source;
+pub mod value;
 
 use std::collections::BTreeMap;
 use std::fmt;
 
 pub use ast::*;
-pub use expr::{Env, Expr, Value};
+pub use expr::{Env, Expr, Value, Window};
+pub use value::{Dim, FactType, Unit, Version};
 
 /// One thing wrong with a Weavefile. Line 0 is the file as a whole.
 #[derive(Debug, Clone, PartialEq, Eq)]

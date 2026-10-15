@@ -17,8 +17,10 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::model::decider::{Answers, Decider, Question};
-use crate::weave::expr::{Expr, Op};
-use crate::weave::{ArgKind, Condition, FactSource, Rule as WeaveRule, Step, Weave, show_duration};
+use crate::weave::expr::Expr;
+use crate::weave::{
+    ArgKind, Condition, FactSource, FactType, Rule as WeaveRule, Step, Weave, show_duration,
+};
 
 /// Decider requests in flight at once.
 const IN_FLIGHT: usize = 12;
@@ -539,59 +541,6 @@ pub fn exprs(w: &Weave) -> Vec<&Expr> {
     out
 }
 
-/// How code expressions read a fact.
-#[derive(Debug, Default)]
-pub struct Usage {
-    /// As a bare condition: its command exits 0.
-    pub exit: bool,
-    /// As a number: in an ordering comparison, arithmetic, or `==`/`!=` with a number.
-    pub number: bool,
-}
-
-/// How the code expressions read fact `name`; `PREV(name)` counts as `name`.
-pub fn fact_usage(w: &Weave, name: &str) -> Usage {
-    let mut u = Usage::default();
-    for e in exprs(w) {
-        usage(e, name, true, &mut u);
-    }
-    u
-}
-
-fn usage(e: &Expr, name: &str, boolean: bool, u: &mut Usage) {
-    match e {
-        Expr::Name(n) if boolean && n == name => u.exit = true,
-        Expr::Group(x) => usage(x, name, boolean, u),
-        Expr::Not(x) => usage(x, name, true, u),
-        Expr::Bin(l, op, r) => {
-            let logic = matches!(op, Op::And | Op::Or);
-            let number = match op {
-                Op::And | Op::Or => false,
-                Op::Eq | Op::Ne => (reads(l, name) && is_num(r)) || (reads(r, name) && is_num(l)),
-                _ => reads(l, name) || reads(r, name),
-            };
-            u.number |= number;
-            usage(l, name, logic, u);
-            usage(r, name, logic, u);
-        }
-        _ => {}
-    }
-}
-
-fn ungroup(mut e: &Expr) -> &Expr {
-    while let Expr::Group(x) = e {
-        e = x;
-    }
-    e
-}
-
-fn reads(e: &Expr, name: &str) -> bool {
-    matches!(ungroup(e), Expr::Name(n) | Expr::Prev(n) if n == name)
-}
-
-fn is_num(e: &Expr) -> bool {
-    matches!(ungroup(e), Expr::Num(_))
-}
-
 /// What the coder can be asked to do: each DO task of an action with FOR, and, when a
 /// catch-all action has a DO step, making each goal hold again.
 pub fn jobs(w: &Weave) -> Vec<String> {
@@ -794,7 +743,7 @@ pub fn elements(w: &Weave) -> IndexMap<&'static str, Vec<Element>> {
     for f in &w.facts {
         add("fact", f.name.clone(), f.line, json!({ "name": f.name }));
         match &f.source {
-            FactSource::Command(c) | FactSource::Quoted(c) if f.follow => add(
+            FactSource::Command(c) | FactSource::Quoted(c) if f.ty == FactType::Lines => add(
                 "fact-follow",
                 f.name.clone(),
                 f.line,
@@ -803,12 +752,10 @@ pub fn elements(w: &Weave) -> IndexMap<&'static str, Vec<Element>> {
             FactSource::Quoted(what) => {
                 let st = json!({ "name": f.name, "what": norm(what) });
                 add("fact-quoted", f.name.clone(), f.line, st.clone());
-                let u = fact_usage(w, &f.name);
-                if u.number {
-                    add("fact-number", f.name.clone(), f.line, st.clone());
-                }
-                if u.exit {
-                    add("fact-exit", f.name.clone(), f.line, st);
+                match f.ty {
+                    FactType::Number(_) => add("fact-number", f.name.clone(), f.line, st),
+                    FactType::Bool => add("fact-exit", f.name.clone(), f.line, st),
+                    _ => {}
                 }
             }
             FactSource::Command(c) => add(

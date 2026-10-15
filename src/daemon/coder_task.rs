@@ -18,7 +18,7 @@ use crate::weave::{self, Condition, Goal, Rule, Skill};
 
 use super::asks::AskReq;
 use super::card;
-use super::facts::{self, Values};
+use super::observe::{self, Values};
 use super::goals;
 use super::repair::{command, command_output, rule_text};
 use super::service::Ctx;
@@ -147,7 +147,10 @@ pub(crate) async fn do_task(
     done: &[String],
 ) -> DoResult {
     let task = weave::subst(task, &ctx.spec.args);
-    let values = facts::known(ctx, &facts::all(&ctx.w)).await;
+    // The goal is judged over the part of its window since this work began: lines from
+    // before it do not count against it. The WITHIN wait judges it again afterwards.
+    let since = observe::now_ms();
+    let values = goals::known(ctx, work.goal).await;
     let skills = pick_skills(ctx, Some(work), &task, Some(&values)).await;
     let mut ran = Vec::new();
     'recipes: for s in &skills {
@@ -163,7 +166,7 @@ pub(crate) async fn do_task(
         }
     }
     if let Some(goal) = work.goal {
-        if !ran.is_empty() && goals::check_fresh(ctx, goal).await == Some(true) {
+        if !ran.is_empty() && goals::check_fresh(ctx, goal, Some(since)).await == Some(true) {
             return DoResult::Pass {
                 commands: ran,
                 summary: None,
@@ -175,7 +178,7 @@ pub(crate) async fn do_task(
     }
     // No recipe ran: the facts just read still hold for the first coder model.
     let fresh = ran.is_empty().then_some(values);
-    session(ctx, work, &task, &skills, prior, rules_ok, fresh).await
+    session(ctx, work, &task, &skills, prior, rules_ok, fresh, since).await
 }
 
 /// One decider request, one choice per skill: `reached` at 0.5 or more picks it. `work` is
@@ -222,7 +225,7 @@ pub(crate) async fn pick_skills<'a>(
         "job": job,
     });
     if let Some(values) = values {
-        state["facts"] = json!(facts::shown(values));
+        state["facts"] = json!(observe::shown(values));
     }
     if let Some(goal) = work.and_then(|w| w.goal) {
         state["failing_goal"] = json!(goals::describe(ctx, goal));
@@ -397,7 +400,7 @@ fn system_prompt(
     if !values.is_empty() {
         s.push_str("\nFacts now:\n");
         for (k, v) in values {
-            s.push_str(&format!("  {k}: {}\n", v.show()));
+            s.push_str(&format!("  {k}: {}\n", v.text));
         }
         for f in &ctx.w.facts {
             if let weave::FactSource::Command(c) = &f.source {
@@ -432,6 +435,7 @@ async fn session(
     prior: &str,
     rules_ok: &[String],
     mut fresh: Option<Values>,
+    since: i64,
 ) -> DoResult {
     let coder = ctx.coder.as_ref().expect("checked by the caller");
     let tools = tools(work);
@@ -443,9 +447,9 @@ async fn session(
     for i in 0..coder.len() {
         let values = match fresh.take() {
             Some(v) => v,
-            None => facts::known(ctx, &facts::all(&ctx.w)).await,
+            None => goals::known(ctx, work.goal).await,
         };
-        let start = &*start.get_or_insert_with(|| facts::shown(&values));
+        let start = &*start.get_or_insert_with(|| observe::shown(&values));
         let system = system_prompt(ctx, work, task, &values, skills, prior);
         let mut first = match work.goal {
             Some(_) => "Make the goal hold.",
@@ -519,7 +523,9 @@ async fn session(
                     }
                     "done" => {
                         let held = match work.goal {
-                            Some(goal) => goals::check_fresh(ctx, goal).await == Some(true),
+                            Some(goal) => {
+                                goals::check_fresh(ctx, goal, Some(since)).await == Some(true)
+                            }
                             None => true,
                         };
                         if held {
@@ -544,10 +550,12 @@ async fn session(
                                 end = Some(End::Next);
                             }
                             let goal = work.goal.expect("a task with no goal is held");
-                            let now = facts::read(ctx, &goals::needs(&ctx.w, goal), false).await;
+                            let now = goals::known(ctx, Some(goal)).await;
+                            let reads = goals::needs(&ctx.w, goal);
                             let shown: Vec<String> = now
                                 .iter()
-                                .map(|(k, v)| format!("{k}: {}", v.show()))
+                                .filter(|(k, _)| reads.contains(*k))
+                                .map(|(k, v)| format!("{k}: {}", v.text))
                                 .collect();
                             format!(
                                 "The goal still does not hold. Facts now:\n{}",
@@ -560,7 +568,7 @@ async fn session(
                             .as_str()
                             .unwrap_or("the coder needs the person")
                             .to_string();
-                        let shown = facts::shown(&values);
+                        let shown = observe::shown(&values);
                         ctx.ask(AskReq {
                             goal: work.goal_name(),
                             action: Some(work.action.to_string()),
@@ -686,7 +694,7 @@ async fn judge(
     let short = |facts: &BTreeMap<String, String>| -> BTreeMap<String, String> {
         facts.iter().map(|(k, v)| (k.clone(), head(v, 300))).collect()
     };
-    let now = facts::shown(&facts::known(ctx, &facts::all(&ctx.w)).await);
+    let now = observe::shown(&goals::known(ctx, work.goal).await);
     let from = tried.len().saturating_sub(JUDGE_EVERY);
     let last: Vec<Value> = tried[from..]
         .iter()
@@ -935,14 +943,14 @@ async fn gate_and_run(
         if rules_ok.iter().any(|ok| *ok == rule) {
             continue;
         }
-        let values = facts::known(ctx, &facts::all(&ctx.w)).await;
+        let values = goals::known(ctx, work.goal).await;
         ctx.ask(AskReq {
             goal: work.goal_name(),
             action: Some(work.action.to_string()),
             rule: Some(rule.clone()),
             signed: false,
             card: card::command(ctx, work.goal, work.action, command, purpose, &rule),
-            facts: facts::shown(&values),
+            facts: observe::shown(&values),
         });
         return Err(());
     }

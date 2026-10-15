@@ -21,8 +21,8 @@ use crate::weave::{self, Condition, Weave, expr, graph};
 
 use super::asks::{self, AskReq};
 use super::card;
-use super::facts::{self, Follower, Values};
-use super::goals::{self, Scope};
+use super::goals::{self, Scope, Verdict};
+use super::observe::{self, Observer, Values};
 use super::journal::Journal;
 use super::repair::{self, Forced, Job, Outcome, Repair, TaskJob};
 use super::state::{Event, GoalState, Kind};
@@ -34,32 +34,21 @@ const LINE_EVERY: Duration = Duration::from_secs(3600);
 const QUIET: Duration = Duration::from_secs(600);
 /// After `no`, a goal waits at least this long before the loop acts on it again.
 const NO_PARK: Duration = Duration::from_secs(3600);
-const CODE_EVERY: Duration = Duration::from_secs(60);
-const QUOTED_EVERY: Duration = Duration::from_secs(300);
+/// A decider's `wait` leaves a goal alone until its next check, at least this long.
+const MIN_WAIT: Duration = Duration::from_secs(60);
 /// After a first failed check, the goal is checked again this soon, at most its EVERY.
 const RECHECK: Duration = Duration::from_secs(30);
-
-fn every(g: &weave::Goal) -> Duration {
-    g.every.unwrap_or(match g.cond {
-        Condition::Code(_) => CODE_EVERY,
-        Condition::Quoted(_) => QUOTED_EVERY,
-    })
-}
 
 /// How long a `no` leaves a goal alone: until its next check, at least `NO_PARK`; the
 /// box's own asks, `NO_PARK`.
 pub(crate) fn no_park(g: Option<&weave::Goal>) -> Duration {
-    g.map_or(NO_PARK, |g| every(g).max(NO_PARK))
+    g.map_or(NO_PARK, |g| g.every().max(NO_PARK))
 }
 
-/// How soon a goal's first failed check is checked again: a goal that reads `PREV()`
-/// compares over its whole EVERY, so it waits that long.
+/// How soon a goal's first failed check is checked again. The window is time, so the
+/// re-check still reads the lines the first check read.
 fn recheck(g: &weave::Goal) -> Duration {
-    let mut prev = false;
-    if let Condition::Code(e) = &g.cond {
-        e.walk(&mut |n| prev |= matches!(n, weave::Expr::Prev(_)));
-    }
-    if prev { every(g) } else { RECHECK.min(every(g)) }
+    RECHECK.min(g.every())
 }
 
 /// What the daemon hands a service's loop; `by` says who asked. An answer is in the
@@ -112,9 +101,8 @@ pub(crate) struct Ctx {
     pub misfit: Vec<String>,
     journal: Arc<Mutex<Journal>>,
     learned: Mutex<Learned>,
-    pub follow: Mutex<BTreeMap<String, Follower>>,
-    /// Per goal, the facts its last check read: `PREV()`.
-    prev: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
+    /// The rings of the facts' reads and lines.
+    pub observe: Observer,
     pub learning: tokio::sync::Mutex<()>,
     pub learn_wait: Mutex<BTreeMap<String, Instant>>,
     /// The person whose job runs now (`do`, a task, an answer's re-run): the asks it
@@ -202,7 +190,15 @@ impl Ctx {
             }
             Err(e) => (None, vec![format!("cannot read this box: {e:#}")]),
         };
-        let learned = svc::learned(name).unwrap_or_default();
+        // A learned fact command whose fact left the weave, or whose type or text changed,
+        // is dropped.
+        let mut learned = svc::learned(name).unwrap_or_default();
+        if learned::prune(&mut learned, &w, &spec.args) {
+            learned::save(name, &learned);
+        }
+        let observe = Observer::new(goals::keep(&w));
+        // State lives in the journal: the rings start as its check events left them.
+        observe.rebuild(&w, &super::journal::events(name));
         Ok(Ctx {
             shared,
             name: name.to_string(),
@@ -216,8 +212,7 @@ impl Ctx {
             misfit,
             journal,
             learned: Mutex::new(learned),
-            follow: Mutex::new(BTreeMap::new()),
-            prev: Mutex::new(BTreeMap::new()),
+            observe,
             learning: tokio::sync::Mutex::new(()),
             learn_wait: Mutex::new(BTreeMap::new()),
             by: Mutex::new(None),
@@ -236,10 +231,6 @@ impl Ctx {
 
     pub fn learned(&self) -> MutexGuard<'_, Learned> {
         lock(&self.learned)
-    }
-
-    pub fn prev_of(&self, goal: &str) -> Option<BTreeMap<String, String>> {
-        lock(&self.prev).get(goal).cloned()
     }
 
     pub fn redact(&self, text: &str) -> String {
@@ -294,8 +285,8 @@ impl Ctx {
     }
 }
 
-/// When the loop checks a goal and what it said about it last; where the goal stands is
-/// the journal's fold.
+/// When the loop checks a goal and what it said about it last; where the goal stands,
+/// and how long it is left alone, is the journal's fold.
 #[derive(Default)]
 struct Track {
     /// `None`: checked at once, as a goal blocked by one it comes AFTER is once they hold.
@@ -304,7 +295,6 @@ struct Track {
     line: Option<(Option<bool>, BTreeMap<String, String>, Instant)>,
     warned: bool,
     recovered: Option<Instant>,
-    wait_until: Option<Instant>,
     /// When a goal whose check failed once is checked again.
     again: Option<Instant>,
 }
@@ -413,7 +403,7 @@ impl Loop {
                     g.after.iter().all(|a| st.clears(a))
                         && (t.again.is_some_and(|at| now >= at)
                             || t.last_check
-                                .is_none_or(|at| now.duration_since(at) >= every(g)))
+                                .is_none_or(|at| now.duration_since(at) >= g.every()))
                 })
                 .map(|g| g.name.as_str())
                 .collect()
@@ -423,8 +413,9 @@ impl Loop {
             for g in order.iter().filter(|g| due.contains(g.name.as_str())) {
                 needed.extend(goals::needs(w, g));
             }
+            // One snapshot per tick: every goal checked in it reads the rings up to it.
             let read_start = Instant::now();
-            let values = facts::read(&ctx, &needed, true).await;
+            let snap = observe::read(&ctx, &needed, true).await;
             let read_ms = super::ms(read_start);
             let mut quoted = Vec::new();
             for g in &order {
@@ -450,39 +441,37 @@ impl Loop {
                     .get_mut(&g.name)
                     .expect("a track per goal")
                     .last_check = Some(now);
-                let prev = ctx.prev_of(&g.name);
-                let scope = Scope {
-                    ctx: &ctx,
-                    facts: &values,
-                    prev: prev.as_ref(),
-                };
-                // A fact this box cannot read yet (a quoted fact not learned) leaves the
-                // goal unknown: a repair cannot make an unread fact hold.
-                let unread = goals::needs(w, g)
-                    .into_iter()
-                    .any(|n| !values.contains_key(&n));
-                if unread {
-                    self.record(g, None, &values, read_ms);
-                    continue;
-                }
-                if g.when.as_ref().is_some_and(|e| !expr::holds(e, &scope)) {
+                let span = goals::span(g, snap);
+                let scope = Scope { ctx: &ctx, span };
+                // An IF that cannot be judged yet leaves the goal on, as `plan` shows it.
+                if g.when.as_ref().and_then(|e| expr::holds(e, &scope)) == Some(false) {
                     self.off(&g.name, "its IF is false".into(), false);
                     continue;
                 }
+                let values = ctx.observe.values(&goals::needs(w, g), span);
                 match &g.cond {
+                    // A fact with no value (a quoted fact not learned, a broken read) leaves
+                    // the goal unknown, unless the rest of the condition decides it.
                     Condition::Code(e) => {
-                        let ok = expr::holds(e, &scope);
-                        self.record(g, Some(ok), &values, read_ms);
+                        let v = Verdict {
+                            ok: expr::holds(e, &scope),
+                            p: None,
+                        };
+                        let v = self.unseen(g, span, v);
+                        self.record(g, v, values, span, read_ms);
                     }
-                    Condition::Quoted(_) => quoted.push(*g),
+                    Condition::Quoted(_) => quoted.push((*g, span, values)),
                 }
             }
             if !quoted.is_empty() {
                 let decide_start = Instant::now();
-                let results = goals::quoted(&ctx, &quoted, &values).await;
+                let asked: Vec<_> = quoted.iter().map(|(g, s, _)| (*g, *s)).collect();
+                let results = goals::quoted(&ctx, &asked).await;
                 let took = read_ms.zip(super::ms(decide_start)).map(|(r, d)| r + d);
-                for g in quoted {
-                    self.record(g, results.get(&g.name).copied().flatten(), &values, took);
+                for (g, span, values) in quoted {
+                    let v = results.get(&g.name).copied().unwrap_or(Verdict { ok: None, p: None });
+                    let v = self.unseen(g, span, v);
+                    self.record(g, v, values, span, took);
                 }
             }
         }
@@ -501,6 +490,18 @@ impl Loop {
             );
         }
         self.start_repair();
+    }
+
+    /// A windowed goal that holds over a window the daemon has not watched whole (it
+    /// started within it) is unknown: what it did not see may have been there. A failure
+    /// stands: what it saw was there.
+    fn unseen(&self, g: &weave::Goal, span: observe::Span, v: Verdict) -> Verdict {
+        let ctx = &self.ctx;
+        let partial = ctx.w.windowed(g) && !ctx.observe.covers(&goals::needs(&ctx.w, g), span.from);
+        if v.ok == Some(true) && partial {
+            return Verdict { ok: None, ..v };
+        }
+        v
     }
 
     /// A goal that does not apply now, for `why`; `blocked` when a goal it comes AFTER is
@@ -540,21 +541,26 @@ impl Loop {
         }
     }
 
-    /// A check's result: an event when it changes the goal's state or says something new,
-    /// messages on change. `ms`: how long its facts (and a quoted goal's decider) took.
-    fn record(&mut self, g: &weave::Goal, ok: Option<bool>, values: &Values, ms: Option<u64>) {
+    /// A check's result: an event when it changes the goal's state, says something new,
+    /// holds lines no event holds yet, or the decider judged it (its `p`); messages on
+    /// change. `values`: what it read over `span`, the ring's window. `ms`: how long its
+    /// facts (and a quoted goal's decider) took.
+    fn record(
+        &mut self,
+        g: &weave::Goal,
+        v: Verdict,
+        values: Values,
+        span: observe::Span,
+        ms: Option<u64>,
+    ) {
         let ctx = self.ctx.clone();
-        let read: Values = goals::needs(&ctx.w, g)
-            .into_iter()
-            .filter_map(|n| values.get(&n).map(|v| (n, v.clone())))
+        let ok = v.ok;
+        let shown = observe::shown(&values);
+        let kept: BTreeMap<String, String> = shown
+            .iter()
+            .filter(|(n, _)| ctx.w.fact(n).is_some_and(|f| f.ty != weave::FactType::Lines))
+            .map(|(n, s)| (n.clone(), s.clone()))
             .collect();
-        let shown = facts::shown(&read);
-        lock(&ctx.prev).insert(
-            g.name.clone(),
-            read.iter()
-                .map(|(k, v)| (k.clone(), v.text.clone()))
-                .collect(),
-        );
         let t = self.tracks.get_mut(&g.name).expect("a track per goal");
         let (was, state) = {
             let mut j = ctx.journal();
@@ -563,30 +569,32 @@ impl Loop {
             let says_new = match &t.line {
                 None => true,
                 Some((said, facts, at)) => {
-                    *said != ok || *facts != shown || at.elapsed() >= LINE_EVERY
+                    *said != ok || *facts != kept || at.elapsed() >= LINE_EVERY
                 }
             };
-            if changes || says_new {
+            let lines = ctx.observe.new_lines(&ctx.w, &goals::needs(&ctx.w, g), span.to);
+            if changes || says_new || v.p.is_some() || !lines.is_empty() {
                 j.add(Event {
                     ms,
                     ..Kind::Check {
                         goal: g.name.clone(),
                         ok,
-                        facts: shown.clone(),
+                        facts: kept.clone(),
+                        lines,
+                        p: v.p,
                     }
                     .into()
                 });
-                t.line = Some((ok, shown, Instant::now()));
+                t.line = Some((ok, kept, Instant::now()));
             }
             let state = j.state().goal(&g.name).cloned().unwrap_or(GoalState::Unknown);
             (was, state)
         };
         // One failed check is not yet a failing goal: no warning, repair or ask until a
-        // second check fails too, soon after.
+        // second check fails too, soon after. It reads the same window, moved on by then.
         t.again = (ok == Some(false) && matches!(state, GoalState::Suspect { .. }))
             .then(|| Instant::now() + recheck(g));
         if state.holds() && !was.holds() {
-            t.wait_until = None;
             if was.fails() {
                 t.recovered = Some(Instant::now());
             }
@@ -597,7 +605,7 @@ impl Loop {
                     Some(g.name.clone()),
                     format!("True again: {}", card::subject(&ctx, g)),
                     format!("Goal `{}` holds again.", g.name),
-                    facts::shown(&read),
+                    shown,
                 );
             }
         }
@@ -635,15 +643,9 @@ impl Loop {
     /// `wait`.
     fn parked(&self) -> (BTreeSet<String>, bool) {
         let w = &self.ctx.w;
-        let (mut goals, box_parked) = self.ctx.journal().state().parked(super::epoch(), |g| {
+        self.ctx.journal().state().parked(super::epoch(), |g| {
             no_park(g.and_then(|g| w.goal(g))).as_secs() as i64
-        });
-        for (name, t) in &self.tracks {
-            if t.wait_until.is_some_and(|u| u > Instant::now()) {
-                goals.insert(name.clone());
-            }
-        }
-        (goals, box_parked)
+        })
     }
 
     fn start_repair(&mut self) {
@@ -739,8 +741,10 @@ impl Loop {
             return;
         }
         t.warned = true;
-        let facts = t.line.as_ref().map(|l| l.1.clone()).unwrap_or_default();
         let Some(g) = ctx.w.goal(goal) else { return };
+        // The window as the ring holds it now, LINES included: not one check line.
+        let span = goals::span(g, observe::Snapshot::now());
+        let facts = observe::shown(&ctx.observe.values(&goals::needs(&ctx.w, g), span));
         let mut lines = card::goal_lines(&ctx, g, &facts);
         lines.push("Subweave is fixing it, and asks you only if it needs you.".into());
         ctx.message(
@@ -757,19 +761,15 @@ impl Loop {
         self.task = None;
         match r {
             Ok((goal, outcome)) => {
-                if let Some(t) = goal.as_ref().and_then(|g| self.tracks.get_mut(g)) {
-                    // Check again at once rather than at the next EVERY.
-                    t.last_check = None;
-                    if let Outcome::Wait = outcome {
-                        let every = self
-                            .ctx
-                            .w
-                            .goal(goal.as_deref().unwrap_or_default())
-                            .and_then(|g| g.every)
-                            .unwrap_or(CODE_EVERY)
-                            .max(CODE_EVERY);
-                        t.wait_until = Some(Instant::now() + every);
-                    }
+                let Some(goal) = goal.filter(|g| self.tracks.contains_key(g)) else {
+                    return;
+                };
+                // Check again at once rather than at the next EVERY.
+                self.tracks.get_mut(&goal).expect("a track per goal").last_check = None;
+                if let Outcome::Wait = outcome {
+                    let every = self.ctx.w.goal(&goal).map_or(MIN_WAIT, |g| g.every().max(MIN_WAIT));
+                    let until = super::rfc3339(observe::now_ms() + every.as_millis() as i64);
+                    self.ctx.journal().add(Kind::Wait { goal, until });
                 }
             }
             Err(e) => self.ctx.journal().note(None, format!("repair ended: {e}")),

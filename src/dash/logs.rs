@@ -1,4 +1,4 @@
-//! Log streams: each FOLLOW fact (its recent values from `check` lines, then the live
+//! Log streams: each LINES fact (its recent lines from `check` lines, then the live
 //! lines of its command, run here with the service's environment and redaction) and the
 //! box's systemd journal. A stream's process ends when its client leaves; a session
 //! holds at most 8.
@@ -22,7 +22,7 @@ use super::{ApiError, App, Svc, auth};
 use crate::daemon::state::Kind;
 use crate::daemon::{bash, command_env, kill_group, now, redact};
 use crate::service;
-use crate::weave::{FactSource, Weave};
+use crate::weave::{FactSource, FactType, Weave};
 use crate::paths;
 
 const BOX: &str = "box";
@@ -40,7 +40,7 @@ pub(crate) async fn list(Svc(s): Svc) -> Result<Json<Value>, ApiError> {
     let mut out: Vec<Value> = w
         .facts
         .iter()
-        .filter(|f| f.follow)
+        .filter(|f| f.ty == FactType::Lines)
         .map(|f| {
             let title = match &f.source {
                 FactSource::Command(c) | FactSource::Quoted(c) => c.clone(),
@@ -208,8 +208,8 @@ pub(crate) async fn stream(
         cmd.spawn().map(|c| (c, true))
     } else {
         let w = weave_of(&s)?;
-        let Some(fact) = w.fact(&name).filter(|f| f.follow) else {
-            return Err(ApiError::not_found(format!("{s} has no FOLLOW fact {name}")));
+        let Some(fact) = w.fact(&name).filter(|f| f.ty == FactType::Lines) else {
+            return Err(ApiError::not_found(format!("{s} has no LINES fact {name}")));
         };
         let command = match &fact.source {
             FactSource::Command(c) => c.clone(),
@@ -223,17 +223,15 @@ pub(crate) async fn stream(
                 })?,
         };
         let lines = crate::daemon::journal::events(&s);
+        // Each check event holds the lines new since the one before: each line once.
         let mut recent: Vec<(String, String)> = Vec::new();
         for l in &lines {
-            let Kind::Check { facts, .. } = &l.kind else {
+            let Kind::Check { lines: new, .. } = &l.kind else {
                 continue;
             };
-            if let Some(v) = facts.get(&name) {
-                recent.extend(
-                    v.lines()
-                        .filter(|x| !x.trim().is_empty())
-                        .map(|x| (l.t.clone(), x.to_string())),
-                );
+            for x in new.get(&name).into_iter().flatten() {
+                let t = crate::daemon::rfc3339(x.t);
+                recent.push((t, x.text.clone()));
             }
         }
         let skip = recent.len().saturating_sub(BACKLOG);

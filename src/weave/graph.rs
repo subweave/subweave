@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::ast::{Goal, Weave};
+use super::ast::{Goal, Weave, show_duration};
 use super::expr::{self, Env};
 
 /// Goals in check order: a goal after every goal it names in AFTER, file order within
@@ -25,12 +25,13 @@ pub fn order(w: &Weave) -> Vec<&Goal> {
     }
 }
 
-/// Goals that are off: their IF is false, or a goal they come AFTER is off.
+/// Goals that are off: their IF is false, or a goal they come AFTER is off. An IF that
+/// cannot be judged yet leaves the goal on.
 pub fn off(w: &Weave, env: &dyn Env) -> BTreeSet<String> {
     let mut off: BTreeSet<String> = w
         .goals
         .iter()
-        .filter(|g| g.when.as_ref().is_some_and(|e| !expr::holds(e, env)))
+        .filter(|g| g.when.as_ref().is_some_and(|e| expr::holds(e, env) == Some(false)))
         .map(|g| g.name.clone())
         .collect();
     loop {
@@ -80,6 +81,9 @@ pub fn tree(w: &Weave, off: &BTreeSet<String>) -> String {
         let mut tags = Vec::new();
         if g.after.len() > 1 {
             tags.push(format!("also after {}", g.after[1..].join(", ")));
+        }
+        if let Some(o) = g.over {
+            tags.push(format!("OVER {}", show_duration(o)));
         }
         if let Some(e) = &g.when {
             tags.push(format!("IF {e}"));
