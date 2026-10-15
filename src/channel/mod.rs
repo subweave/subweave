@@ -1,7 +1,9 @@
 //! Where the daemon's messages go: Steery, Telegram, Slack, email, a webhook, a heartbeat.
-//! Channels live in `config()/channels.json` (mode 0600). Steery and Telegram answer asks.
+//! Channels live in `config()/channels.json` (mode 0600). The answering channels are the
+//! escalation targets: an ask the ladder could not settle goes to them.
 
 pub mod email;
+pub mod escalation;
 pub mod heartbeat;
 pub mod slack;
 pub mod steery;
@@ -125,7 +127,8 @@ impl ChannelKind {
         }
     }
 
-    /// Whether the channel brings answers back (`poll`).
+    /// Whether the channel is an escalation target: it settles asks, by `poll` or
+    /// through the inbox.
     pub fn answers(self) -> bool {
         matches!(self, ChannelKind::Steery | ChannelKind::Telegram)
     }
@@ -163,15 +166,19 @@ impl FromStr for ChannelKind {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Channel {
     pub name: String,
-    pub kind: ChannelKind,
+    #[serde(flatten)]
+    pub via: Via,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
     pub level: Kind,
-    /// Steery signers whose signatures are accepted.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pins: Vec<Pin>,
+}
+
+impl Channel {
+    pub fn kind(&self) -> ChannelKind {
+        self.via.kind()
+    }
 }
 
 // The secret never reaches a log line through `{:?}`.
@@ -179,12 +186,69 @@ impl fmt::Debug for Channel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Channel")
             .field("name", &self.name)
-            .field("kind", &self.kind)
+            .field("via", &self.via)
             .field("target", &self.target)
             .field("secret", &self.secret.as_ref().map(|_| "[secret]"))
             .field("level", &self.level)
-            .field("pins", &self.pins)
             .finish()
+    }
+}
+
+/// A channel's kind, with what only that kind keeps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Via {
+    Steery {
+        escalate: Escalate,
+        /// Signers whose signatures are accepted.
+        pins: Vec<Pin>,
+    },
+    Telegram,
+    Slack,
+    Email,
+    Webhook,
+    Heartbeat,
+}
+
+impl Via {
+    pub fn kind(&self) -> ChannelKind {
+        match self {
+            Via::Steery { .. } => ChannelKind::Steery,
+            Via::Telegram => ChannelKind::Telegram,
+            Via::Slack => ChannelKind::Slack,
+            Via::Email => ChannelKind::Email,
+            Via::Webhook => ChannelKind::Webhook,
+            Via::Heartbeat => ChannelKind::Heartbeat,
+        }
+    }
+}
+
+/// How a Steery channel escalates an ask.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Escalate {
+    /// A throw to the service's agent conversation, connected once by the person.
+    /// `reach`: how that agent runs `subweave` on this box, `ssh <reach> sudo -n subweave`.
+    Session { reach: String },
+    /// A card with the answers as buttons, signed by the person.
+    Card,
+}
+
+/// `--escalate`: the mode, before its `--reach` is joined to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Session,
+    Card,
+}
+
+impl FromStr for Mode {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "session" => Ok(Mode::Session),
+            "card" => Ok(Mode::Card),
+            _ => bail!("--escalate is session or card, not {s:?}"),
+        }
     }
 }
 
@@ -208,7 +272,16 @@ pub struct Sent(pub serde_json::Value);
 pub struct Answer {
     pub n: u64,
     pub word: String,
+    /// `<channel kind>:<who>`: `steery:Aram's iPhone`, `telegram:@aram`.
     pub by: String,
+}
+
+/// What one `poll` round brought: answers, and the asks this channel stops watching
+/// with no answer to come on it.
+#[derive(Debug, Default)]
+pub struct Polled {
+    pub answers: Vec<Answer>,
+    pub done: Vec<u64>,
 }
 
 /// Send `msg` if the channel's level lets it through. An ask always goes out: to an
@@ -216,7 +289,7 @@ pub struct Answer {
 /// command. A heartbeat pings on every message, throttled to one a minute.
 /// `Some(Sent)` only for an ask on an answering channel.
 pub async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
-    if ch.kind != ChannelKind::Heartbeat
+    if ch.kind() != ChannelKind::Heartbeat
         && msg.kind != Kind::Ask
         && msg.kind.rank() < ch.level.rank()
     {
@@ -226,7 +299,7 @@ pub async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
 }
 
 async fn deliver(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
-    let sent = match ch.kind {
+    let sent = match ch.kind() {
         ChannelKind::Steery => steery::send(ch, msg).await,
         ChannelKind::Telegram => telegram::send(ch, msg).await,
         ChannelKind::Slack => slack::send(ch, msg).await.map(|()| None),
@@ -237,21 +310,30 @@ async fn deliver(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
     sent.with_context(|| format!("channel {}", ch.name))
 }
 
-/// The answers to `open` asks that arrived, returning within about a minute.
-pub async fn poll(ch: &Channel, open: &[(u64, Sent)]) -> Result<Vec<Answer>> {
-    let answers = match ch.kind {
+/// The answers to `open` asks that arrived, returning within about a minute. Each
+/// answer's `by` names the channel's kind first.
+pub async fn poll(ch: &Channel, open: &[(u64, Sent)]) -> Result<Polled> {
+    let kind = ch.kind();
+    let polled = match kind {
         ChannelKind::Steery => steery::poll(ch, open).await,
-        ChannelKind::Telegram => telegram::poll(ch, open).await,
+        ChannelKind::Telegram => telegram::poll(ch, open).await.map(|answers| Polled {
+            answers,
+            done: Vec::new(),
+        }),
         other => bail!("{other} channels do not answer"),
     };
-    answers.with_context(|| format!("channel {}", ch.name))
+    let mut polled = polled.with_context(|| format!("channel {}", ch.name))?;
+    for a in &mut polled.answers {
+        a.by = format!("{kind}:{}", a.by);
+    }
+    Ok(polled)
 }
 
 /// An ask is closed before anyone answered it: a channel that showed buttons takes
 /// them away. Steery withdraws a request its raiser stops polling; the rest never had
 /// buttons.
 pub async fn close(ch: &Channel, sent: &Sent) -> Result<()> {
-    match ch.kind {
+    match ch.kind() {
         ChannelKind::Telegram => telegram::close(ch, sent)
             .await
             .with_context(|| format!("channel {}", ch.name)),
@@ -260,12 +342,15 @@ pub async fn close(ch: &Channel, sent: &Sent) -> Result<()> {
 }
 
 /// Add a channel and save it. Steery reads the workspace and its signers with the key,
-/// prints them, and pins the phone and mac signers.
+/// prints them, and pins the phone and mac signers. `mode` and `reach` are Steery's:
+/// `session`, the default, needs `reach`.
 pub async fn add(
     kind: ChannelKind,
     target: Option<String>,
     level: Option<Kind>,
     secret: Option<String>,
+    mode: Option<Mode>,
+    reach: Option<String>,
 ) -> Result<Channel> {
     let target = target
         .map(|t| t.trim().to_owned())
@@ -273,6 +358,12 @@ pub async fn add(
     let secret = secret
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty());
+    let reach = reach
+        .map(|r| r.trim().to_owned())
+        .filter(|r| !r.is_empty());
+    if kind != ChannelKind::Steery && (mode.is_some() || reach.is_some()) {
+        bail!("--escalate and --reach are for steery channels");
+    }
     let need_target = |what: &str| -> Result<()> {
         if target.is_none() {
             bail!("{kind} needs {what}");
@@ -291,21 +382,27 @@ pub async fn add(
         }
         Ok(())
     };
-    let mut pins = Vec::new();
-    let target = match kind {
+    let (via, target) = match kind {
         ChannelKind::Steery => {
             if target.is_some() {
                 bail!("steery takes no target: the workspace comes from the key");
             }
+            let escalate = match (mode.unwrap_or(Mode::Session), reach) {
+                (Mode::Session, Some(reach)) => Escalate::Session { reach },
+                (Mode::Session, None) => bail!(
+                    "steery --escalate session needs --reach USER@HOST: how an agent elsewhere runs subweave on this box, as ssh USER@HOST sudo -n subweave"
+                ),
+                (Mode::Card, None) => Escalate::Card,
+                (Mode::Card, Some(_)) => bail!("--reach is for --escalate session"),
+            };
             need_secret("a Steery key")?;
-            let (workspace, pinned) = steery::enroll(secret.as_deref().unwrap_or_default()).await?;
-            pins = pinned;
-            Some(workspace)
+            let (workspace, pins) = steery::enroll(secret.as_deref().unwrap_or_default()).await?;
+            (Via::Steery { escalate, pins }, Some(workspace))
         }
         ChannelKind::Telegram => {
             need_target("the chat id")?;
             need_secret("the bot token")?;
-            target
+            (Via::Telegram, target)
         }
         ChannelKind::Slack => {
             let secret = secret.as_deref().unwrap_or_default();
@@ -319,18 +416,22 @@ pub async fn add(
                     need_url(secret)?;
                 }
             }
-            target
+            (Via::Slack, target)
         }
         ChannelKind::Email => {
             need_target("the address to send to")?;
             need_secret("an SMTP URL such as smtps://user:pass@host:465")?;
             email::check_url(secret.as_deref().unwrap_or_default())?;
-            target
+            (Via::Email, target)
         }
         ChannelKind::Webhook | ChannelKind::Heartbeat => {
             need_target("a URL")?;
             need_url(target.as_deref().unwrap_or_default())?;
-            target
+            let via = match kind {
+                ChannelKind::Webhook => Via::Webhook,
+                _ => Via::Heartbeat,
+            };
+            (via, target)
         }
     };
     let level = level.unwrap_or(match kind {
@@ -347,11 +448,10 @@ pub async fn add(
         .unwrap_or_default();
     let channel = Channel {
         name,
-        kind,
+        via,
         target,
         secret,
         level,
-        pins,
     };
     channels.push(channel.clone());
     save(&channels)?;
@@ -368,14 +468,24 @@ pub fn ls() -> Result<Vec<Channel>> {
     }
 }
 
+/// Removes by name over the file's raw entries, so an entry `ls` cannot read (one an
+/// older subweave wrote) can still go.
 pub fn rm(name: &str) -> Result<()> {
-    let mut channels = ls()?;
-    let before = channels.len();
-    channels.retain(|c| c.name != name);
-    if channels.len() == before {
+    let path = file();
+    let mut entries: Vec<serde_json::Value> = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .with_context(|| format!("{} is not valid", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+    };
+    let before = entries.len();
+    entries.retain(|c| c["name"] != name);
+    if entries.len() == before {
         bail!("no channel named {name}");
     }
-    save(&channels)
+    let mut bytes = serde_json::to_vec_pretty(&entries)?;
+    bytes.push(b'\n');
+    write_private(&path, &bytes)
 }
 
 /// Send an info message to the channel whatever its level.

@@ -583,7 +583,7 @@ fn heartbeat() {
         let host = hostname();
         for ch in channels
             .iter()
-            .filter(|c| c.kind == channel::ChannelKind::Heartbeat)
+            .filter(|c| c.kind() == channel::ChannelKind::Heartbeat)
         {
             let msg = Message {
                 kind: channel::Kind::Info,

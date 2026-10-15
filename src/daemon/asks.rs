@@ -289,7 +289,7 @@ pub(crate) async fn poll_loop(
         let channels: Vec<channel::Channel> = channel::ls()
             .unwrap_or_default()
             .into_iter()
-            .filter(|c| c.kind.answers())
+            .filter(|c| c.kind().answers())
             .collect();
         let mut set = JoinSet::new();
         {
@@ -317,9 +317,12 @@ pub(crate) async fn poll_loop(
         let mut failed = false;
         while let Some(r) = set.join_next().await {
             match r {
-                Ok((name, Ok(answers))) => {
-                    for a in answers {
+                Ok((name, Ok(polled))) => {
+                    for a in polled.answers {
                         let _ = tx.send((a, name.clone()));
+                    }
+                    if !polled.done.is_empty() {
+                        stop_watching(&shared, &name, &polled.done);
                     }
                 }
                 Ok((name, Err(e))) => {
@@ -336,4 +339,18 @@ pub(crate) async fn poll_loop(
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
+}
+
+/// Channel `name` has no more to do for asks `done`: no answer comes on it.
+fn stop_watching(shared: &Shared, name: &str, done: &[u64]) {
+    let mut sent = shared.sent.lock().unwrap_or_else(|e| e.into_inner());
+    for n in done {
+        if let Some(entry) = sent.get_mut(n) {
+            entry.sent.remove(name);
+            if entry.sent.is_empty() {
+                sent.remove(n);
+            }
+        }
+    }
+    save_sent(&sent);
 }

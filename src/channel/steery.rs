@@ -1,5 +1,7 @@
-//! Steery: an ask is a request with one `buttons` control named `answer`; the answer is
-//! accepted only with a valid signature from a pinned phone or mac signer.
+//! Steery. An ask goes as the channel's `escalate` says: in `session` mode a throw to the
+//! service's agent conversation, connected once by the person; in `card` mode a request
+//! with one `buttons` control named `answer`, whose answer is accepted only with a valid
+//! signature from a pinned phone or mac signer.
 //!
 //! The signed message (`steery.response.v3`) binds the request content and the answer:
 //! `content_sha256` is taken over what the server returned, after checking that title,
@@ -20,10 +22,16 @@ use sha2::{Digest as _, Sha256};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
-use super::{Answer, Channel, Kind, Message, Pin, Sent, client, http_json};
+use super::{
+    Answer, Channel, Escalate, Kind, Message, Pin, Polled, Sent, Via, client, escalation,
+    http_json, write_private,
+};
+use crate::paths;
 
 /// Read requests this long, so `poll` returns within about a minute.
 const WAIT_SECS: u64 = 50;
+/// A round that reads only connect throws, which return at once, takes this long.
+const WATCH_SECS: u64 = 5;
 const CONTROL: &str = "answer";
 /// The longest fact value a field shows.
 const FACT_VALUE: usize = 500;
@@ -139,7 +147,214 @@ fn view(msg: &Message) -> Value {
     Value::Array(view)
 }
 
+/// An ask in session mode goes to the service's agent conversation; everything else,
+/// and every ask in card mode, goes as a card.
 pub(super) async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
+    match (&ch.via, &msg.ask) {
+        (
+            Via::Steery {
+                escalate: Escalate::Session { reach },
+                ..
+            },
+            Some(_),
+        ) => session(ch, msg, reach).await,
+        _ => card(ch, msg).await,
+    }
+}
+
+/// `services/<name>/escalation.json`: the Steery conversation the service's
+/// escalations go to, stored when the person connected one.
+#[derive(Debug, Serialize, Deserialize)]
+struct Connected {
+    steery_session: String,
+    /// A throw to this session carried the skill whole.
+    #[serde(default)]
+    skill_sent: bool,
+}
+
+fn connected_file(service: &str) -> std::path::PathBuf {
+    paths::service(service).join("escalation.json")
+}
+
+fn connected(service: &str) -> Option<Connected> {
+    serde_json::from_slice(&std::fs::read(connected_file(service)).ok()?).ok()
+}
+
+fn save_connected(service: &str, c: &Connected) -> Result<()> {
+    write_private(&connected_file(service), &serde_json::to_vec_pretty(c)?)
+}
+
+fn forget_connected(service: &str) -> Result<()> {
+    match std::fs::remove_file(connected_file(service)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(anyhow!("remove {}: {e}", connected_file(service).display()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A connect throw and the request that asks the person where it goes, watched until
+/// their Go delivered it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Connect {
+    throw: String,
+    request: String,
+    workspace: String,
+    service: String,
+}
+
+/// What `Sent` holds for a Steery channel.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Open {
+    Connect(Connect),
+    Card(Raised),
+}
+
+/// The stored session takes the throw at once. With none, or one Steery no longer
+/// takes, a connect throw and a request let the person pick the conversation; when
+/// nobody's machine is online to take it, the ask goes as a card, so the person still
+/// hears.
+async fn session(ch: &Channel, msg: &Message, reach: &str) -> Result<Option<Sent>> {
+    let key = key(ch)?;
+    let workspace = workspace(ch)?;
+    if let Some(mut c) = connected(&msg.service) {
+        let throw = json!({
+            "id": Uuid::now_v7().to_string(),
+            "session": c.steery_session,
+            "act": "continue",
+            "body": escalation::body(msg, Some(reach), !c.skill_sent),
+        });
+        match create_throw(key, workspace, &throw).await? {
+            Some(_) => {
+                if !c.skill_sent {
+                    c.skill_sent = true;
+                    save_connected(&msg.service, &c)?;
+                }
+                return Ok(None);
+            }
+            None => forget_connected(&msg.service)?,
+        }
+    }
+    let id = Uuid::now_v7().to_string();
+    let throw = json!({"id": id, "body": escalation::body(msg, Some(reach), true)});
+    let thrown = create_throw(key, workspace, &throw)
+        .await?
+        .ok_or_else(|| anyhow!("steery throw: refused a throw that names no session"))?;
+    let aimed = thrown["status"] == "held"
+        && thrown["aims"].as_array().is_some_and(|a| !a.is_empty());
+    if !aimed {
+        return card(ch, msg).await;
+    }
+    let request = Uuid::now_v7().to_string();
+    let _: Value = http_json(
+        "steery raise",
+        client()
+            .post(format!("{}/v1/requests", base()))
+            .bearer_auth(key)
+            .header("Steery-Workspace", workspace)
+            .json(&json!({
+                "id": request,
+                "title": msg.title,
+                "body": connect_body(msg),
+                "throw": id,
+                "unjudged": true,
+            })),
+    )
+    .await?;
+    let connect = Connect {
+        throw: id,
+        request,
+        workspace: workspace.to_owned(),
+        service: msg.service.clone(),
+    };
+    Ok(Some(Sent(serde_json::to_value(connect)?)))
+}
+
+/// `POST /v1/throws`: the throw, or `None` on a 404 or 409, which say the named
+/// session is gone or cannot take words.
+async fn create_throw(key: &str, workspace: &str, throw: &Value) -> Result<Option<Value>> {
+    let resp = client()
+        .post(format!("{}/v1/throws", base()))
+        .bearer_auth(key)
+        .header("Steery-Workspace", workspace)
+        .json(throw)
+        .send()
+        .await
+        .map_err(|e| anyhow!("steery throw: {}", e.without_url()))?;
+    let status = resp.status();
+    if matches!(status.as_u16(), 404 | 409) {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let body: String = body.trim().chars().take(300).collect();
+        bail!("steery throw: HTTP {}: {body}", status.as_u16());
+    }
+    resp.json()
+        .await
+        .map(Some)
+        .map_err(|e| anyhow!("steery throw: {}", e.without_url()))
+}
+
+/// The connect request's body: the summary's lines, then what the person does.
+fn connect_body(msg: &Message) -> String {
+    let mut out = String::new();
+    for s in &msg.summary {
+        out.push_str(&format!("- {}\n", one_line(s)));
+    }
+    out.push_str(&format!(
+        "- **{}** on {} escalates: pick the agent conversation that takes it, then Go.",
+        msg.service, msg.host
+    ));
+    out
+}
+
+/// Reads a connect throw: `true` once it needs no more watching, because its newest aim
+/// delivered it and its session is now the service's, or because the person declined.
+async fn watch(key: &str, c: &Connect) -> Result<bool> {
+    let throw: Value = http_json(
+        "steery throw",
+        client()
+            .get(format!("{}/v1/throws/{}", base(), c.throw))
+            .bearer_auth(key)
+            .header("Steery-Workspace", &c.workspace),
+    )
+    .await?;
+    let delivered = throw["aims"]
+        .as_array()
+        .and_then(|a| a.last())
+        .filter(|aim| aim["status"] == "delivered")
+        .and_then(|aim| aim["session_id"].as_str());
+    if let Some(session) = delivered {
+        let stored = Connected {
+            steery_session: uuid(&json!(session), "session_id")?,
+            skill_sent: false,
+        };
+        save_connected(&c.service, &stored)?;
+        return Ok(true);
+    }
+    if throw["status"] == "withdrawn" {
+        return Ok(true);
+    }
+    // The read keeps the request open: one unread for 15 minutes is withdrawn.
+    let request: Value = http_json(
+        "steery read",
+        client()
+            .get(format!("{}/v1/requests/{}", base(), c.request))
+            .bearer_auth(key)
+            .header("Steery-Workspace", &c.workspace),
+    )
+    .await?;
+    Ok(match request["status"].as_str() {
+        Some("responded") => request["response"]["answer"]["values"]["go"] != "go",
+        Some("withdrawn") => request["reason"] != "session_did_not_poll",
+        _ => false,
+    })
+}
+
+/// A request with the answers as buttons; an info message gets one `seen` button.
+async fn card(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
     let key = key(ch)?;
     let workspace = workspace(ch)?;
     let id = Uuid::now_v7().to_string();
@@ -205,40 +420,58 @@ pub(super) async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
     Ok(Some(Sent(serde_json::to_value(raised)?)))
 }
 
-/// Long-poll every open request at once. Each read also keeps its request alive (a
-/// request the raiser has not read for 15 minutes is withdrawn) and reopens one
-/// withdrawn for not being read. An empty or failed round still takes about
-/// `WAIT_SECS`, so a caller looping on `poll` does not spin.
-pub(super) async fn poll(ch: &Channel, open: &[(u64, Sent)]) -> Result<Vec<Answer>> {
+/// What one read of an open ask came to.
+enum Read {
+    /// A card's verified answer, when it has one.
+    Card(Option<(String, String)>),
+    /// A connect throw: whether it needs no more watching.
+    Connect(bool),
+}
+
+/// Reads every open ask at once: long-polls each card and reads each connect throw.
+/// Each card read also keeps its request alive (a request the raiser has not read for
+/// 15 minutes is withdrawn) and reopens one withdrawn for not being read. A round with
+/// nothing to report still takes about `WAIT_SECS` (`WATCH_SECS` with no card), so a
+/// caller looping on `poll` does not spin.
+pub(super) async fn poll(ch: &Channel, open: &[(u64, Sent)]) -> Result<Polled> {
     let started = Instant::now();
     let key: Arc<str> = key(ch)?.into();
-    let pins: Arc<[Pin]> = ch.pins.clone().into();
+    let pins: Arc<[Pin]> = match &ch.via {
+        Via::Steery { pins, .. } => pins.clone().into(),
+        _ => bail!("not a Steery channel"),
+    };
     let mut reads = JoinSet::new();
     let mut errors = Vec::new();
+    let mut cards = false;
     for (n, sent) in open {
         let n = *n;
-        let raised: Raised = match serde_json::from_value(sent.0.clone()) {
-            Ok(r) => r,
-            Err(e) => {
-                errors.push(format!("ask #{n}: not a Steery request: {e}"));
-                continue;
-            }
-        };
         let key = key.clone();
-        let pins = pins.clone();
-        reads.spawn(async move { (n, read(&key, &raised, &pins).await) });
+        match serde_json::from_value::<Open>(sent.0.clone()) {
+            Ok(Open::Connect(c)) => {
+                reads.spawn(async move { (n, watch(&key, &c).await.map(Read::Connect)) });
+            }
+            Ok(Open::Card(raised)) => {
+                cards = true;
+                let pins = pins.clone();
+                reads.spawn(async move { (n, read(&key, &raised, &pins).await.map(Read::Card)) });
+            }
+            Err(e) => errors.push(format!("ask #{n}: not a Steery request: {e}")),
+        }
     }
-    let mut answers = Vec::new();
+    let mut polled = Polled::default();
     while let Some(joined) = reads.join_next().await {
         match joined {
-            Ok((n, Ok(Some((word, by))))) => answers.push(Answer { n, word, by }),
-            Ok((_, Ok(None))) => {}
+            Ok((n, Ok(Read::Card(Some((word, by)))))) => {
+                polled.answers.push(Answer { n, word, by });
+            }
+            Ok((n, Ok(Read::Connect(true)))) => polled.done.push(n),
+            Ok((_, Ok(_))) => {}
             Ok((n, Err(e))) => errors.push(format!("ask #{n}: {e:#}")),
             Err(e) => errors.push(e.to_string()),
         }
     }
-    if answers.is_empty() {
-        let floor = Duration::from_secs(WAIT_SECS);
+    if polled.answers.is_empty() && polled.done.is_empty() {
+        let floor = Duration::from_secs(if cards { WAIT_SECS } else { WATCH_SECS });
         if let Some(rest) = floor.checked_sub(started.elapsed()) {
             tokio::time::sleep(rest).await;
         }
@@ -246,7 +479,7 @@ pub(super) async fn poll(ch: &Channel, open: &[(u64, Sent)]) -> Result<Vec<Answe
             bail!("{}", errors.join("; "));
         }
     }
-    Ok(answers)
+    Ok(polled)
 }
 
 /// `Some((word, by))` once the request holds a verified answer.

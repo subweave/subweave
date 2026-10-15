@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 
 use super::term;
-use crate::channel::{self, ChannelKind, Kind};
+use crate::channel::{self, ChannelKind, Escalate, Kind, Mode, Via};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -27,6 +27,12 @@ enum Cmd {
         /// The lowest message it gets: ask, warning or info
         #[arg(long)]
         level: Option<Kind>,
+        /// steery: session (the default) escalates to an agent conversation; card asks the person on a signed card
+        #[arg(long, value_name = "MODE")]
+        escalate: Option<Mode>,
+        /// steery session: how that agent runs subweave on this box, as ssh USER@HOST sudo -n subweave
+        #[arg(long, value_name = "USER@HOST")]
+        reach: Option<String>,
     },
     /// List channels
     Ls,
@@ -42,15 +48,26 @@ pub async fn run(args: Args) -> Result<ExitCode> {
             kind,
             target,
             level,
+            escalate,
+            reach,
         } => {
             let secret = read_secret(kind)?;
-            let ch = channel::add(kind, target, level, secret).await?;
+            let ch = channel::add(kind, target, level, secret, escalate, reach).await?;
             let target = ch
                 .target
                 .as_deref()
                 .map(|t| format!(" {t}"))
                 .unwrap_or_default();
-            println!("added {}: {}{target}, level {}", ch.name, ch.kind, ch.level);
+            let how = match &ch.via {
+                Via::Steery { escalate, .. } => format!(", escalates {}", shown(escalate)),
+                _ => String::new(),
+            };
+            println!(
+                "added {}: {}{target}, level {}{how}",
+                ch.name,
+                ch.kind(),
+                ch.level
+            );
         }
         Cmd::Ls => {
             let list = channel::ls()?;
@@ -67,12 +84,13 @@ pub async fn run(args: Args) -> Result<ExitCode> {
                 let mut line = format!(
                     "{:nw$}  {:9}  {:tw$}  {}",
                     c.name,
-                    c.kind.as_str(),
+                    c.kind().as_str(),
                     c.target.as_deref().unwrap_or("-"),
                     c.level
                 );
-                if !c.pins.is_empty() {
-                    let pins: Vec<&str> = c.pins.iter().map(|p| p.name.as_str()).collect();
+                if let Via::Steery { escalate, pins } = &c.via {
+                    line.push_str(&format!("  escalates {}", shown(escalate)));
+                    let pins: Vec<&str> = pins.iter().map(|p| p.name.as_str()).collect();
                     line.push_str(&format!("  signers: {}", pins.join(", ")));
                 }
                 println!("{line}");
@@ -88,6 +106,14 @@ pub async fn run(args: Args) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `session via root@box-1`, `card`.
+fn shown(e: &Escalate) -> String {
+    match e {
+        Escalate::Session { reach } => format!("session via {reach}"),
+        Escalate::Card => "card".into(),
+    }
 }
 
 /// The kind's key or URL: asked without echo at a terminal, else all of stdin. A webhook's

@@ -1,0 +1,69 @@
+---
+name: subweave-escalation
+description: Use when a Subweave box escalates to you: settle the escalation, fix the weave so the next case does not escalate, and upstream generic fixes.
+---
+
+# Subweave escalation
+
+Each command below runs on the box. From another machine, put the box's reach in
+front of it: `ssh <user@host> sudo -n subweave …`. Over MCP, `subweave mcp` gives the
+same tools.
+
+## 1. What an escalation is
+
+- A box runs services as their Weavefile (the weave) says. When a goal fails, the
+  daemon climbs a ladder: code (learned steps, `RUN`), then the decider (a cheap
+  model), then the coder (a cheap model).
+- An escalation is the last step: the ladder did not settle the case, so it comes to
+  you. Its number is `n`; it takes one of its answer words.
+- Read what the ladder already tried before you act: `subweave log <service>`. Read
+  the running weave and its ARGs: `subweave weave <service>`.
+
+## 2. Settle it
+
+- Answer with one of its words: `subweave answer <n> <word> --note "why"`. The note
+  goes in the journal; write the reason in one sentence.
+- Or act, and let the goal hold again: `subweave task <service> "<what to do>"` or
+  `subweave do <service> <action>`. An escalation withdraws itself when its goal
+  holds.
+- Bring the person in through your own channel to them (in a Steery conversation: a
+  Steery request) when the case needs a product or risk decision, can lose data,
+  costs money, or needs a rule change.
+- An escalation marked signed is not yours to answer: only the person's signed answer
+  on Steery settles it.
+
+## 3. Fix the weave, not only the box
+
+- Ask: could the cheap ladder have settled this with a better FACT, GOAL wording,
+  ACTION or SKILL? If yes, change the local weave, so the next case does not
+  escalate.
+- Write the new Weavefile and propose it: `subweave weave <service> --change <file>
+  --why "<reason>"`, or the MCP tool `weave_change`. Never write the Weavefile on the
+  box in place.
+- The box checks the change first: it must parse, and the request check must pass
+  with the service's ARGs.
+- FACT, GOAL, ACTION and SKILL changes apply at once. Every other change (NEVER, ASK,
+  ARG, SECRET, MODEL, NEEDS, FROM, ABOUT) is a rule change: it waits for the
+  person's signed answer. Propose it; do not insist.
+- Write the general rule, not the incident. Leave out hostnames, versions and
+  one-off strings unless the weave's job needs them.
+
+## 4. Upstream generic fixes
+
+- `subweave weave <service>` shows where the weave came from. Library weaves live in
+  `github.com/subweave/library`.
+- When the local change worked and the fix is generic, open a pull request there:
+  fork, branch, `gh pr create`. One pull request per fix. Never push to someone's
+  default branch.
+- Redact everything personal or revealing: hostnames, IP addresses, account, company
+  and product names, paths that reveal them, keys, chain or customer data, internal
+  URLs.
+- Describe the evidence in general words: "a healthy mainnet node logs X every few
+  minutes".
+
+## 5. Never
+
+- Never weaken a NEVER rule.
+- Never read or print SECRET values.
+- Never delete data the weave protects.
+- Never answer a signed escalation.
