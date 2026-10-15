@@ -96,7 +96,7 @@ fn names(w: &Weave, problems: &mut Vec<Problem>) {
 
 fn references(w: &Weave, problems: &mut Vec<Problem>) {
     for g in &w.goals {
-        for a in &g.after {
+        for a in g.after.iter().filter_map(|a| a.local()) {
             if w.goal(a).is_none() {
                 problems.push(Problem::new(g.line, format!("AFTER {a}: no GOAL {a}")));
             }
@@ -147,8 +147,8 @@ fn cycles(w: &Weave, problems: &mut Vec<Problem>) {
     ) {
         marks[i] = Mark::Open;
         stack.push(i);
-        for a in &w.goals[i].after {
-            let Some(j) = w.goals.iter().position(|g| &g.name == a) else {
+        for a in w.goals[i].after.iter().filter_map(|a| a.local()) {
+            let Some(j) = w.goals.iter().position(|g| g.name == a) else {
                 continue;
             };
             match marks[j] {
@@ -214,15 +214,9 @@ fn args(w: &Weave, problems: &mut Vec<Problem>) {
     }
 }
 
-/// Every code expression is typed: units, versions and LINES are checked here, before
-/// anything runs. A goal's condition and IF may read its window; nothing else may.
-fn expressions(w: &Weave, problems: &mut Vec<Problem>) {
-    let words: BTreeSet<&str> = w.args.iter().map(|a| a.name.as_str()).chain(w.slots()).collect();
-    let typer = |windows| Typer {
-        w,
-        words: &words,
-        windows,
-    };
+/// Every code expression with its line, and whether it may read a goal's window: a
+/// goal's condition and IF may; nothing else may.
+pub(super) fn conditions(w: &Weave) -> Vec<(u32, &Expr, bool)> {
     let mut conds: Vec<(u32, &Expr, bool)> = Vec::new();
     for s in &w.secrets {
         conds.extend(s.cond.iter().map(|e| (s.line, e, false)));
@@ -232,16 +226,6 @@ fn expressions(w: &Weave, problems: &mut Vec<Problem>) {
             conds.push((g.line, e, true));
         }
         conds.extend(g.when.iter().map(|e| (g.line, e, true)));
-        if g.over.is_some() && !w.windowed(g) {
-            problems.push(Problem::new(
-                g.line,
-                format!(
-                    "GOAL {}: OVER needs a window to judge: a LINES fact, or MIN, MAX, AVG, \
-                     DELTA or COUNT",
-                    g.name
-                ),
-            ));
-        }
     }
     for a in &w.actions {
         conds.extend(a.when_if.iter().map(|e| (a.line, e, false)));
@@ -256,8 +240,52 @@ fn expressions(w: &Weave, problems: &mut Vec<Problem>) {
             _ => {}
         }
     }
-    for (line, e, windows) in conds {
-        if let Err(msg) = typer(windows).cond(e) {
+    conds
+}
+
+/// Every code expression is typed: units, versions and LINES are checked here, before
+/// anything runs. `<service>:<fact>` takes any type here; `others` checks it.
+fn expressions(w: &Weave, problems: &mut Vec<Problem>) {
+    for g in &w.goals {
+        if g.over.is_some() && !w.windowed(g) {
+            problems.push(Problem::new(
+                g.line,
+                format!(
+                    "GOAL {}: OVER needs a window to judge: a LINES fact, or MIN, MAX, AVG, \
+                     DELTA or COUNT",
+                    g.name
+                ),
+            ));
+        }
+    }
+    types(w, None, problems);
+}
+
+/// The expressions that read another service, typed with the weaves of the other
+/// services on the box, by name: each `<service>:<fact>` takes that fact's type.
+pub(super) fn others(w: &Weave, others: &BTreeMap<String, Weave>, problems: &mut Vec<Problem>) {
+    types(w, Some(others), problems);
+}
+
+fn types(w: &Weave, others: Option<&BTreeMap<String, Weave>>, problems: &mut Vec<Problem>) {
+    let words: BTreeSet<&str> = w.args.iter().map(|a| a.name.as_str()).chain(w.slots()).collect();
+    let reads_other = |e: &Expr| {
+        let mut found = false;
+        e.walk(&mut |x| found |= matches!(x, Expr::Other(..)));
+        found
+    };
+    for (line, e, windows) in conditions(w) {
+        // A file checked alone already passed: only what reads another service is new.
+        if others.is_some() && !reads_other(e) {
+            continue;
+        }
+        let typer = Typer {
+            w,
+            words: &words,
+            windows,
+            others,
+        };
+        if let Err(msg) = typer.cond(e) {
             problems.push(Problem::new(line, msg));
         }
     }
@@ -285,11 +313,24 @@ impl std::fmt::Display for Ty {
     }
 }
 
+/// A fact's type in an expression; `None` for LINES, which only a window or a quoted
+/// condition reads.
+fn fact_ty(ty: FactType) -> Option<Ty> {
+    Some(match ty {
+        FactType::Bool => Ty::Bool,
+        FactType::Number(u) => Ty::Num(u.map_or(Dim::Plain, |u| u.dim())),
+        FactType::Text => Ty::Text,
+        FactType::Version => Ty::Version,
+        FactType::Lines => return None,
+    })
+}
+
 struct Typer<'a> {
     w: &'a Weave,
     words: &'a BTreeSet<&'a str>,
     /// Window functions are allowed: a goal's condition or IF.
     windows: bool,
+    others: Option<&'a BTreeMap<String, Weave>>,
 }
 
 impl Typer<'_> {
@@ -302,9 +343,9 @@ impl Typer<'_> {
                 self.cond(r)
             }
             Expr::Bin(_, op, _) if op.compares() => self.ty(e).map(drop),
-            Expr::Name(n) => match self.ty(e)? {
+            Expr::Name(_) | Expr::Other(..) => match self.ty(e)? {
                 Ty::Bool | Ty::Any => Ok(()),
-                t => Err(format!("`{n}` is {t}, not a condition: compare it")),
+                t => Err(format!("`{e}` is {t}, not a condition: compare it")),
             },
             _ => {
                 self.ty(e)?;
@@ -316,20 +357,33 @@ impl Typer<'_> {
     fn ty(&self, e: &Expr) -> Result<Ty, String> {
         Ok(match e {
             Expr::Name(n) => match self.w.fact(n) {
-                Some(f) => match f.ty {
-                    FactType::Bool => Ty::Bool,
-                    FactType::Number(u) => Ty::Num(u.map_or(Dim::Plain, |u| u.dim())),
-                    FactType::Text => Ty::Text,
-                    FactType::Version => Ty::Version,
-                    FactType::Lines => {
-                        return Err(format!(
-                            "`{n}` is LINES: COUNT({n}) counts its lines in the goal's window, \
-                             and a quoted condition reads them"
-                        ));
-                    }
-                },
+                Some(f) => fact_ty(f.ty).ok_or_else(|| {
+                    format!(
+                        "`{n}` is LINES: COUNT({n}) counts its lines in the goal's window, \
+                         and a quoted condition reads them"
+                    )
+                })?,
                 None if self.words.contains(n.as_str()) => Ty::Any,
                 None => return Err(format!("`{n}` is no ARG, slot or FACT")),
+            },
+            Expr::Other(s, n) => match self.others {
+                None => Ty::Any,
+                Some(others) => {
+                    let Some(o) = others.get(s) else {
+                        return Err(format!("`{e}`: no service {s} on this box"));
+                    };
+                    let Some(f) = o.fact(n) else {
+                        return Err(format!("`{e}`: {s} has no FACT {n}"));
+                    };
+                    if !o.goals.iter().any(|g| o.reads(g).contains(n)) {
+                        return Err(format!(
+                            "`{e}`: no goal of {s} reads {n}, so it is never observed"
+                        ));
+                    }
+                    fact_ty(f.ty).ok_or_else(|| {
+                        format!("`{e}` is LINES: another service's lines are its own to judge")
+                    })?
+                }
             },
             Expr::Num(_, u) => Ty::Num(u.map_or(Dim::Plain, |u| u.dim())),
             Expr::Str(_) => Ty::Text,

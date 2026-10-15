@@ -3,6 +3,7 @@
 pub mod ast;
 pub mod change;
 pub mod check;
+pub mod compose;
 pub mod expr;
 pub mod graph;
 pub mod lex;

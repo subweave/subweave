@@ -125,8 +125,15 @@ pub enum Kind {
         #[serde(rename = "text")]
         why: String,
     },
-    /// A goal waits for `on`, a goal it comes AFTER that does not hold.
+    /// A goal waits for `on`, a goal it comes AFTER that does not hold: one of this
+    /// weave's, or `<service>:<goal>` of another service.
     Waiting { goal: String, on: String },
+    /// A goal cannot be judged: another service it reads or comes AFTER does not run.
+    Unknown {
+        goal: String,
+        #[serde(rename = "text")]
+        why: String,
+    },
     /// The decider chose: `text` the choice, `p` the probabilities.
     Decide {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -362,6 +369,7 @@ impl Kind {
             Kind::Release { .. } => "release",
             Kind::Off { .. } => "off",
             Kind::Waiting { .. } => "waiting",
+            Kind::Unknown { .. } => "unknown",
             Kind::Wait { .. } => "wait",
             Kind::Decide { .. } => "decide",
             Kind::Gate { .. } => "gate",
@@ -387,6 +395,7 @@ impl Kind {
             | Kind::Known { goal, .. }
             | Kind::Off { goal, .. }
             | Kind::Waiting { goal, .. }
+            | Kind::Unknown { goal, .. }
             | Kind::Wait { goal, .. } => Some(goal),
             Kind::Decide { goal, .. }
             | Kind::Gate { goal, .. }
@@ -432,6 +441,7 @@ impl Kind {
             | Kind::Release { .. }
             | Kind::Off { .. }
             | Kind::Waiting { .. }
+            | Kind::Unknown { .. }
             | Kind::Wait { .. }
             | Kind::Withdraw { .. }
             | Kind::Sent { .. }
@@ -457,6 +467,7 @@ impl Kind {
             | Kind::Withdraw { why: text, .. }
             | Kind::Refused { why: text, .. }
             | Kind::Waiting { on: text, .. }
+            | Kind::Unknown { why: text, .. }
             | Kind::Sent { channel: text, .. }
             | Kind::Watch { channel: text, .. }
             | Kind::Unwatch { channel: text, .. }
@@ -557,6 +568,7 @@ impl Kind {
             }
             Kind::Goals { .. }
             | Kind::Waiting { .. }
+            | Kind::Unknown { .. }
             | Kind::Wait { .. }
             | Kind::Answer { .. }
             | Kind::Sent { .. }
@@ -610,12 +622,17 @@ pub enum GoalState {
     Off {
         why: String,
     },
-    /// `on`, a goal it comes AFTER, does not hold.
+    /// `on`, a goal it comes AFTER, does not hold: one of this weave's, or
+    /// `<service>:<goal>`, whose failure is that service's.
     Waiting {
         on: String,
     },
-    /// Not checked yet, a fact it reads is not read, or the decider gave no verdict.
-    Unknown,
+    /// Not checked yet, a fact it reads is not read, or the decider gave no verdict;
+    /// `why` when another service it reads or comes AFTER does not run.
+    Unknown {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why: Option<String>,
+    },
     Holds {
         since: String,
     },
@@ -673,7 +690,7 @@ impl GoalState {
         match self {
             GoalState::Off { .. } => "off",
             GoalState::Waiting { .. } => "waiting",
-            GoalState::Unknown => "unknown",
+            GoalState::Unknown { .. } => "unknown",
             GoalState::Holds { .. } => "holds",
             GoalState::Suspect { .. } => "suspect",
             GoalState::Failing { .. } => "fails",
@@ -685,7 +702,7 @@ impl GoalState {
             GoalState::Holds { since }
             | GoalState::Suspect { since, .. }
             | GoalState::Failing { since, .. } => Some(since),
-            GoalState::Off { .. } | GoalState::Waiting { .. } | GoalState::Unknown => None,
+            GoalState::Off { .. } | GoalState::Waiting { .. } | GoalState::Unknown { .. } => None,
         }
     }
 
@@ -709,7 +726,7 @@ impl GoalState {
             (None, GoalState::Suspect { .. })
             | (Some(true), GoalState::Holds { .. })
             | (Some(false), GoalState::Failing { .. }) => self.clone(),
-            (None, _) => GoalState::Unknown,
+            (None, _) => GoalState::Unknown { why: None },
             (Some(true), _) => GoalState::Holds { since: t.into() },
             (Some(false), GoalState::Suspect { .. }) => GoalState::Failing {
                 since: t.into(),
@@ -922,7 +939,10 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
             let mut old = std::mem::take(&mut s.goals);
             s.goals = goals
                 .iter()
-                .map(|g| (g.clone(), old.shift_remove(g).unwrap_or(GoalState::Unknown)))
+                .map(|g| {
+                    let was = old.shift_remove(g).unwrap_or(GoalState::Unknown { why: None });
+                    (g.clone(), was)
+                })
                 .collect();
         }
         Kind::Check { goal, ok, .. } => {
@@ -976,6 +996,9 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
         }
         Kind::Off { goal, why } => set_goal(s, goal, GoalState::Off { why: why.clone() })?,
         Kind::Waiting { goal, on } => set_goal(s, goal, GoalState::Waiting { on: on.clone() })?,
+        Kind::Unknown { goal, why } => {
+            set_goal(s, goal, GoalState::Unknown { why: Some(why.clone()) })?
+        }
         Kind::Action(Act::Started {
             goal,
             action,

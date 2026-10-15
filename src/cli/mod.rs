@@ -287,6 +287,17 @@ pub(crate) fn service_weave(service: &str) -> Result<weave::Weave> {
     parsed(service, &text).with_context(|| format!("{} does not parse", file.display()))
 }
 
+/// What `w`, run as service `name` here, names on the other services of this box,
+/// checked against the services the daemon keeps. Each problem goes to stderr as
+/// `Weavefile:<line>: <message>`; `false` with any.
+pub(crate) fn composed(name: &str, w: &weave::Weave) -> Result<bool> {
+    let problems = weave::compose::check(name, w, crate::service::weaves()?);
+    for p in &problems {
+        eprintln!("{p}");
+    }
+    Ok(problems.is_empty())
+}
+
 /// Who acted, on the Commands this terminal sends: the agent channel that runs it
 /// (`SUBWEAVE_BY`, which the daemon sets), else `cli:<user>`.
 pub(crate) fn by() -> String {

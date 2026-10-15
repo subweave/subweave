@@ -6,7 +6,8 @@ use std::time::Duration;
 use super::Problem;
 use super::ast::{
     Action, Arg, ArgKind, ArgOption, Before, Class, Condition, Effect, Fact, FactSource, Goal,
-    Known, Level, ModelHint, Needs, Part, PartField, PartSource, Rule, Secret, Skill, Step, Weave,
+    GoalRef, Known, Level, ModelHint, Needs, Part, PartField, PartSource, Rule, Secret, Skill,
+    Step, Weave,
 };
 use super::expr::{self, Expr};
 use super::lex::{self, Line};
@@ -73,6 +74,32 @@ const SECRET_FORM: &str = "capital letters, digits and `_`";
 
 fn dur(tok: &str) -> Result<Duration, String> {
     expr::duration(tok).ok_or_else(|| format!("`{tok}` is no duration: use 90s, 10m, 25h or 30d"))
+}
+
+/// A service's name on a box: lowercase letters, digits and `-`.
+pub fn is_service_name(w: &str) -> bool {
+    let mut b = w.bytes();
+    b.next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && b.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+}
+
+/// `running`, or `ethereum:at-tip`: a goal of the service `ethereum` on the same box.
+fn goal_ref(tok: &str) -> Result<GoalRef, String> {
+    let Some((service, goal)) = tok.split_once(':') else {
+        return Ok(GoalRef {
+            service: None,
+            goal: tok.to_string(),
+        });
+    };
+    if !is_service_name(service) {
+        return Err(format!(
+            "AFTER {tok}: `{service}` is no service name: lowercase letters, digits and `-`"
+        ));
+    }
+    Ok(GoalRef {
+        service: Some(service.to_string()),
+        goal: name(goal, is_item_name, ITEM_FORM)?,
+    })
 }
 
 /// A cursor over one logical line.
@@ -746,7 +773,7 @@ impl Parser {
                 return Err(format!("GOAL {n}: the sentence is empty"));
             }
             if c.eat("AFTER") {
-                goal.after = c.names().into_iter().map(String::from).collect();
+                goal.after = c.names().into_iter().map(goal_ref).collect::<Result<_, _>>()?;
                 if goal.after.is_empty() {
                     return Err(format!("GOAL {n}: AFTER names no goal"));
                 }

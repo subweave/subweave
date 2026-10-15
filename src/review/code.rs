@@ -28,7 +28,13 @@ pub const CHECKS: &[&str] = &[
     "asked-before",
     "no-default",
     "no-do",
+    "box-weave",
+    "box-after",
+    "box-vacuum",
 ];
+
+/// The library weave every box runs once, for what all its services share.
+const BOX: &str = "box";
 
 /// Whether the element passes check `id`. `within` reads the decider's answer, so it
 /// never comes here.
@@ -125,6 +131,12 @@ pub fn check(id: &str, w: &Weave, el: &Element) -> bool {
             .iter()
             .flat_map(|a| &a.steps)
             .any(|s| matches!(s, Step::Do { .. })),
+        "box-weave" => w.name == BOX,
+        "box-after" => {
+            w.name == BOX
+                || w.goals.iter().flat_map(|g| &g.after).any(|a| a.service.as_deref() == Some(BOX))
+        }
+        "box-vacuum" => w.name == BOX || !el.str("script").contains("journalctl --vacuum"),
         _ => unreachable!("rules() checked every code id against CHECKS"),
     }
 }

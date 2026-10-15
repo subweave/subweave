@@ -107,8 +107,20 @@ pub fn run(args: &Args) -> Result<ExitCode> {
         ]
         .map(String::from),
     ];
+    // Under each service, its goals that wait on a goal or cannot be judged, and why.
+    let mut notes: Vec<Vec<String>> = vec![Vec::new()];
     for r in services {
         let asks: Vec<String> = r.asks.iter().map(|n| format!("#{n}")).collect();
+        notes.push(
+            r.states
+                .iter()
+                .filter_map(|(g, s)| match s {
+                    GoalState::Waiting { on } => Some(format!("  {g}: waits on {on}")),
+                    GoalState::Unknown { why: Some(why) } => Some(format!("  {g}: unknown: {why}")),
+                    _ => None,
+                })
+                .collect(),
+        );
         rows.push([
             r.service,
             r.goals
@@ -126,7 +138,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
             *w = (*w).max(c.chars().count());
         }
     }
-    for r in &rows {
+    for (r, notes) in rows.iter().zip(&notes) {
         let mut line = String::new();
         for (i, (c, w)) in r.iter().zip(widths).enumerate() {
             if i > 0 {
@@ -136,6 +148,9 @@ pub fn run(args: &Args) -> Result<ExitCode> {
             line.extend(std::iter::repeat_n(' ', w - c.chars().count()));
         }
         println!("{}", line.trim_end());
+        for n in notes {
+            println!("{n}");
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

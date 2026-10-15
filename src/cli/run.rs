@@ -41,6 +41,9 @@ pub async fn run(args: Args) -> Result<ExitCode> {
     };
     let name = args.name.clone().unwrap_or_else(|| w.name.clone());
     check_name(&name)?;
+    if !super::composed(&name, &w)? {
+        return Ok(ExitCode::FAILURE);
+    }
     let decide = model::decide_model(args.decide.as_deref(), &w.model)?;
     let code = model::code_models(&args.code, &w.model)?;
     let decider = Decider::new(decide.clone())?;
@@ -153,14 +156,7 @@ pub async fn forward(args: Args, host: &str, mut argv: Vec<String>) -> Result<i3
 }
 
 fn check_name(name: &str) -> Result<()> {
-    let ok = name
-        .bytes()
-        .next()
-        .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-    if !ok {
+    if !crate::weave::parse::is_service_name(name) {
         bail!("a service name is lowercase letters, digits and -, not {name:?}");
     }
     Ok(())

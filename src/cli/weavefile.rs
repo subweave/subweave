@@ -147,6 +147,13 @@ pub(crate) async fn propose(service: &str, text: &str, why: &str, by: String) ->
         .map_err(|p| anyhow!("the running Weavefile does not parse:\n{}", lines(p)))?;
     let new = weave::parse(service, text)
         .map_err(|p| anyhow!("the new Weavefile does not parse:\n{}", lines(p)))?;
+    let composed = weave::compose::check(service, &new, service::weaves()?);
+    if !composed.is_empty() {
+        bail!(
+            "the new Weavefile does not fit the other services on this box:\n{}",
+            lines(composed)
+        );
+    }
     let decider = Decider::new(ModelRef::parse(&spec.decide)?)?;
     let plan = plan::plan(&new, "", &decider, Some(&spec.args)).await?;
     if plan.count(Level::Error) > 0 {

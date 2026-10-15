@@ -169,7 +169,7 @@ pub(crate) fn goal_lines(ctx: &Ctx, g: &Goal, now: &BTreeMap<String, String>) ->
         },
     ];
     let judged: Vec<&str> = ctx.w.judged_lines(g).collect();
-    for f in goals::needs(&ctx.w, g) {
+    for f in ctx.w.reads(g) {
         if judged.contains(&f.as_str()) {
             continue;
         }

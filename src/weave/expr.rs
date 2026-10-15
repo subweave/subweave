@@ -13,6 +13,8 @@ pub use super::value::Value;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Name(String),
+    /// `ethereum:head_age`: a fact of another service on the box, its newest observation.
+    Other(String, String),
     /// `85`, `85%`, `25h`: kept as written so it prints back the same.
     Num(f64, Option<Unit>),
     Str(String),
@@ -102,6 +104,9 @@ pub trait Env {
     /// A fact's newest value, or an ARG's or a slot's words (empty when unsaid). `None`: a
     /// fact with no value now.
     fn value(&self, name: &str) -> Option<Value>;
+    /// Another service's fact, its newest observation; `None` with none, or when that
+    /// service does not run.
+    fn other(&self, service: &str, fact: &str) -> Option<Value>;
     fn since(&self, action: &str) -> Option<Duration>;
     /// `f` over the fact's observations in the goal's window; `None` with none to read.
     fn window(&self, f: Window, fact: &str) -> Option<Value>;
@@ -131,7 +136,7 @@ pub fn duration(s: &str) -> Option<Duration> {
 /// false side is false, `OR` with one true side is true, whatever the other side.
 pub fn holds(e: &Expr, env: &dyn Env) -> Option<bool> {
     match e {
-        Expr::Name(n) => match env.value(n)? {
+        Expr::Name(_) | Expr::Other(..) => match value(e, env)? {
             Value::Bool(b) => Some(b),
             Value::Text(t) => Some(!t.is_empty()),
             Value::Num(..) | Value::Version(_) => None,
@@ -162,6 +167,7 @@ pub fn holds(e: &Expr, env: &dyn Env) -> Option<bool> {
 fn value(e: &Expr, env: &dyn Env) -> Option<Value> {
     match e {
         Expr::Name(n) => env.value(n),
+        Expr::Other(s, f) => env.other(s, f),
         Expr::Num(n, unit) => Some(match unit {
             Some(u) => Value::Num(n * u.scale(), u.dim()),
             None => Value::Num(*n, Dim::Plain),
@@ -310,6 +316,10 @@ impl Expr {
                 Some(v) => f.write_str(&v),
                 None => f.write_str(n),
             },
+            Expr::Other(s, n) => match lookup.and_then(|l| l(&format!("{s}:{n}"))) {
+                Some(v) => f.write_str(&v),
+                None => write!(f, "{s}:{n}"),
+            },
             Expr::Num(n, None) => write!(f, "{n}"),
             Expr::Num(n, Some(u)) => write!(f, "{n}{u}"),
             Expr::Str(s) => write!(f, "'{s}'"),
@@ -348,6 +358,7 @@ impl Serialize for Expr {
 #[derive(Debug, Clone, PartialEq)]
 enum Tok {
     Name(String),
+    Other(String, String),
     Num(f64, Option<Unit>),
     Str(String),
     Op(Op),
@@ -441,14 +452,32 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
             }
             c if c.is_ascii_alphabetic() || c == b'_' => {
                 let start = i;
-                // `lighthouse.running`: a PART's fact.
-                while i < b.len()
-                    && (b[i].is_ascii_alphanumeric()
-                        || b[i] == b'_'
-                        || (b[i] == b'.' && b.get(i + 1).is_some_and(u8::is_ascii_lowercase)))
+                // A fact's name; `lighthouse.running`: a PART's fact.
+                let name_end = |from: usize| {
+                    (from..b.len())
+                        .find(|&j| {
+                            !(b[j].is_ascii_alphanumeric()
+                                || b[j] == b'_'
+                                || (b[j] == b'.' && b.get(j + 1).is_some_and(u8::is_ascii_lowercase)))
+                        })
+                        .unwrap_or(b.len())
+                };
+                // `eth-writer:head_age`: a service's name, `:`, and its fact's.
+                let svc_end = (i..b.len())
+                    .find(|&j| !(b[j].is_ascii_lowercase() || b[j].is_ascii_digit() || b[j] == b'-'))
+                    .unwrap_or(b.len());
+                if b.get(svc_end) == Some(&b':')
+                    && b.get(svc_end + 1).is_some_and(|c| c.is_ascii_lowercase() || *c == b'_')
                 {
-                    i += 1;
+                    let end = name_end(svc_end + 1);
+                    out.push(Tok::Other(
+                        src[start..svc_end].to_string(),
+                        src[svc_end + 1..end].to_string(),
+                    ));
+                    i = end;
+                    continue;
                 }
+                i = name_end(i);
                 let w = &src[start..i];
                 out.push(match w {
                     "AND" => Tok::Op(Op::And),
@@ -556,6 +585,7 @@ impl Parser {
                 "`{n}` is no function: SINCE, MIN, MAX, AVG, DELTA and COUNT are"
             )),
             Some(Tok::Name(n)) => Ok(Expr::Name(n)),
+            Some(Tok::Other(s, f)) => Ok(Expr::Other(s, f)),
             Some(Tok::Num(n, u)) => Ok(Expr::Num(n, u)),
             Some(Tok::Str(s)) => Ok(Expr::Str(s)),
             Some(Tok::Open) => {
@@ -589,6 +619,7 @@ impl Parser {
 fn show_tok(t: &Tok) -> String {
     match t {
         Tok::Name(n) => format!("`{n}`"),
+        Tok::Other(s, f) => format!("`{s}:{f}`"),
         Tok::Num(n, None) => format!("`{n}`"),
         Tok::Num(n, Some(u)) => format!("`{n}{u}`"),
         Tok::Str(s) => format!("`'{s}'`"),

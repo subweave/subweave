@@ -15,6 +15,7 @@ pub(crate) mod memory;
 mod observe;
 mod parts;
 mod repair;
+mod registry;
 mod service;
 pub(crate) mod state;
 mod trace;
@@ -51,6 +52,8 @@ pub(crate) struct Shared {
     agents: Mutex<BTreeMap<u64, u32>>,
     /// Per service, held while its agent runs: one agent at a time.
     agent_turns: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The services whose loops run, for the references of other services' weaves.
+    pub registry: registry::Registry,
 }
 
 impl Shared {
@@ -127,6 +130,7 @@ pub async fn run() -> Result<()> {
         journals: Mutex::new(BTreeMap::new()),
         agents: Mutex::new(BTreeMap::new()),
         agent_turns: Mutex::new(BTreeMap::new()),
+        registry: registry::Registry::default(),
     });
     let (answers_tx, mut answers_rx) = mpsc::unbounded_channel();
     tokio::spawn(asks::poll_loop(shared.clone(), answers_tx));
@@ -227,6 +231,7 @@ impl Daemon {
                     continue;
                 }
                 self.tasks.remove(&name);
+                self.shared.registry.leave(&name);
                 self.broken.insert(name.clone());
                 tracing::warn!(service = %name, "its loop ended; it starts again on its next command");
             }
@@ -276,6 +281,7 @@ impl Daemon {
             }
             None => Default::default(),
         };
+        self.shared.registry.leave(name);
         let Some(why) = why else { return };
         let journal = self.shared.journal(name);
         let mut j = lock(&journal);

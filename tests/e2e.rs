@@ -673,7 +673,11 @@ impl Box_ {
     }
 
     fn journal(&self) -> Vec<Value> {
-        std::fs::read_to_string(self.service().join("journal.jsonl"))
+        self.journal_of("toy")
+    }
+
+    fn journal_of(&self, service: &str) -> Vec<Value> {
+        std::fs::read_to_string(self.state.join("services").join(service).join("journal.jsonl"))
             .unwrap_or_default()
             .lines()
             .filter_map(|l| serde_json::from_str(l).ok())
@@ -695,6 +699,10 @@ impl Box_ {
 
     /// The toy service's row in `subweave ps --json`: its journal's fold.
     fn status(&self) -> Value {
+        self.row("toy")
+    }
+
+    fn row(&self, service: &str) -> Value {
         let o = self
             .std_command()
             .args(["ps", "--json"])
@@ -702,7 +710,7 @@ impl Box_ {
             .expect("subweave runs");
         serde_json::from_slice::<Vec<Value>>(&o.stdout)
             .ok()
-            .and_then(|rows| rows.into_iter().find(|r| r["service"] == "toy"))
+            .and_then(|rows| rows.into_iter().find(|r| r["service"] == service))
             .unwrap_or(Value::Null)
     }
 
@@ -1021,6 +1029,24 @@ ACTION upgrade "Upgrade web" FOR patched WITHIN 3s CHANGES version
 "#,
         from = from_line(),
         www = www.display(),
+    )
+}
+
+/// A second service on the toy's box: its goal comes AFTER the toy's `tidy` and reads the
+/// toy's `spooled`.
+fn relay_weavefile(dir: &Path) -> String {
+    format!(
+        r#"ABOUT  "relays what the toy's spool held"
+FROM   {from}
+
+GOAL relayed "the toy's spool is relayed"  AFTER toy:tidy  EVERY 1s  toy:spooled == 0
+
+ACTION relay "Relay again" FOR relayed WITHIN 2s CHANGES nothing
+  WHEN "the relay stopped"
+  RUN  date >> {d}/relayed
+"#,
+        from = from_line(),
+        d = dir.display(),
     )
 }
 
@@ -1854,6 +1880,20 @@ async fn daemon_and_cli_keep_a_toy_service() {
         "{}",
         both(&o)
     );
+
+    // 6m. plan with no daemon here says which references to other services it could not
+    // check, and passes.
+    let relay_dir = dir.join("examples/relay");
+    std::fs::create_dir_all(&relay_dir).unwrap();
+    std::fs::write(relay_dir.join("Weavefile"), relay_weavefile(&dir)).unwrap();
+    let relay = relay_dir.display().to_string();
+    let o = b.sw(&["plan", &relay]).await;
+    for want in [
+        "Weavefile:4: AFTER toy:tidy: not checked: no daemon runs here",
+        "Weavefile:4: toy:spooled: not checked: no daemon runs here",
+    ] {
+        assert!(o.status.success() && both(&o).contains(want), "{}", both(&o));
+    }
 
     // The daemon, in the background.
     b.start_daemon(&mock_url);
@@ -2772,10 +2812,67 @@ async fn daemon_and_cli_keep_a_toy_service() {
     let o = b.sw(&["forget-known", "toy", "quiet", "never seen 1"]).await;
     assert!(!o.status.success(), "forgetting an unknown kind passed");
 
+    // 6m. A second service: its goal comes AFTER toy:tidy and reads toy:spooled. plan
+    // refuses a service the box does not run and an AFTER cycle across services; so does run.
+    phase("6m composition");
+    let mut args = vec!["run", &relay, "--yes", "-d"];
+    args.extend(models);
+    let out = b.ok(&args).await;
+    assert!(out.contains("handed relay to the daemon"), "{out}");
+    b.until("relayed to hold", 30, || {
+        (b.row("relay")["states"]["relayed"]["state"] == "holds").then_some(())
+    })
+    .await;
+    let o = b.sw(&["plan", &relay]).await;
+    assert!(o.status.success() && !both(&o).contains("not checked"), "{}", both(&o));
+    let stray = dir.join("examples/stray");
+    std::fs::create_dir_all(&stray).unwrap();
+    std::fs::write(
+        stray.join("Weavefile"),
+        format!(
+            "ABOUT \"waits on a service this box does not run\"\nFROM {}\nFACT up BOOL true\nGOAL up-too \"it is up\" AFTER nosuch:up up\n",
+            from_line()
+        ),
+    )
+    .unwrap();
+    let o = b.sw(&["plan", &stray.display().to_string()]).await;
+    assert!(
+        !o.status.success() && both(&o).contains("Weavefile:4: AFTER nosuch:up: no service nosuch on this box"),
+        "{}",
+        both(&o)
+    );
+    // A new toy weave AFTER relay:relayed closes a cycle through the relay.
+    let cycle = dir.join("cycle/toy");
+    std::fs::create_dir_all(&cycle).unwrap();
+    std::fs::write(
+        cycle.join("Weavefile"),
+        format!(
+            "ABOUT \"a toy that waits on its relay\"\nFROM {}\nFACT empty BOOL true\nGOAL tidy \"the spool is empty\" AFTER relay:relayed empty\n",
+            from_line()
+        ),
+    )
+    .unwrap();
+    let cycle = cycle.display().to_string();
+    let want = "Weavefile:4: AFTER cycle across services: toy:tidy → relay:relayed → toy:tidy";
+    let o = b.sw(&["plan", &cycle]).await;
+    assert!(!o.status.success() && both(&o).contains(want), "{}", both(&o));
+    let o = b.sw(&["run", &cycle, "--yes", "-d"]).await;
+    assert!(!o.status.success() && both(&o).contains(want), "{}", both(&o));
+
     // 6l. ASK BEFORE CHANGES data gates purge, which it never names.
     phase("6l effects, undo, part");
     std::fs::write(dir.join("spool/job-1"), "x").unwrap();
     let (n, words) = b.until("the purge ask", 20, || b.open_ask("tidy")).await;
+    // The relay waits on the toy's failing goal: no check, no repair, no escalation.
+    b.until("relayed to wait on toy:tidy", 10, || {
+        (b.row("relay")["states"]["relayed"] == json!({"state": "waiting", "on": "toy:tidy"}))
+            .then_some(())
+    })
+    .await;
+    let out = b.ok(&["ps"]).await;
+    assert!(out.contains("\n  relayed: waits on toy:tidy\n"), "{out}");
+    let waited = b.journal_of("relay").into_iter().filter(|l| l["kind"] == "waiting").count();
+    assert!(waited >= 1, "no waiting line in the relay's journal");
     let ask = b.lines("ask", |l| l["n"] == n).remove(0);
     assert_eq!(ask["action"], "purge", "{ask}");
     assert_eq!(ask["rule"], "ASK BEFORE CHANGES data", "{ask}");
@@ -2786,6 +2883,17 @@ async fn daemon_and_cli_keep_a_toy_service() {
     b.until("purge to pass", 20, || (b.passes("purge") == 1).then_some(())).await;
     assert!(!dir.join("spool/job-1").exists());
     b.holds(&["tidy"], 10).await;
+    b.until("relayed to hold again", 10, || {
+        (b.row("relay")["states"]["relayed"]["state"] == "holds").then_some(())
+    })
+    .await;
+    let repairs: Vec<Value> = b
+        .journal_of("relay")
+        .into_iter()
+        .filter(|l| ["action", "decide", "ask", "wait"].contains(&l["kind"].as_str().unwrap_or("")))
+        .collect();
+    assert!(repairs.is_empty(), "the relay repaired or escalated: {repairs:?}");
+    assert!(!dir.join("relayed").exists(), "relay ran");
 
     // A fix whose goal does not hold within its WITHIN: its UNDO runs and is journaled.
     std::fs::write(dir.join("setting"), "off\n").unwrap();
@@ -3100,6 +3208,14 @@ async fn daemon_and_cli_keep_a_toy_service() {
         (b.status()["stopped"] == true && b.journal().last()?["text"] == "stopped").then_some(())
     })
     .await;
+    // A service the relay comes AFTER is stopped: its goal cannot be judged, and ps says why.
+    b.until("relayed to be unknown", 10, || {
+        (b.row("relay")["states"]["relayed"] == json!({"state": "unknown", "why": "toy is stopped"}))
+            .then_some(())
+    })
+    .await;
+    let out = b.ok(&["ps"]).await;
+    assert!(out.contains("\n  relayed: unknown: toy is stopped\n"), "{out}");
     let out = b.ok(&["ps"]).await;
     assert!(
         out.lines()

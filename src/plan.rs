@@ -112,6 +112,9 @@ impl Env for Values<'_> {
         let v = self.0.get(name)?;
         Some(Value::Text(v.clone().unwrap_or_default()))
     }
+    fn other(&self, _service: &str, _fact: &str) -> Option<Value> {
+        None
+    }
     fn since(&self, _action: &str) -> Option<Duration> {
         None
     }

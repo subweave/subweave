@@ -223,8 +223,7 @@ Each part adds five facts, which goals and quoted texts read like any fact:
 GOAL installed  "PostgreSQL is installed"                                     present
 GOAL running    "PostgreSQL is running"      AFTER configured                 up
 GOAL archiving  "every change is copied"     AFTER running    EVERY 5m        archived  IF bucket
-GOAL backed     "a full backup is fresh"     AFTER archiving                  SINCE(backup) < 25h
-GOAL room       "the disk has room"          AFTER installed  EVERY 5m        disk < 85%
+GOAL backed     "a full backup is fresh"     AFTER archiving, box:room        SINCE(backup) < 25h
 GOAL current    "PostgreSQL runs release $version or newer" \
                 AFTER running  EVERY 1d  server >= version
 GOAL calm       "the kernel logs no errors"  AFTER running    EVERY 1m  OVER 10m \
@@ -236,7 +235,7 @@ GOAL quiet      "the logs show no trouble"   AFTER running    EVERY 10m \
 `GOAL <name> "<sentence>" [AFTER <goal>, …] [EVERY <duration>] [OVER <duration>] [TRIES <n> PER <duration>] <condition> [IF <expr>]`
 
 - `"<sentence>"`: what the goal keeps true, in plain words for the person's cards. It is required and comes first. The condition comes last: code, or a second quoted text for the decider.
-- `AFTER`: the daemon checks this goal only while those goals hold. The goals make a graph; `subweave plan <weave>` draws it.
+- `AFTER`: the daemon checks this goal only while those goals hold. The goals make a graph; `subweave plan <weave>` draws it. `<service>:<goal>` names a goal of another service on the box ([Composition](#composition)).
 - `IF`: off while the expression is false. A goal after an off goal is off too: with no bucket, `archiving` and `backed` are off.
 - `EVERY`: `1m` by default for code, `5m` for quoted conditions.
 - `OVER`: the window the goal is judged over, from now back; its `EVERY` by default. Only a goal that reads a window takes it: a `LINES` fact, or `MIN`, `MAX`, `AVG`, `DELTA` or `COUNT`.
@@ -254,7 +253,7 @@ installed
 ├─ configured
 │  └─ running
 │     ├─ archiving   IF bucket
-│     │  └─ backed
+│     │  └─ backed   also after box:room
 │     │     └─ drilled
 │     ├─ connections
 │     ├─ short-tx
@@ -262,7 +261,6 @@ installed
 │     ├─ patched
 │     ├─ current
 │     └─ quiet
-└─ room
 ```
 
 A code condition:
@@ -278,6 +276,7 @@ A code condition:
 | `DELTA(rejected) == 0` | the newest value minus the value at the window's start |
 | `MIN(free) > 1GB`, `MAX(lag) < 60s`, `AVG(load) < 4` | over the values in the window |
 | `role == 'cache'` | a string compare; strings take single quotes, because double quotes mean model |
+| `box:disk < 85%` | `disk`, a fact of the service `box` on the same box, at its newest read ([Composition](#composition)) |
 | `a AND b`, `a OR b`, `NOT a` | as written |
 
 - **Units.** A number carries its unit: `85%`, `60s`, `500ms`, `1GB`, `25h`. Only numbers of one kind compare, add or subtract: `plan` refuses `disk < 85` for a `NUMBER %` fact, `head_age < 1GB`, and a number against a version. A unit times or divided by a bare number keeps its kind; a size divided by a size is a bare number.
@@ -425,12 +424,28 @@ KNOWN quiet TROUBLE "database disk image is malformed"
 
 What memory cannot catch: [LIMITS.md](LIMITS.md#13-a-kind-of-line-hides-its-numbers).
 
+## Composition
+
+One box runs several services, each from its own weave. A weave reads another service on the box by its service name:
+
+```weavefile
+GOAL backed  "a full backup is fresh"  AFTER archiving, box:room  SINCE(backup) < 25h
+GOAL logs    "old server logs leave the disk room"  AFTER installed  EVERY 10m \
+             box:disk < 85% OR logs_gb < 1GB
+```
+
+- `AFTER <service>:<goal>`: checked only while that goal holds. Until then the goal is `waiting`: no check, no repair, no escalation, and the escalations it raised are withdrawn. The failure is the other service's to fix. A goal after an off goal is off.
+- `<service>:<fact>` in an expression: that fact's newest read on its service, with the type its weave gives it. A service reads a fact only for a goal that reads it, so `plan` refuses a fact none of its goals reads. Window functions and `LINES` read only the weave's own facts.
+- A service that is stopped, removed or not running yet: each goal that comes AFTER it or reads it is `unknown`, and `ps` says why under the service.
+- `subweave plan` and `subweave run` check every reference against the services the box keeps, stopped ones too: a service, goal or fact that is not there, a type, and an AFTER cycle across services fail them. `plan` where no daemon runs lists each reference it could not check, and passes. An agent's weave change is checked the same way.
+- The `box` weave in the [library](https://github.com/subweave/library) keeps what every service on a box shares: room on each filesystem, the clock, the systemd journal's size, SSH, and the OS's security updates. Run it once per box: `subweave run box`. Service weaves go AFTER its goals and keep no copies; `subweave review` flags a copy.
+
 ## The loop
 
 Each tick, the daemon:
 
 1. Reads the facts that due goals need.
-2. Checks the due goals in graph order: code conditions in code, quoted ones in one decider request.
+2. Checks the due goals in graph order: code conditions in code, quoted ones in one decider request. A goal whose AFTER goal does not hold, here or on another service, waits unchecked.
 3. Takes the first goal that fails.
    - It has no action: the daemon escalates, with the facts.
    - It has one action that runs on this box, and no other: the daemon runs it. No model.
@@ -799,10 +814,11 @@ An agent changes a service's weave only through the daemon, never in place.
 
 The journal is the service's state. The daemon folds each line into that state as it writes the line, and replays the journal when it starts; `ps`, `inbox`, `stats`, the dashboard and MCP read the same fold. `state.json` caches a fold with the part of the journal it covers.
 
-- `kind`: `goals`, `check`, `verdict`, `known`, `release`, `off`, `waiting`, `decide`, `gate`, `action`, `command`, `learn`, `ask`, `answer`, `withdraw`, `sent`, `watch`, `unwatch`, `refused`, `message`, `note`.
+- `kind`: `goals`, `check`, `verdict`, `known`, `release`, `off`, `waiting`, `unknown`, `decide`, `gate`, `action`, `command`, `learn`, `ask`, `answer`, `withdraw`, `sent`, `watch`, `unwatch`, `refused`, `message`, `note`.
 - A `verdict` line is the model's `p` that one line (`text`) of a quoted goal's window shows trouble. A `known` line says what a person or an agent (`by`) said lines of `text`'s kind are for the goal: `class` `normal` or `trouble`, `why`; `class: null` forgets them.
 - A `release` line says whether release `text` of `PART` `part` is a security fix (`security`): the model's verdict with `p`, or a person's or an agent's word with `by` and `why`.
-- A `goals` line names the weave's goals, in graph order, when they change. An `off` line says why a goal does not apply; a `waiting` line names the goal it comes AFTER that does not hold (`on`).
+- A `goals` line names the weave's goals, in graph order, when they change. An `off` line says why a goal does not apply; a `waiting` line names the goal it comes AFTER that does not hold (`on`), `<service>:<goal>` for another service's; an `unknown` line says why another service it reads cannot be read (`text`).
+- A `check` line of a goal that reads another service holds that service's facts too, as `<service>:<fact>`.
 - A `check` line holds the facts the goal read. A goal fails at its second failed check in a row; after one it is `suspect`.
 - A `command` line holds `output`: stdout and stderr, secrets redacted, the last 4 KB.
 - An `ask` line holds `text`, its title, `body`, what the channels got with it, `answers`, and `rule`, the rule that holds its action. The `gate` line before it names the rule and the escalation, `n`. `lines` are the window's lines of kinds not known normal: an answer with `known` teaches them.
@@ -910,7 +926,7 @@ subweave dash --bind 0.0.0.0 --host dash.acme.dev --on root@host
 
 ## Review
 
-`subweave review <weave>` scores a Weavefile from 0 to 100 against 48 authoring rules, with the decider. It changes nothing and runs no command.
+`subweave review <weave>` scores a Weavefile from 0 to 100 against 50 authoring rules, with the decider. It changes nothing and runs no command.
 
 ```
 $ subweave review examples/postgres
@@ -927,7 +943,7 @@ postgres  100/100   48 rules, 221 checks, $0.0020
 | actions | 11 | two actions for one goal have `WHEN`s that do not overlap |
 | rules | 2 | a quoted rule names something one command can do |
 | skills | 3 | a skill helps with at least one `DO` task |
-| coverage | 9 | a goal keeps the software updated |
+| coverage | 11 | no goal repeats what the `box` weave keeps |
 
 - A rule checks each element of its kind: every ARG, every action, every pair of actions for one goal.
 - Code checks what code can; the decider answers the rest, one request per element.
@@ -957,7 +973,7 @@ instruction
   | "SECRET" name quoted [ if ]
   | "FACT" name type ( body | quoted )
   | "PART" name source "VERSION" command
-  | "GOAL" name quoted [ "AFTER" names ] [ "EVERY" dur ] [ "OVER" dur ]
+  | "GOAL" name quoted [ "AFTER" goals ] [ "EVERY" dur ] [ "OVER" dur ]
            [ "TRIES" num "PER" dur ] ( expr | quoted ) [ if ]
   | "ACTION" name [ quoted ] [ "FOR" names ] [ "WITHIN" dur ]
            [ "CHANGES" ( effects | "nothing" ) ] [ "UNDO" name ] [ if ]
@@ -973,6 +989,8 @@ level    = "MUST" | "SHOULD" | "MAY" ;
 type     = "BOOL" | "NUMBER" [ unit ] | "TEXT" | "VERSION" | "LINES" ;
 unit     = "%" | "ms" | "s" | "m" | "h" | "d" | "B" | "KB" | "MB" | "GB" | "TB" ;
 if       = "IF" expr ;
+goals    = goal { "," goal } ;
+goal     = [ service ":" ] name ;          (* service: another service on the box *)
 because  = "BECAUSE" quoted ;             (* plain words for the person *)
 before   = "BEFORE" ( name | "CHANGES" effects ) ;
 effects  = effect { "," effect } ;
@@ -983,8 +1001,8 @@ heredoc  = "<<" WORD newline { text newline } WORD ;
 size     = num ( "CPU" | "GPU" | "GB" ( "RAM" | "DISK" ) | "TB" "DISK" ) ;
 model    = word [ "@" name ] ;
 expr     = term { ( "AND" | "OR" ) term } ;
-term     = [ "NOT" ] ( name | value op value | "(" expr ")" ) ;
-value    = name | num [ unit ] | string
+term     = [ "NOT" ] ( name | service ":" name | value op value | "(" expr ")" ) ;
+value    = name | service ":" name | num [ unit ] | string
          | "SINCE(" name ")" | window "(" name ")"
          | value ( "+" | "-" | "*" | "/" ) value ;
 window   = "MIN" | "MAX" | "AVG" | "DELTA" | "COUNT" ;

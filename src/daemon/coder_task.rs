@@ -551,7 +551,7 @@ async fn session(
                             }
                             let goal = work.goal.expect("a task with no goal is held");
                             let now = goals::known(ctx, Some(goal)).await;
-                            let reads = goals::needs(&ctx.w, goal);
+                            let reads = ctx.w.reads(goal);
                             let shown: Vec<String> = now
                                 .iter()
                                 .filter(|(k, _)| reads.contains(*k))

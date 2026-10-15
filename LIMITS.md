@@ -215,3 +215,11 @@ Subweave repairs in minutes, not milliseconds. A service that needs sub-second f
 - Notes that bury a fix under routine changes, or call a security fix a "bug fix", read as routine.
 - A verdict stays: notes edited after the first read are not read again.
 - Release lists are read every 6 hours: a release published since then is not seen yet.
+
+## 15. Another service is read as it last saw itself
+
+A `<service>:<fact>` reference reads that fact's newest read on its own service ([Composition](WEAVEFILE.md#composition)); `AFTER <service>:<goal>` reads that goal's last check.
+
+- The read is as old as that service's goal that reads it: `box:disk` under a goal `EVERY 5m` may be 5 minutes old.
+- One failed check of a goal there makes a goal here wait at once; a goal AFTER a goal of its own weave waits only once that goal fails.
+- References stay on one box: no service on another box is read.

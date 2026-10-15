@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 use serde_json::{Value as Json, json};
 
 use crate::model::decider::Question;
-use crate::weave::{self, Class, Condition, Env, Expr, FactType, Goal, Value, Weave, Window, expr};
+use crate::weave::{self, Class, Condition, Env, FactType, Goal, Value, Weave, Window, expr};
 
 use super::memory::{self, Source};
 use super::observe::{self, Snapshot, Span};
@@ -32,6 +32,11 @@ impl Env for Scope<'_> {
         Some(Value::Text(
             self.ctx.spec.args.get(name).cloned().unwrap_or_default(),
         ))
+    }
+
+    /// `None` while that service does not run.
+    fn other(&self, service: &str, fact: &str) -> Option<Value> {
+        self.ctx.shared.registry.value(service, fact)
     }
 
     /// An action that never passed passed infinitely long ago: `SINCE(backup) < 25h` is
@@ -67,33 +72,6 @@ pub(crate) fn span_for(g: Option<&Goal>, snap: Snapshot) -> Span {
     }
 }
 
-/// The FACT names an expression reads, window function arguments included.
-fn expr_facts(w: &Weave, e: &Expr, out: &mut BTreeSet<String>) {
-    e.walk(&mut |x| match x {
-        Expr::Name(n) | Expr::Window(_, n) if w.fact(n).is_some() => {
-            out.insert(n.clone());
-        }
-        _ => {}
-    });
-}
-
-/// The facts a goal reads: its condition and its IF.
-pub(crate) fn needs(w: &Weave, g: &Goal) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    match &g.cond {
-        Condition::Code(e) => expr_facts(w, e, &mut out),
-        Condition::Quoted(t) => out.extend(
-            weave::backticked(t)
-                .filter(|n| w.fact(n).is_some())
-                .map(String::from),
-        ),
-    }
-    if let Some(e) = &g.when {
-        expr_facts(w, e, &mut out);
-    }
-    out
-}
-
 /// Every fact of the weave.
 pub(crate) fn all(w: &Weave) -> BTreeSet<String> {
     w.facts.iter().map(|f| f.name.clone()).collect()
@@ -103,7 +81,7 @@ pub(crate) fn all(w: &Weave) -> BTreeSet<String> {
 pub(crate) fn keep(w: &Weave) -> BTreeMap<String, Duration> {
     let mut out: BTreeMap<String, Duration> = BTreeMap::new();
     for g in &w.goals {
-        for f in needs(w, g) {
+        for f in w.reads(g) {
             let d = out.entry(f).or_default();
             *d = (*d).max(g.over());
         }
@@ -221,7 +199,7 @@ pub(crate) async fn quoted(ctx: &Ctx, goals: &[(&Goal, Span)]) -> BTreeMap<Strin
             let Condition::Quoted(t) = &g.cond else {
                 continue;
             };
-            let reads = needs(&ctx.w, g);
+            let reads = ctx.w.reads(g);
             if !reads.iter().all(|n| ctx.observe.known(n, s)) {
                 continue;
             }
@@ -329,7 +307,7 @@ pub(crate) async fn known(ctx: &Ctx, g: Option<&Goal>) -> observe::Values {
 /// The goal checked now with fresh facts, over its window from `after` on (the end of
 /// an action's steps) when given. An off goal counts as holding.
 pub(crate) async fn check_fresh(ctx: &Ctx, g: &Goal, after: Option<i64>) -> Option<bool> {
-    let snap = observe::read(ctx, &needs(&ctx.w, g), true).await;
+    let snap = observe::read(ctx, &ctx.w.reads(g), true).await;
     let mut s = span(g, snap);
     if let Some(t) = after {
         s = s.after(t);

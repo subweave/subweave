@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::paths;
-use crate::weave::Class;
+use crate::weave::{self, Class, Weave};
 
 /// The `action` of every journal line of a person's task; no ACTION may take the name.
 pub const TASK: &str = "task";
@@ -209,6 +209,19 @@ pub fn names() -> Result<Vec<String>> {
 
 pub fn spec(service: &str) -> Result<Spec> {
     read_json(&paths::service_json(service))
+}
+
+/// The weave each service the daemon keeps runs, by name, stopped ones too: what other
+/// services' references name. One whose Weavefile does not parse runs nothing.
+pub fn weaves() -> Result<BTreeMap<String, Weave>> {
+    Ok(names()?
+        .into_iter()
+        .filter_map(|name| {
+            let text = std::fs::read_to_string(paths::weavefile(&name)).ok()?;
+            let w = weave::parse(&name, &text).ok()?;
+            Some((name, w))
+        })
+        .collect())
 }
 
 pub fn learned(service: &str) -> Result<Learned> {

@@ -6,7 +6,7 @@ use anyhow::Result;
 
 use crate::model::{self, decider::Decider};
 use crate::plan::{self, Level};
-use crate::weave::{ArgKind, FactSource, Weave, graph};
+use crate::weave::{self, ArgKind, FactSource, Weave, graph};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -26,6 +26,20 @@ pub async fn run(args: Args) -> Result<ExitCode> {
     let Some(w) = super::load(&args.weave).await? else {
         return Ok(ExitCode::FAILURE);
     };
+    // References to other services are checked against the services a running daemon
+    // keeps; with none here, each is only said.
+    if crate::daemon::running().is_some() {
+        if !super::composed(&w.name, &w)? {
+            return Ok(ExitCode::FAILURE);
+        }
+    } else {
+        for r in weave::compose::refs(&w) {
+            eprintln!(
+                "{}",
+                weave::Problem::new(r.line, format!("{}: not checked: no daemon runs here", r.text))
+            );
+        }
+    }
     let Some(request) = args.request else {
         if args.json {
             println!("{}", serde_json::to_string_pretty(&w)?);

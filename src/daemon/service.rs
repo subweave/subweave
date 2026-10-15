@@ -304,6 +304,18 @@ struct Track {
     again: Option<Instant>,
 }
 
+/// Whether a goal is checked now, by the goals it comes AFTER and the other services it
+/// reads.
+enum Gate {
+    Go,
+    /// A goal it comes AFTER is off.
+    Off(String),
+    /// Another service it comes AFTER or reads does not run, and why.
+    Unknown(String),
+    /// A goal it comes AFTER does not hold.
+    Waiting(String),
+}
+
 struct Loop {
     ctx: Arc<Ctx>,
     tracks: BTreeMap<String, Track>,
@@ -332,6 +344,7 @@ pub(crate) async fn run(
             return;
         }
     };
+    shared.registry.join(&ctx);
     {
         let mut j = ctx.journal();
         // What ran when the daemon stopped runs no more.
@@ -398,25 +411,34 @@ impl Loop {
         let w = &ctx.w;
         let order = graph::order(w);
         let now = Instant::now();
-        let due: BTreeSet<&str> = {
-            let j = ctx.journal();
-            let st = j.state();
-            order
-                .iter()
-                .filter(|g| {
-                    let t = &self.tracks[&g.name];
-                    g.after.iter().all(|a| st.clears(a))
-                        && (t.again.is_some_and(|at| now >= at)
-                            || t.last_check
-                                .is_none_or(|at| now.duration_since(at) >= g.every()))
-                })
-                .map(|g| g.name.as_str())
-                .collect()
-        };
+        // Goals that may not be checked now say why on every tick, even with nothing due:
+        // a goal that waits on another service is not due until that service's goal holds.
+        let mut go = BTreeSet::new();
+        for g in &order {
+            match self.gate(g) {
+                Gate::Go => {
+                    go.insert(g.name.as_str());
+                }
+                Gate::Off(a) => self.off(&g.name, format!("it comes after {a}, which is off"), true),
+                Gate::Unknown(why) => self.unknown(&g.name, why),
+                Gate::Waiting(a) => self.waiting(&g.name, a),
+            }
+        }
+        let due: BTreeSet<&str> = order
+            .iter()
+            .filter(|g| {
+                let t = &self.tracks[&g.name];
+                go.contains(g.name.as_str())
+                    && (t.again.is_some_and(|at| now >= at)
+                        || t.last_check
+                            .is_none_or(|at| now.duration_since(at) >= g.every()))
+            })
+            .map(|g| g.name.as_str())
+            .collect();
         if !due.is_empty() {
             let mut needed = BTreeSet::new();
             for g in order.iter().filter(|g| due.contains(g.name.as_str())) {
-                needed.extend(goals::needs(w, g));
+                needed.extend(w.reads(g));
             }
             // One snapshot per tick: every goal checked in it reads the rings up to it.
             let read_start = Instant::now();
@@ -424,23 +446,24 @@ impl Loop {
             let read_ms = super::ms(read_start);
             let mut quoted = Vec::new();
             for g in &order {
-                let (off, waiting) = {
-                    let j = ctx.journal();
-                    let st = j.state();
-                    let off = g.after.iter().find(|a| st.goal(a).is_some_and(GoalState::off));
-                    let waiting = g.after.iter().find(|a| !st.clears(a));
-                    (off.cloned(), waiting.cloned())
-                };
-                if let Some(a) = off {
-                    self.off(&g.name, format!("it comes after {a}, which is off"), true);
-                    continue;
-                }
-                if let Some(a) = waiting {
-                    self.waiting(&g.name, a);
-                    continue;
-                }
                 if !due.contains(g.name.as_str()) {
                     continue;
+                }
+                // A goal checked earlier in this tick may have stopped this one.
+                match self.gate(g) {
+                    Gate::Go => {}
+                    Gate::Off(a) => {
+                        self.off(&g.name, format!("it comes after {a}, which is off"), true);
+                        continue;
+                    }
+                    Gate::Unknown(why) => {
+                        self.unknown(&g.name, why);
+                        continue;
+                    }
+                    Gate::Waiting(a) => {
+                        self.waiting(&g.name, a);
+                        continue;
+                    }
                 }
                 self.tracks
                     .get_mut(&g.name)
@@ -453,7 +476,8 @@ impl Loop {
                     self.off(&g.name, "its IF is false".into(), false);
                     continue;
                 }
-                let values = ctx.observe.values(&goals::needs(w, g), span);
+                let mut values = ctx.observe.values(&w.reads(g), span);
+                values.extend(ctx.shared.registry.seen(&w.reads_other(g)));
                 match &g.cond {
                     // A fact with no value (a quoted fact not learned, a broken read) leaves
                     // the goal unknown, unless the rest of the condition decides it.
@@ -502,7 +526,7 @@ impl Loop {
     /// stands: what it saw was there.
     fn unseen(&self, g: &weave::Goal, span: observe::Span, v: Verdict) -> Verdict {
         let ctx = &self.ctx;
-        let partial = ctx.w.windowed(g) && !ctx.observe.covers(&goals::needs(&ctx.w, g), span.from);
+        let partial = ctx.w.windowed(g) && !ctx.observe.covers(&ctx.w.reads(g), span.from);
         if v.ok == Some(true) && partial {
             return Verdict { ok: None, ..v };
         }
@@ -521,14 +545,77 @@ impl Loop {
         self.withdraw(goal, "no longer applies: its IF, or a parent's, is false");
     }
 
-    /// A goal that waits `on` a goal it comes AFTER.
+    /// Whether `g` may be checked now: the goals it comes AFTER hold (one of this
+    /// weave's may have failed one check) and the other services it reads run. A goal of
+    /// another service that does not hold is that service's to fix.
+    fn gate(&self, g: &weave::Goal) -> Gate {
+        let ctx = &self.ctx;
+        let (mut off, mut waiting) = (None, None);
+        {
+            let j = ctx.journal();
+            let st = j.state();
+            for a in g.after.iter().filter_map(|a| a.local()) {
+                if st.goal(a).is_some_and(GoalState::off) {
+                    off.get_or_insert_with(|| a.to_string());
+                } else if !st.clears(a) {
+                    waiting.get_or_insert_with(|| a.to_string());
+                }
+            }
+        }
+        // Read with this service's journal unlocked: two loops never hold each other's.
+        let reg = &ctx.shared.registry;
+        let mut gone = None;
+        for a in &g.after {
+            let Some(s) = &a.service else { continue };
+            match reg.goal(s, &a.goal) {
+                Err(why) => {
+                    gone.get_or_insert(why);
+                }
+                Ok(st) if st.off() => {
+                    off.get_or_insert_with(|| a.to_string());
+                }
+                Ok(st) if !st.holds() => {
+                    waiting.get_or_insert_with(|| a.to_string());
+                }
+                Ok(_) => {}
+            }
+        }
+        if let Some(a) = off {
+            return Gate::Off(a);
+        }
+        if let Some(why) = gone.or_else(|| reg.gone(ctx.w.reads_other(g).into_iter().map(|(s, _)| s))) {
+            return Gate::Unknown(why);
+        }
+        match waiting {
+            Some(a) => Gate::Waiting(a),
+            None => Gate::Go,
+        }
+    }
+
+    /// A goal that waits `on` a goal it comes AFTER: its escalations are moot.
     fn waiting(&mut self, goal: &str, on: String) {
+        let why = format!("waits on {on}");
         let state = GoalState::Waiting { on: on.clone() };
         let e = Kind::Waiting {
             goal: goal.to_string(),
             on,
         };
         self.unchecked(goal, state, e, true);
+        self.withdraw(goal, &why);
+    }
+
+    /// A goal that cannot be judged: another service it comes AFTER or reads does not
+    /// run, for `why`.
+    fn unknown(&mut self, goal: &str, why: String) {
+        let state = GoalState::Unknown {
+            why: Some(why.clone()),
+        };
+        let e = Kind::Unknown {
+            goal: goal.to_string(),
+            why: why.clone(),
+        };
+        self.unchecked(goal, state, e, true);
+        self.withdraw(goal, &format!("cannot be judged: {why}"));
     }
 
     /// A goal not checked now, journaled as `e` when it was not in `state` yet: a failed
@@ -561,15 +648,17 @@ impl Loop {
         let ctx = self.ctx.clone();
         let ok = v.ok;
         let shown = observe::shown(&values);
+        // Not LINES: the event holds its lines apart. Another service's facts, under
+        // `<service>:<fact>`, show what the check read of it.
         let kept: BTreeMap<String, String> = shown
             .iter()
-            .filter(|(n, _)| ctx.w.fact(n).is_some_and(|f| f.ty != weave::FactType::Lines))
+            .filter(|(n, _)| ctx.w.fact(n).is_none_or(|f| f.ty != weave::FactType::Lines))
             .map(|(n, s)| (n.clone(), s.clone()))
             .collect();
         let t = self.tracks.get_mut(&g.name).expect("a track per goal");
         let (was, state) = {
             let mut j = ctx.journal();
-            let was = j.state().goal(&g.name).cloned().unwrap_or(GoalState::Unknown);
+            let was = j.state().goal(&g.name).cloned().unwrap_or(GoalState::Unknown { why: None });
             let changes = was.after_check(ok, &now()) != was;
             let says_new = match &t.line {
                 None => true,
@@ -577,7 +666,7 @@ impl Loop {
                     *said != ok || *facts != kept || at.elapsed() >= LINE_EVERY
                 }
             };
-            let lines = ctx.observe.new_lines(&ctx.w, &goals::needs(&ctx.w, g), span.to);
+            let lines = ctx.observe.new_lines(&ctx.w, &ctx.w.reads(g), span.to);
             if changes || says_new || v.p.is_some() || !lines.is_empty() {
                 j.add(Event {
                     ms,
@@ -592,7 +681,7 @@ impl Loop {
                 });
                 t.line = Some((ok, kept, Instant::now()));
             }
-            let state = j.state().goal(&g.name).cloned().unwrap_or(GoalState::Unknown);
+            let state = j.state().goal(&g.name).cloned().unwrap_or(GoalState::Unknown { why: None });
             (was, state)
         };
         // One failed check is not yet a failing goal: no warning, repair or ask until a
@@ -775,7 +864,7 @@ impl Loop {
         let Some(g) = ctx.w.goal(goal) else { return };
         // The window as the ring holds it now, LINES included: not one check line.
         let span = goals::span(g, observe::Snapshot::now());
-        let facts = observe::shown(&ctx.observe.values(&goals::needs(&ctx.w, g), span));
+        let facts = observe::shown(&ctx.observe.values(&ctx.w.reads(g), span));
         let mut lines = card::goal_lines(&ctx, g, &facts);
         lines.push("Subweave is fixing it, and asks you only if it needs you.".into());
         ctx.message(

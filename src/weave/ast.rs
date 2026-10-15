@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize, Serializer};
@@ -331,7 +332,7 @@ pub struct Goal {
     pub name: String,
     /// What it keeps true, for a person: `GOAL current "reth runs its newest release" …`.
     pub sentence: String,
-    pub after: Vec<String>,
+    pub after: Vec<GoalRef>,
     #[serde(serialize_with = "dur_opt")]
     pub every: Option<Duration>,
     /// The window it is judged over; `None`: its EVERY.
@@ -350,6 +351,36 @@ pub struct Goal {
 pub enum Condition {
     Code(Expr),
     Quoted(String),
+}
+
+/// A goal AFTER names: one of this weave's, or `<service>:<goal>`, a goal of another
+/// service on the same box.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GoalRef {
+    pub service: Option<String>,
+    pub goal: String,
+}
+
+impl GoalRef {
+    /// The goal's name when it is this weave's.
+    pub fn local(&self) -> Option<&str> {
+        self.service.is_none().then_some(self.goal.as_str())
+    }
+}
+
+impl std::fmt::Display for GoalRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.service {
+            Some(s) => write!(f, "{s}:{}", self.goal),
+            None => f.write_str(&self.goal),
+        }
+    }
+}
+
+impl Serialize for GoalRef {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -570,6 +601,48 @@ impl Weave {
             Condition::Code(_) => "",
         };
         backticked(text).filter(|n| self.fact(n).is_some_and(|f| f.ty == FactType::Lines))
+    }
+
+    /// The facts of this weave a goal reads: its condition's, window function arguments
+    /// and backticked names included, and its IF's.
+    pub fn reads(&self, g: &Goal) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        let code = match &g.cond {
+            Condition::Code(e) => Some(e),
+            Condition::Quoted(t) => {
+                for n in backticked(t).filter(|n| self.fact(n).is_some()) {
+                    out.insert(n.to_string());
+                }
+                None
+            }
+        };
+        for e in code.into_iter().chain(&g.when) {
+            e.walk(&mut |x| match x {
+                Expr::Name(n) | Expr::Window(_, n) if self.fact(n).is_some() => {
+                    out.insert(n.clone());
+                }
+                _ => {}
+            });
+        }
+        out
+    }
+
+    /// The facts of other services a goal reads, as (service, fact): its condition's and
+    /// its IF's.
+    pub fn reads_other<'a>(&self, g: &'a Goal) -> BTreeSet<(&'a str, &'a str)> {
+        let mut out = BTreeSet::new();
+        let code = match &g.cond {
+            Condition::Code(e) => Some(e),
+            Condition::Quoted(_) => None,
+        };
+        for e in code.into_iter().chain(&g.when) {
+            e.walk(&mut |x| {
+                if let Expr::Other(s, f) = x {
+                    out.insert((s.as_str(), f.as_str()));
+                }
+            });
+        }
+        out
     }
 }
 

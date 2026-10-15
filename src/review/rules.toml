@@ -416,13 +416,33 @@ pass = "yes"
 says = "a goal checks that the service runs and answers"
 
 [[rule]]
-id = "cov-disk"
+id = "box-after"
 area = "coverage"
 weight = 2
 on = "weave"
-ask = "Is there a goal in `goals` that checks that a disk has room?"
-pass = "yes"
-says = "a goal checks disk room"
+code = "box-after"
+says = "goals that need disk room or the clock come AFTER the box weave's"
+why = "`subweave run box` keeps disk room, the clock, the journal's size, SSH and security updates once per box: WEAVEFILE.md#composition."
+
+[[rule]]
+id = "box-shared"
+area = "coverage"
+weight = 2
+on = "weave"
+unless = "box-weave"
+ask = "Does any goal in `goals` check something every service on a computer shares, rather than this service itself: free room on a disk or filesystem, whether the system clock is synchronized, the size of the systemd journal, whether SSH is reachable, or whether the operating system installs its security updates?"
+pass = "no"
+says = "no goal repeats what the box weave keeps"
+why = "The box weave keeps these once per box; a service goes AFTER box:<goal> or reads box:<fact>: WEAVEFILE.md#composition."
+
+[[rule]]
+id = "box-vacuum"
+area = "coverage"
+weight = 2
+on = "run"
+code = "box-vacuum"
+says = "no RUN vacuums the systemd journal"
+why = "The box weave bounds the journal to one size; two weaves vacuuming to different sizes undo each other."
 
 [[rule]]
 id = "cov-logs"

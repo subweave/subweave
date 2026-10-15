@@ -5,8 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::ast::{Goal, Weave, show_duration};
 use super::expr::{self, Env};
 
-/// Goals in check order: a goal after every goal it names in AFTER, file order within
-/// a level. Goals on an AFTER cycle are left out (the check refuses such a file).
+/// Goals in check order: a goal after every goal of this weave it names in AFTER, file
+/// order within a level. Goals on an AFTER cycle are left out (the check refuses such a
+/// file).
 pub fn order(w: &Weave) -> Vec<&Goal> {
     let mut placed: BTreeSet<&str> = BTreeSet::new();
     let mut out = Vec::with_capacity(w.goals.len());
@@ -15,7 +16,7 @@ pub fn order(w: &Weave) -> Vec<&Goal> {
             .goals
             .iter()
             .filter(|g| !placed.contains(g.name.as_str()))
-            .filter(|g| g.after.iter().all(|a| placed.contains(a.as_str())))
+            .filter(|g| g.after.iter().filter_map(|a| a.local()).all(|a| placed.contains(a)))
             .collect();
         if level.is_empty() {
             return out;
@@ -25,8 +26,8 @@ pub fn order(w: &Weave) -> Vec<&Goal> {
     }
 }
 
-/// Goals that are off: their IF is false, or a goal they come AFTER is off. An IF that
-/// cannot be judged yet leaves the goal on.
+/// Goals that are off: their IF is false, or a goal of this weave they come AFTER is
+/// off. An IF that cannot be judged yet leaves the goal on.
 pub fn off(w: &Weave, env: &dyn Env) -> BTreeSet<String> {
     let mut off: BTreeSet<String> = w
         .goals
@@ -38,7 +39,10 @@ pub fn off(w: &Weave, env: &dyn Env) -> BTreeSet<String> {
         let more: Vec<String> = w
             .goals
             .iter()
-            .filter(|g| !off.contains(&g.name) && g.after.iter().any(|a| off.contains(a)))
+            .filter(|g| {
+                !off.contains(&g.name)
+                    && g.after.iter().filter_map(|a| a.local()).any(|a| off.contains(a))
+            })
             .map(|g| g.name.clone())
             .collect();
         if more.is_empty() {
@@ -48,7 +52,7 @@ pub fn off(w: &Weave, env: &dyn Env) -> BTreeSet<String> {
     }
 }
 
-/// The graph as a tree, each goal under its first AFTER goal:
+/// The graph as a tree, each goal under its first AFTER goal of this weave:
 ///
 /// ```text
 /// installed
@@ -60,15 +64,14 @@ pub fn tree(w: &Weave, off: &BTreeSet<String>) -> String {
     let mut kids: BTreeMap<&str, Vec<&Goal>> = BTreeMap::new();
     let mut roots = Vec::new();
     for g in &w.goals {
-        match g.after.first() {
-            Some(parent) if w.goal(parent).is_some() => {
-                kids.entry(parent.as_str()).or_default().push(g)
-            }
-            _ => roots.push(g),
+        match parent(w, g) {
+            Some(p) => kids.entry(p).or_default().push(g),
+            None => roots.push(g),
         }
     }
     let mut out = String::new();
     fn walk(
+        w: &Weave,
         g: &Goal,
         prefix: &str,
         last: bool,
@@ -79,8 +82,16 @@ pub fn tree(w: &Weave, off: &BTreeSet<String>) -> String {
         depth: usize,
     ) {
         let mut tags = Vec::new();
-        if g.after.len() > 1 {
-            tags.push(format!("also after {}", g.after[1..].join(", ")));
+        let p = parent(w, g);
+        let rest: Vec<String> = g
+            .after
+            .iter()
+            .filter(|a| a.local() != p || p.is_none())
+            .map(ToString::to_string)
+            .collect();
+        if !rest.is_empty() {
+            let word = if p.is_some() { "also after" } else { "after" };
+            tags.push(format!("{word} {}", rest.join(", ")));
         }
         if let Some(o) = g.over {
             tags.push(format!("OVER {}", show_duration(o)));
@@ -113,6 +124,7 @@ pub fn tree(w: &Weave, off: &BTreeSet<String>) -> String {
         };
         for (i, k) in children.iter().enumerate() {
             walk(
+                w,
                 k,
                 &next,
                 i + 1 == children.len(),
@@ -125,7 +137,12 @@ pub fn tree(w: &Weave, off: &BTreeSet<String>) -> String {
         }
     }
     for r in roots {
-        walk(r, "", true, true, &kids, off, &mut out, 0);
+        walk(w, r, "", true, true, &kids, off, &mut out, 0);
     }
     out
+}
+
+/// The goal a tree shows `g` under: the first goal of this weave it comes AFTER.
+fn parent<'a>(w: &Weave, g: &'a Goal) -> Option<&'a str> {
+    g.after.iter().filter_map(|a| a.local()).find(|a| w.goal(a).is_some())
 }
