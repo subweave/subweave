@@ -134,9 +134,12 @@ pub(crate) fn subject(ctx: &Ctx, g: &Goal) -> String {
     }
 }
 
-/// An action's button: its label, else its name.
-pub(crate) fn label(a: &Action) -> String {
-    a.label.clone().unwrap_or_else(|| a.name.clone())
+/// An action's button: its label, `$name` replaced, else its name.
+pub(crate) fn label(ctx: &Ctx, a: &Action) -> String {
+    match &a.label {
+        Some(l) => weave::subst(l, &ctx.spec.args),
+        None => a.name.clone(),
+    }
 }
 
 /// Why a rule holds an action, for a person: its `BECAUSE`, else the rule as written.
@@ -147,12 +150,23 @@ fn why(ctx: &Ctx, r: &Rule) -> String {
     }
 }
 
-/// A goal that does not hold: what it keeps true, then each fact it reads as it is now.
+/// A goal that does not hold: what it keeps true and how it is checked, then each fact
+/// it reads as it is now.
 pub(crate) fn goal_lines(ctx: &Ctx, g: &Goal, now: &BTreeMap<String, String>) -> Vec<String> {
     let mut out = vec![match (&g.plain, &g.cond) {
         (None, Condition::Code(e)) => format!("Goal `{}` does not hold: `{e}`.", g.name),
         _ => format!("Not true now: {}.", subject(ctx, g).trim_end_matches('.')),
     }];
+    if g.plain.is_some() {
+        out.push(match &g.cond {
+            Condition::Code(e) => format!("Goal `{}` checks `{e}`.", g.name),
+            Condition::Quoted(t) => format!(
+                "Goal `{}` asks a model: {}.",
+                g.name,
+                weave::subst(t, &ctx.spec.args).trim_end_matches('.')
+            ),
+        });
+    }
     for f in goals::needs(&ctx.w, g) {
         if let Some(v) = now.get(&f) {
             let v = v.trim();
@@ -189,15 +203,19 @@ pub(crate) fn tries(
 pub(crate) fn no_fit(
     ctx: &Ctx,
     g: &Goal,
-    refused: &[(&Action, &Rule)],
+    refused: &[(&Action, &Rule, bool)],
     now: &BTreeMap<String, String>,
 ) -> Card {
     let mut lines = goal_lines(ctx, g, now);
     if refused.is_empty() {
         lines.push("No action in the weave can fix this, so it needs you.".into());
     } else {
-        for (a, r) in refused {
-            lines.push(format!("{} is refused: {}.", label(a), why(ctx, r)));
+        for (a, r, kept) in refused {
+            lines.push(if *kept {
+                format!("{} is off: you answered Never run it for it before.", label(ctx, a))
+            } else {
+                format!("{} is refused: {}.", label(ctx, a), why(ctx, r))
+            });
         }
         lines.push("No other action can fix this, so it needs you.".into());
     }
@@ -219,13 +237,16 @@ pub(crate) fn which(
     let mut lines = goal_lines(ctx, g, now);
     lines.push(why.to_string());
     for a in cands {
-        lines.push(format!(
-            "{}: right when {}.",
-            label(a),
-            weave::subst(&a.when, &ctx.spec.args).trim_end_matches('.')
-        ));
+        let when = weave::subst(&a.when, &ctx.spec.args);
+        let when = when.trim().trim_end_matches('.');
+        lines.push(if when.is_empty() {
+            format!("{}.", label(ctx, a))
+        } else {
+            format!("{}: right when {when}.", label(ctx, a))
+        });
     }
-    let mut b: Vec<(String, String)> = cands.iter().map(|a| (a.name.clone(), label(a))).collect();
+    let mut b: Vec<(String, String)> =
+        cands.iter().map(|a| (a.name.clone(), label(ctx, a))).collect();
     b.push(("no".into(), later()));
     Card {
         title: format!("Which fix for: {}?", short(&subject(ctx, g), SUBJECT)),
@@ -259,7 +280,7 @@ pub(crate) fn gate(
     lines.push(format!("The weave asks you first: {}.", why(ctx, rule)));
     Card {
         title: match &a.label {
-            Some(l) => format!("{}?", l.trim_end_matches(['.', '?'])),
+            Some(_) => format!("{}?", label(ctx, a).trim_end_matches(['.', '?'])),
             None => format!("Run `{}`?", a.name),
         },
         lines,
@@ -272,16 +293,30 @@ pub(crate) fn gate(
     }
 }
 
-/// What a coder ask is for: the goal's lines, or the person's task.
+/// What a coder ask is for: the goal's lines and the action the coder runs, or the
+/// person's task.
 fn work_lines(
     ctx: &Ctx,
     goal: Option<&Goal>,
+    action: &str,
     task: &str,
     now: &BTreeMap<String, String>,
 ) -> Vec<String> {
     match goal {
-        Some(g) => goal_lines(ctx, g, now),
+        Some(g) => {
+            let mut out = goal_lines(ctx, g, now);
+            out.push(format!("The coder runs {} to fix it.", action_name(ctx, action)));
+            out
+        }
         None => vec![format!("Your task: {}", short(task, 300))],
+    }
+}
+
+/// An action by name, as its button says it.
+fn action_name(ctx: &Ctx, action: &str) -> String {
+    match ctx.w.action(action) {
+        Some(a) if a.label.is_some() => format!("“{}”", label(ctx, a)),
+        _ => format!("`{action}`"),
     }
 }
 
@@ -297,11 +332,12 @@ fn no_label(goal: Option<&Goal>) -> String {
 pub(crate) fn coder_asks(
     ctx: &Ctx,
     goal: Option<&Goal>,
+    action: &str,
     task: &str,
     question: &str,
     now: &BTreeMap<String, String>,
 ) -> Card {
-    let mut lines = work_lines(ctx, goal, task, now);
+    let mut lines = work_lines(ctx, goal, action, task, now);
     lines.push("The coder says only you can do this.".into());
     Card {
         title: question.to_string(),
@@ -314,11 +350,12 @@ pub(crate) fn coder_asks(
 pub(crate) fn coder_stuck(
     ctx: &Ctx,
     goal: Option<&Goal>,
+    action: &str,
     task: &str,
     tried: Vec<String>,
     now: &BTreeMap<String, String>,
 ) -> Card {
-    let mut lines = work_lines(ctx, goal, task, now);
+    let mut lines = work_lines(ctx, goal, action, task, now);
     lines.extend(tried);
     Card {
         title: match goal {
@@ -334,12 +371,16 @@ pub(crate) fn coder_stuck(
 pub(crate) fn command(
     ctx: &Ctx,
     goal: Option<&Goal>,
+    action: &str,
     command: &str,
     purpose: &str,
     rule: &str,
 ) -> Card {
     let mut lines = match goal {
-        Some(g) => vec![format!("To make this true: {}.", subject(ctx, g).trim_end_matches('.'))],
+        Some(g) => vec![
+            format!("To make this true: {}.", subject(ctx, g).trim_end_matches('.')),
+            format!("The coder runs {} to fix it.", action_name(ctx, action)),
+        ],
         None => vec!["For your task.".to_string()],
     };
     lines.push(format!(

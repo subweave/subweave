@@ -215,6 +215,9 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
     n
 }
 
+/// The card waits this long for its summary, then goes without one.
+const SUMMARY_WAIT: Duration = Duration::from_secs(20);
+
 /// The summary's journal line, and its lines when they can be used.
 struct Summarized {
     lines: Result<Vec<String>, String>,
@@ -236,7 +239,15 @@ async fn summarize(coder: &Coder, msg: &Message, about: Option<&str>) -> Summari
     });
     let start = Instant::now();
     let model = coder.model(0).to_string();
-    match card::summary(coder, &card).await {
+    let called = tokio::time::timeout(SUMMARY_WAIT, card::summary(coder, &card))
+        .await
+        .unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
+                "no answer in {} s, the card went without it",
+                SUMMARY_WAIT.as_secs()
+            ))
+        });
+    match called {
         Ok(s) => {
             let mut tally = Tally::default();
             tally.add(&s.reply);

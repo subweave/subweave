@@ -130,7 +130,8 @@ pub(crate) enum Outcome {
 
 enum Gate<'a> {
     Pass,
-    Refused(&'a Rule),
+    /// `true`: the person's own `never` for this rule and action refuses it.
+    Refused(&'a Rule, bool),
     Ask(&'a Rule),
 }
 
@@ -211,7 +212,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
             }
             match gate(ctx, goal, &f.action, &values, f.approved) {
                 Gate::Pass => {}
-                Gate::Refused(rule) => {
+                Gate::Refused(rule, _) => {
                     refused(ctx, goal, &f.action, &rule_text(rule));
                     return Outcome::Nothing;
                 }
@@ -238,7 +239,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                 return Outcome::Asked;
             }
             let mut out: BTreeSet<String> = BTreeSet::new();
-            let mut refusals: Vec<(&Action, &Rule)> = Vec::new();
+            let mut refusals: Vec<(&Action, &Rule, bool)> = Vec::new();
             loop {
                 let cands = candidates(ctx, goal, &values, &out);
                 if cands.is_empty() {
@@ -271,10 +272,10 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                 };
                 match gate(ctx, goal, &pick, &values, false) {
                     Gate::Pass => break (pick, Vec::new()),
-                    Gate::Refused(rule) => {
+                    Gate::Refused(rule, kept) => {
                         refused(ctx, goal, &pick, &rule_text(rule));
                         if let Some(a) = ctx.w.action(&pick) {
-                            refusals.push((a, rule));
+                            refusals.push((a, rule, kept));
                         }
                         out.insert(pick);
                     }
@@ -342,7 +343,7 @@ fn gate<'a>(
     for r in &ctx.w.rules {
         if let Rule::NeverIf { expr: e, .. } = r {
             if expr::holds(e, &scope) {
-                return Gate::Refused(r);
+                return Gate::Refused(r, false);
             }
         }
     }
@@ -360,7 +361,7 @@ fn gate<'a>(
         let text = rule_text(r);
         let kept = ctx.journal().kept(&text, action);
         match kept {
-            Some("never") => return Gate::Refused(r),
+            Some("never") => return Gate::Refused(r, true),
             Some(_) => {
                 ctx.journal().add(Line {
                     kind: Kind::Gate,

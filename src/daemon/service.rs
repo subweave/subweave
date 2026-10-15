@@ -518,10 +518,13 @@ impl Loop {
         }
     }
 
-    /// Sets a goal's state without a check (off, waiting).
+    /// Sets a goal's state without a check (off, waiting): a failed check before it no
+    /// longer counts toward two in a row.
     fn set(&mut self, goal: &str, state: GoalState, blocked: bool) {
         let t = self.tracks.get_mut(goal).expect("a track per goal");
         t.blocked = blocked;
+        t.fails = 0;
+        t.again = None;
         if t.state != state {
             t.state = state;
             t.since = Some(now());
@@ -562,16 +565,18 @@ impl Loop {
             t.line = Some((ok, shown, Instant::now()));
         }
         // One failed check is not yet a failing goal: no warning, repair or ask until a
-        // second check in a row fails too.
+        // second check fails too. A check with no answer neither counts nor resets.
         t.again = None;
-        if ok == Some(false) {
-            t.fails += 1;
-            if t.fails < 2 && t.state != GoalState::Fails {
-                t.again = Some(Instant::now() + recheck(g));
-                return;
+        match ok {
+            Some(false) => {
+                t.fails += 1;
+                if t.fails < 2 && t.state != GoalState::Fails {
+                    t.again = Some(Instant::now() + recheck(g));
+                    return;
+                }
             }
-        } else {
-            t.fails = 0;
+            Some(true) => t.fails = 0,
+            None => {}
         }
         let state = match ok {
             Some(true) => GoalState::Holds,

@@ -565,7 +565,7 @@ async fn session(
                             goal: work.goal_name(),
                             action: Some(work.action.to_string()),
                             rule: None,
-                            card: card::coder_asks(ctx, work.goal, task, &q, &shown),
+                            card: card::coder_asks(ctx, work.goal, work.action, task, &q, &shown),
                             facts: shown,
                         });
                         end = Some(End::Asked);
@@ -780,7 +780,7 @@ async fn judge(
         goal: work.goal_name(),
         action: Some(work.action.to_string()),
         rule: None,
-        card: card::coder_stuck(ctx, work.goal, task, tried_lines, &now),
+        card: card::coder_stuck(ctx, work.goal, work.action, task, tried_lines, &now),
         facts: now,
     });
     true
@@ -942,7 +942,7 @@ async fn gate_and_run(
             goal: work.goal_name(),
             action: Some(work.action.to_string()),
             rule: Some(rule.clone()),
-            card: card::command(ctx, work.goal, command, purpose, &rule),
+            card: card::command(ctx, work.goal, work.action, command, purpose, &rule),
             facts: facts::shown(&values),
         });
         return Err(());

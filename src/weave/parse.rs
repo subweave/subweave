@@ -223,7 +223,7 @@ fn split_because(s: &str) -> Result<(&str, Option<String>), String> {
     let mut c = Cur::new(why);
     let text = c.quoted()?;
     if !c.at_end() {
-        return Err("BECAUSE: text after the quoted reason".into());
+        return Err("BECAUSE \"<why>\" comes last, after IF".into());
     }
     Ok((head, Some(text)))
 }
@@ -628,12 +628,11 @@ impl Parser {
         };
         // Quoted text right after the name is the plain sentence when a condition follows
         // it, else the quoted condition itself.
-        let first = if c.starts_quoted() {
-            Some(c.quoted()?)
-        } else {
-            None
-        };
+        let mut first = None;
         let res = (|| {
+            if c.starts_quoted() {
+                first = Some(c.quoted()?);
+            }
             if c.eat("AFTER") {
                 goal.after = c.names().into_iter().map(String::from).collect();
                 if goal.after.is_empty() {
@@ -699,20 +698,9 @@ impl Parser {
                 "ACTION {n}: the name belongs to a person's task (subweave task); pick another"
             ));
         }
-        let label = if c.starts_quoted() {
-            let l = c.quoted()?;
-            if l.trim().is_empty() || l.chars().count() > LABEL_MAX {
-                return Err(format!(
-                    "ACTION {n}: the label is a button: 1 to {LABEL_MAX} characters"
-                ));
-            }
-            Some(l)
-        } else {
-            None
-        };
         let mut action = Action {
             name: n.clone(),
-            label,
+            label: None,
             for_goals: Vec::new(),
             within: None,
             when_if: None,
@@ -721,6 +709,15 @@ impl Parser {
             line: no,
         };
         let res = (|| {
+            if c.starts_quoted() {
+                let l = c.quoted()?;
+                if l.trim().is_empty() || l.chars().count() > LABEL_MAX {
+                    return Err(format!(
+                        "ACTION {n}: the label is a button: 1 to {LABEL_MAX} characters"
+                    ));
+                }
+                action.label = Some(l);
+            }
             if c.eat("FOR") {
                 action.for_goals = c.names().into_iter().map(String::from).collect();
                 if action.for_goals.is_empty() {

@@ -28,7 +28,8 @@ const CONTROL: &str = "answer";
 /// The longest fact value a field shows.
 const FACT_VALUE: usize = 500;
 
-/// What we raised, kept to check the server's copy against.
+/// What we raised, kept to check the server's copy against: everything the person reads
+/// before signing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Raised {
     pub id: String,
@@ -36,12 +37,14 @@ pub struct Raised {
     pub title: String,
     pub body: String,
     pub payload: Value,
+    pub view: Value,
     pub buttons: Vec<Button>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Button {
     pub id: String,
+    pub label: String,
     pub stance: String,
 }
 
@@ -153,9 +156,17 @@ pub(super) async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
         Some(ask) => ask.answers.iter().map(String::as_str).collect(),
         None => vec!["seen"],
     };
-    let options: Vec<Value> = words
+    let buttons: Vec<Button> = words
         .iter()
-        .map(|w| json!({"id": w, "label": label(msg, w), "stance": stance(w)}))
+        .map(|w| Button {
+            id: (*w).to_owned(),
+            label: label(msg, w),
+            stance: stance(w).to_owned(),
+        })
+        .collect();
+    let options: Vec<Value> = buttons
+        .iter()
+        .map(|b| json!({"id": b.id, "label": b.label, "stance": b.stance}))
         .collect();
     let raised = Raised {
         id: id.clone(),
@@ -163,13 +174,8 @@ pub(super) async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
         title: msg.title.clone(),
         body: body(msg),
         payload,
-        buttons: words
-            .iter()
-            .map(|w| Button {
-                id: (*w).to_owned(),
-                stance: stance(w).to_owned(),
-            })
-            .collect(),
+        view: view(msg),
+        buttons,
     };
     // The daemon's code builds this form, not a model: Steery's card judge, which holds
     // an agent's words to its guidelines, does not apply to it.
@@ -178,7 +184,7 @@ pub(super) async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
         "title": raised.title,
         "body": raised.body,
         "payload": raised.payload,
-        "view": view(msg),
+        "view": raised.view,
         "input": [{"kind": "buttons", "name": CONTROL, "options": options}],
         "unjudged": true,
     });
@@ -206,16 +212,21 @@ pub(super) async fn poll(ch: &Channel, open: &[(u64, Sent)]) -> Result<Vec<Answe
     let key: Arc<str> = key(ch)?.into();
     let pins: Arc<[Pin]> = ch.pins.clone().into();
     let mut reads = JoinSet::new();
+    let mut errors = Vec::new();
     for (n, sent) in open {
         let n = *n;
-        let raised: Raised = serde_json::from_value(sent.0.clone())
-            .map_err(|e| anyhow!("ask #{n}: not a Steery request: {e}"))?;
+        let raised: Raised = match serde_json::from_value(sent.0.clone()) {
+            Ok(r) => r,
+            Err(e) => {
+                errors.push(format!("ask #{n}: not a Steery request: {e}"));
+                continue;
+            }
+        };
         let key = key.clone();
         let pins = pins.clone();
         reads.spawn(async move { (n, read(&key, &raised, &pins).await) });
     }
     let mut answers = Vec::new();
-    let mut errors = Vec::new();
     while let Some(joined) = reads.join_next().await {
         match joined {
             Ok((n, Ok(Some((word, by))))) => answers.push(Answer { n, word, by }),
@@ -281,6 +292,9 @@ pub fn verify(raised: &Raised, request: &Value, pins: &[Pin]) -> Result<(String,
     }
     if request.get("payload") != Some(&raised.payload) {
         bail!("the payload differs from the one sent");
+    }
+    if request.get("view").cloned().unwrap_or_else(|| json!([])) != raised.view {
+        bail!("the view differs from the one sent");
     }
     if buttons(request)? != raised.buttons {
         bail!("the buttons differ from the ones sent");
@@ -352,6 +366,7 @@ fn buttons(request: &Value) -> Result<Vec<Button>> {
         .map(|o| {
             Ok(Button {
                 id: text(&o["id"], "button id")?.to_owned(),
+                label: text(&o["label"], "button label")?.to_owned(),
                 stance: text(&o["stance"], "button stance")?.to_owned(),
             })
         })
