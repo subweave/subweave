@@ -63,6 +63,39 @@ Each weave's README says what it cannot do. [LIMITS.md](LIMITS.md) says what Sub
 
 `subweave dash` serves a web dashboard for a box: goals, live activity, metrics, logs, learned commands and the weave. From it you answer asks, run an action, give the coder a task in words (`subweave task` on the CLI) and change settings in words. It always needs a password: set one with `subweave dash --password`. It listens on 127.0.0.1:7400; `--bind 0.0.0.0` opens it to the network, and `subweave dash --install` makes it a systemd unit. See [Dashboard](WEAVEFILE.md#dashboard).
 
+## Metrics, logs, traces
+
+The dashboard serves Prometheus metrics at `/metrics`, a view of each service's journal, `status.json` and the box's vitals. A scrape from the box itself needs nothing; from elsewhere, the dashboard password as a bearer token:
+
+```yaml
+scrape_configs:
+  - job_name: subweave
+    authorization: { credentials: "<dashboard password>" }
+    static_configs: [{ targets: ["box.example:7400"] }]
+```
+
+| Metric | Type | Labels | What |
+|---|---|---|---|
+| `subweave_goal_holds` | gauge | service, goal | 1 when the goal holds |
+| `subweave_goal_state_seconds` | gauge | service, goal, state | seconds in the current state |
+| `subweave_checks_total` | counter | service, goal, ok | check lines: a result that changed, or hourly |
+| `subweave_fact_value` | gauge | service, fact | newest value of a numeric fact |
+| `subweave_actions_total` | counter | service, action, goal, ok | actions ended; ok: the goal held within `WITHIN` |
+| `subweave_action_duration_seconds` | histogram | service, action | an action's steps and `WITHIN` wait |
+| `subweave_step_duration_seconds` | summary | service, kind | commands, checks, decisions, learns, coder conversations, tasks |
+| `subweave_episodes_total` | counter | service, kind, outcome | repairs, tasks, learns ended: ok, failed, asked, wait, learned |
+| `subweave_goal_recovery_seconds` | histogram | service, goal | first failing check to the check that holds again |
+| `subweave_asks_open` | gauge | service | asks waiting for an answer |
+| `subweave_asks_total` | counter | service | asks raised |
+| `subweave_answers_total` | counter | service, by_kind | person, withdrawn (goal held again), always (a kept answer passed a rule) |
+| `subweave_model_cost_usd_total` | counter | service, model, role | spend; role decider or coder |
+| `subweave_model_tokens_total` | counter | service, model, type | input, cached, output, reasoning; the decider's rule and quoted-goal checks count in cost only |
+| `subweave_model_calls_total` | counter | service, model | model requests, as above |
+| `subweave_box_cpu_ratio` | gauge | | CPU busy share (Linux) |
+| `subweave_box_memory_used_ratio` | gauge | | memory in use (Linux) |
+| `subweave_box_load1` | gauge | | one-minute load (Linux) |
+| `subweave_box_disk_used_ratio` | gauge | mount | used share of each filesystem (Linux) |
+
 ## For weave authors
 
 `subweave review <weave>` scores a Weavefile from 0 to 100 against its authoring rules and points at the lines to fix. The shipped postgres weave passes every rule.

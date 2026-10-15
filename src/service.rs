@@ -160,6 +160,21 @@ pub struct Line {
     /// reads, a decision, a learn, a coder conversation, an action, a task's run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ms: Option<u64>,
+    /// On an episode's first line: the job it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<JobKind>,
+}
+
+/// What an episode runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JobKind {
+    /// A failing goal's repair.
+    Repair,
+    /// A person's task in words.
+    Task,
+    /// A quoted fact learned outside a job.
+    Learn,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

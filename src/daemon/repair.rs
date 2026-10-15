@@ -10,7 +10,7 @@ use serde_json::json;
 
 use crate::channel;
 use crate::model::decider::Question;
-use crate::service::{Kind, LearnedSteps, Line, TASK};
+use crate::service::{JobKind, Kind, LearnedSteps, Line, TASK};
 use crate::weave::{self, Action, Goal, Rule, Step, expr, show_duration};
 
 use super::asks::AskReq;
@@ -103,7 +103,8 @@ impl TaskJob {
         }
     }
 
-    /// An `action: "task"` line of this task.
+    /// An `action: "task"` line of this task; with no `ok`, its start line, which begins
+    /// its episode.
     pub fn line(&self, ok: Option<bool>, text: String) -> Line {
         Line {
             kind: Kind::Action,
@@ -112,6 +113,7 @@ impl TaskJob {
             text: Some(text),
             by: Some(self.by.clone()).filter(|b| !b.is_empty()),
             ep: Some(self.ep.clone()),
+            job: ok.is_none().then_some(JobKind::Task),
             ..Default::default()
         }
     }
@@ -147,8 +149,8 @@ pub(crate) async fn run(ctx: Arc<Ctx>, job: Job) -> (Option<String>, Outcome) {
         }
     };
     let out = match &job {
-        Job::Repair(_) => super::episode::scope(work).await,
-        Job::Task(t) => super::episode::within(t.ep.clone(), work).await,
+        Job::Repair(_) => super::episode::scope(JobKind::Repair, work).await,
+        Job::Task(t) => super::episode::task(t.ep.clone(), work).await,
     };
     *ctx.repair.lock().unwrap_or_else(|e| e.into_inner()) = None;
     *ctx.by.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -206,7 +208,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                     .note(Some(&goal.name), format!("no action {}", f.action));
                 return Outcome::Nothing;
             }
-            match gate(ctx, &f.action, &values, f.approved) {
+            match gate(ctx, goal, &f.action, &values, f.approved) {
                 Gate::Pass => {}
                 Gate::Refused(rule) => {
                     refused(ctx, goal, &f.action, &rule);
@@ -292,7 +294,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                         }
                     }
                 };
-                match gate(ctx, &pick, &values, false) {
+                match gate(ctx, goal, &pick, &values, false) {
                     Gate::Pass => break (pick, Vec::new()),
                     Gate::Refused(rule) => {
                         refused(ctx, goal, &pick, &rule);
@@ -345,8 +347,9 @@ pub(crate) fn rule_text(r: &Rule) -> String {
     }
 }
 
-/// The code rules on one action. Quoted rules never gate an author's action.
-fn gate(ctx: &Ctx, action: &str, values: &Values, approved: bool) -> Gate {
+/// The code rules on one action. Quoted rules never gate an author's action. A rule the
+/// person answered `always` for passes with an `ok` gate line.
+fn gate(ctx: &Ctx, goal: &Goal, action: &str, values: &Values, approved: bool) -> Gate {
     let scope = Scope {
         ctx,
         facts: values,
@@ -371,9 +374,20 @@ fn gate(ctx: &Ctx, action: &str, values: &Values, approved: bool) -> Gate {
             continue;
         }
         let text = rule_text(r);
-        match ctx.journal().kept(&text, action) {
+        let kept = ctx.journal().kept(&text, action);
+        match kept {
             Some("never") => return Gate::Refused(text),
-            Some(_) => continue,
+            Some(_) => {
+                ctx.journal().add(Line {
+                    kind: Kind::Gate,
+                    goal: Some(goal.name.clone()),
+                    action: Some(action.to_string()),
+                    ok: Some(true),
+                    text: Some(text),
+                    ..Default::default()
+                });
+                continue;
+            }
             None => {}
         }
         if !approved {

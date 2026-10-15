@@ -575,8 +575,9 @@ async fn dashboard(b: &mut Box_) {
         !o.status.success() && err.contains("set one first: subweave dash --password"),
         "a dashboard with no password does not start: {err}"
     );
+    // On every address: a scrape from a non-loopback one needs the password.
     let mut set = b.command();
-    set.args(["dash", "--port", &port.to_string(), "--password"])
+    set.args(["dash", "--bind", "0.0.0.0", "--port", &port.to_string(), "--password"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -722,6 +723,119 @@ async fn dashboard(b: &mut Box_) {
             .len()
             == 1,
         "the task's coder session is journaled"
+    );
+
+    // `/metrics` shows what the flow did.
+    let metrics = format!("http://127.0.0.1:{port}/metrics");
+    let r = http
+        .get(&metrics)
+        .bearer_auth(DASH_PASSWORD)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(
+        r.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain; version=0.0.4"),
+        "{:?}",
+        r.headers()
+    );
+    let text = r.text().await.unwrap();
+    // The sum of the samples whose line starts with `series` and holds every `label`.
+    let value = |series: &str, labels: &[&str]| -> f64 {
+        let found: Vec<f64> = text
+            .lines()
+            .filter(|l| l.starts_with(series) && labels.iter().all(|x| l.contains(x)))
+            .filter_map(|l| l.rsplit(' ').next()?.parse().ok())
+            .collect();
+        if found.is_empty() {
+            b.fail(&format!("no {series} {labels:?} in /metrics:\n{text}"));
+        }
+        found.iter().sum()
+    };
+    let install_ok = value(
+        "subweave_actions_total{",
+        &[r#"action="install""#, r#"goal="installed""#, r#"ok="true""#],
+    );
+    assert_eq!(install_ok, b.passes("install") as f64, "{text}");
+    assert_eq!(
+        value("subweave_goal_holds{", &[r#"service="toy""#, r#"goal="running""#]),
+        1.0
+    );
+    assert!(
+        value(
+            "subweave_model_tokens_total{",
+            &[r#"model="deepseek/x"#, r#"type="input""#]
+        ) > 0.0,
+        "{text}"
+    );
+    assert!(
+        value("subweave_goal_recovery_seconds_count{", &[r#"goal="running""#]) >= 1.0,
+        "{text}"
+    );
+    assert!(
+        value(
+            "subweave_episodes_total{",
+            &[r#"kind="task""#, r#"outcome="ok""#]
+        ) >= 1.0,
+        "{text}"
+    );
+    assert!(
+        value("subweave_action_duration_seconds_count{", &[r#"action="restart""#]) >= 1.0,
+        "{text}"
+    );
+    let r = http.get(&metrics).send().await.unwrap();
+    assert_eq!(r.status(), 200, "a loopback scrape needs no password");
+    // A scrape from this box's own non-loopback address, when it has one and can reach it.
+    let lan = std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| s.connect("192.0.2.1:9").map(|()| s))
+        .and_then(|s| s.local_addr())
+        .map(|a| a.ip())
+        .ok()
+        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified());
+    let reached = match lan {
+        Some(ip) => {
+            let url = format!("http://{ip}:{port}/metrics");
+            let get = |auth: Option<&str>| {
+                let mut req = http.get(&url).timeout(Duration::from_secs(5));
+                if let Some(a) = auth {
+                    req = req.bearer_auth(a);
+                }
+                req.send()
+            };
+            match get(None).await {
+                Ok(r) => {
+                    assert_eq!(r.status(), 401, "{ip}: no password, no metrics");
+                    let r = get(Some("not it")).await.unwrap();
+                    assert_eq!(r.status(), 401, "{ip}: a wrong password");
+                    let r = get(Some(DASH_PASSWORD)).await.unwrap();
+                    assert_eq!(r.status(), 200, "{ip}: the password");
+                    let r = get(Some(DASH_PASSWORD)).await.unwrap();
+                    assert_eq!(r.status(), 200, "{ip}: the kept password");
+                    true
+                }
+                Err(e) => {
+                    eprintln!("skipped the non-loopback scrape: {url}: {e}");
+                    false
+                }
+            }
+        }
+        None => false,
+    };
+    eprintln!(
+        "/metrics, non-loopback half {}:\n{}",
+        if reached { "ran" } else { "skipped" },
+        text.lines()
+            .filter(|l| l.contains("service=\"toy\"")
+                && (l.starts_with("subweave_actions_total")
+                    || l.starts_with("subweave_goal_holds")
+                    || l.starts_with("subweave_episodes_total")
+                    || l.starts_with("subweave_model_tokens_total")
+                    || l.starts_with("subweave_goal_recovery_seconds_count")))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }
 

@@ -42,6 +42,14 @@ pub(crate) struct Vitals {
     recent: Mutex<VecDeque<(i64, Sample)>>,
 }
 
+impl Vitals {
+    /// The newest sample; none elsewhere than Linux or before the first.
+    pub(crate) fn last(&self) -> Option<Sample> {
+        let recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
+        recent.back().map(|(_, s)| s.clone())
+    }
+}
+
 /// This box reads like Linux: `/proc` is there.
 fn linux() -> bool {
     std::path::Path::new("/proc/stat").is_file()

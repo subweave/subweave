@@ -32,14 +32,17 @@ impl Journal {
         }
     }
 
-    /// Writes a line: the time and the running episode set, secrets redacted, pending
-    /// spend added.
+    /// Writes a line: the time and the running episode set (and its job, on its first
+    /// line), secrets redacted, pending spend added.
     pub fn add(&mut self, mut l: Line) -> Line {
         if l.t.is_empty() {
             l.t = now();
         }
         if l.ep.is_none() {
-            l.ep = super::episode::current();
+            if let Some((ep, job)) = super::episode::for_line() {
+                l.ep = Some(ep);
+                l.job = l.job.or(job);
+            }
         }
         for s in [&mut l.text, &mut l.body, &mut l.output].into_iter().flatten() {
             *s = redact(s, &self.secrets);
@@ -49,7 +52,8 @@ impl Journal {
                 *v = redact(v, &self.secrets);
             }
         }
-        if self.pending > 0.0 {
+        // A line with a model's usage keeps that model's cost alone.
+        if self.pending > 0.0 && l.usage.is_none() {
             l.cost_usd = Some(l.cost_usd.unwrap_or(0.0) + self.pending);
             self.pending = 0.0;
         }

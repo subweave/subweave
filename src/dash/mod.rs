@@ -8,6 +8,7 @@ mod auth;
 pub mod config;
 mod live;
 mod logs;
+mod metrics;
 mod read;
 mod vitals;
 
@@ -44,6 +45,7 @@ pub(crate) struct App {
     pub sessions: auth::Sessions,
     pub live: live::Live,
     pub vitals: vitals::Vitals,
+    pub metrics: metrics::Metrics,
 }
 
 /// `{error}` with a status.
@@ -128,6 +130,7 @@ pub async fn serve(config: Config) -> Result<()> {
         sessions: auth::Sessions::default(),
         live: live::Live::new(),
         vitals: vitals::Vitals::default(),
+        metrics: metrics::Metrics::default(),
     });
     tokio::spawn(live::tail(app.clone()));
     tokio::spawn(vitals::sample(app.clone()));
@@ -154,6 +157,7 @@ pub async fn serve(config: Config) -> Result<()> {
         .fallback(any(|| async { ApiError::not_found("no such API route") }));
     let router = Router::new()
         .nest("/api", api)
+        .route("/metrics", get(metrics::get))
         .fallback(assets::serve)
         .layer(middleware::from_fn_with_state(app.clone(), auth::guard))
         .with_state(app);

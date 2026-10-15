@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::model::coder::{Msg, Tally, Tool};
 use crate::model::decider::Question;
 use crate::paths;
-use crate::service::{self as svc, Kind, Learned, LearnedFact, Line};
+use crate::service::{self as svc, JobKind, Kind, Learned, LearnedFact, Line};
 use crate::weave::expr::Op;
 use crate::weave::{self, Action, Condition, Expr, Fact, FactSource, Rule, Step, Weave};
 
@@ -167,7 +167,7 @@ pub(crate) async fn fact_command(ctx: &Ctx, fact: &Fact) -> Option<String> {
     if let Some(c) = learned_command(ctx, fact) {
         return Some(c);
     }
-    super::episode::scope(learn_and_keep(ctx, fact, None)).await
+    super::episode::scope(JobKind::Learn, learn_and_keep(ctx, fact, None)).await
 }
 
 /// Whether a nonzero exit of this fact's command is a failed read, not a value: true for
@@ -216,7 +216,7 @@ pub(crate) async fn relearn(
     let hint = format!(
         "The last command for this fact failed on this box ({code}):\n{command}\nIt printed:\n{output}\nWrite one that works here."
     );
-    super::episode::scope(learn_and_keep(ctx, fact, Some(&hint))).await
+    super::episode::scope(JobKind::Learn, learn_and_keep(ctx, fact, Some(&hint))).await
 }
 
 /// Learns a quoted fact's command and keeps it. The caller holds `ctx.learning`.

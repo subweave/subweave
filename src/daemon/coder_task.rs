@@ -949,7 +949,19 @@ async fn gate_and_run(
                 None,
             ));
         }
-        if kept == Some("always") || rules_ok.iter().any(|ok| *ok == rule) {
+        if kept == Some("always") {
+            ctx.journal().add(Line {
+                kind: Kind::Gate,
+                goal: work.goal_name(),
+                action: Some(work.action.to_string()),
+                ok: Some(true),
+                text: Some(format!("{rule}: {}", ctx.redact(command))),
+                p: Some(BTreeMap::from([("yes".to_string(), p)])),
+                ..Default::default()
+            });
+            continue;
+        }
+        if rules_ok.iter().any(|ok| *ok == rule) {
             continue;
         }
         let values = facts::known(ctx, &facts::all(&ctx.w)).await;
