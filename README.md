@@ -65,7 +65,7 @@ Each weave's README says what it cannot do. [LIMITS.md](LIMITS.md) says what Sub
 
 ## Metrics, logs, traces
 
-The dashboard serves Prometheus metrics at `/metrics`, a view of each service's journal, `status.json` and the box's vitals. A scrape from the box itself needs nothing; from elsewhere, the dashboard password as a bearer token:
+The dashboard serves Prometheus metrics at `/metrics`, a view of each service's journal, `status.json` and the box's vitals. A scrape from the box itself needs nothing; from elsewhere, or through a proxy that sets `X-Forwarded-For`, the dashboard password as a bearer token:
 
 ```yaml
 scrape_configs:
@@ -95,6 +95,16 @@ scrape_configs:
 | `subweave_box_memory_used_ratio` | gauge | | memory in use (Linux) |
 | `subweave_box_load1` | gauge | | one-minute load (Linux) |
 | `subweave_box_disk_used_ratio` | gauge | mount | used share of each filesystem (Linux) |
+
+Journal lines that time a step (command, check, decide, learn, the end of a coder conversation, a task's end) carry `ms`.
+
+The daemon and dashboard log to stderr: JSON lines off a terminal, text on one. `SUBWEAVE_LOG` filters as `RUST_LOG` does (default `info`), e.g. `SUBWEAVE_LOG=subweave=debug`.
+
+With `OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) set, the daemon sends traces over OTLP http/protobuf: one per episode, its trace id the episode's `ep`, a root span for the repair, task or learn and a child span per journal line. Service `subweave`, with `host.name`.
+
+```sh
+systemctl edit subweave   # [Service] Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+```
 
 ## For weave authors
 
