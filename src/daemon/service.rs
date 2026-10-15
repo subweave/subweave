@@ -409,7 +409,9 @@ impl Loop {
             for g in order.iter().filter(|g| due.contains(g.name.as_str())) {
                 needed.extend(goals::needs(w, g));
             }
+            let read_start = Instant::now();
             let values = facts::read(&ctx, &needed, true).await;
+            let read_ms = super::ms(read_start);
             let mut quoted = Vec::new();
             for g in &order {
                 let after = |s: GoalState| {
@@ -449,7 +451,7 @@ impl Loop {
                     .into_iter()
                     .any(|n| !values.contains_key(&n));
                 if unread {
-                    self.record(g, None, &values);
+                    self.record(g, None, &values, read_ms);
                     continue;
                 }
                 if g.when.as_ref().is_some_and(|e| !expr::holds(e, &scope)) {
@@ -459,15 +461,17 @@ impl Loop {
                 match &g.cond {
                     Condition::Code(e) => {
                         let ok = expr::holds(e, &scope);
-                        self.record(g, Some(ok), &values);
+                        self.record(g, Some(ok), &values, read_ms);
                     }
                     Condition::Quoted(_) => quoted.push(*g),
                 }
             }
             if !quoted.is_empty() {
+                let decide_start = Instant::now();
                 let results = goals::quoted(&ctx, &quoted, &values).await;
+                let took = read_ms.zip(super::ms(decide_start)).map(|(r, d)| r + d);
                 for g in quoted {
-                    self.record(g, results.get(&g.name).copied().flatten(), &values);
+                    self.record(g, results.get(&g.name).copied().flatten(), &values, took);
                 }
             }
             self.dirty = true;
@@ -510,7 +514,8 @@ impl Loop {
     }
 
     /// A check's result: journal line when it says something new, messages on change.
-    fn record(&mut self, g: &weave::Goal, ok: Option<bool>, values: &Values) {
+    /// `ms`: how long its facts (and a quoted goal's decider) took.
+    fn record(&mut self, g: &weave::Goal, ok: Option<bool>, values: &Values, ms: Option<u64>) {
         let ctx = self.ctx.clone();
         let read: Values = goals::needs(&ctx.w, g)
             .into_iter()
@@ -535,6 +540,7 @@ impl Loop {
                 goal: Some(g.name.clone()),
                 ok,
                 facts: Some(shown.clone()),
+                ms,
                 ..Default::default()
             });
             t.line = Some((ok, shown, Instant::now()));

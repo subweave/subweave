@@ -152,9 +152,14 @@ pub struct Line {
     /// learn outside a job. Lines outside every episode have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ep: Option<String>,
-    /// What a model conversation used, on the line that ends it.
+    /// What a model conversation used, on the line that ends it: a coder's note, a
+    /// decider's `decide`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// Wall time in milliseconds of the step the line ends: a command, a check's fact
+    /// reads, a decision, a learn, a coder conversation, an action, a task's run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

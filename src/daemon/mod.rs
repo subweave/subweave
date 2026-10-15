@@ -15,7 +15,7 @@ mod service;
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -562,6 +562,11 @@ pub(crate) fn now() -> String {
 /// Seconds since the epoch of an RFC 3339 time.
 pub(crate) fn epoch_of(t: &str) -> Option<i64> {
     t.parse::<jiff::Timestamp>().ok().map(|ts| ts.as_second())
+}
+
+/// Milliseconds since `start`: a line's `ms`.
+pub(crate) fn ms(start: Instant) -> Option<u64> {
+    Some(u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX))
 }
 
 pub(crate) fn epoch() -> i64 {

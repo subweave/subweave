@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use indexmap::IndexMap;
 use serde_json::{Value, json};
@@ -22,7 +22,7 @@ use super::facts::{self, Values};
 use super::goals;
 use super::repair::{command, command_output, rule_text};
 use super::service::Ctx;
-use super::{cap, cap_to, sh};
+use super::{cap, cap_to, ms, sh};
 
 const RUN_LIMIT: Duration = Duration::from_secs(30 * 60);
 const OUTPUT_CAP: usize = 8 * 1024;
@@ -227,6 +227,7 @@ pub(crate) async fn pick_skills<'a>(
     if let Some(goal) = work.and_then(|w| w.goal) {
         state["failing_goal"] = json!(goals::describe(ctx, goal));
     }
+    let start = Instant::now();
     let answers = match decider.ask(state, questions).await {
         Ok(a) => a,
         Err(e) => {
@@ -264,6 +265,8 @@ pub(crate) async fn pick_skills<'a>(
         )),
         p: Some(p),
         cost_usd: Some(answers.cost_usd),
+        usage: Some(decider.usage(&answers)),
+        ms: ms(start),
         ..Default::default()
     });
     picked
@@ -459,6 +462,7 @@ async fn session(
         let mut checks = 0;
         let mut idle = 0;
         let mut tally = Tally::default();
+        let started = Instant::now();
         let sid = session_id(i);
         let mut files: HashMap<String, PathBuf> = HashMap::new();
         let end = loop {
@@ -604,6 +608,7 @@ async fn session(
             )),
             cost_usd: Some(tally.cost_usd),
             usage: Some(tally.usage(coder.model(i).to_string())),
+            ms: ms(started),
             ..Default::default()
         });
         match end {
@@ -731,6 +736,7 @@ async fn judge(
                     .into(),
         },
     )]);
+    let started = Instant::now();
     let a = match decider.ask(state, questions).await {
         Ok(a) => a,
         Err(e) => {
@@ -749,6 +755,8 @@ async fn judge(
         text: Some(format!("progress after {commands} commands: {choice}")),
         p: Some(probs.iter().map(|(k, v)| (k.clone(), *v)).collect()),
         cost_usd: Some(a.cost_usd),
+        usage: Some(decider.usage(&a)),
+        ms: ms(started),
         ..Default::default()
     });
     if closer >= 0.5 {
@@ -968,7 +976,9 @@ async fn gate_and_run(
         });
         return Err(());
     }
+    let start = Instant::now();
     let o = sh(command, &ctx.env, RUN_LIMIT).await;
+    let took = ms(start);
     let all = ctx.redact(&o.both());
     let file = save_output(ctx, &all);
     let shown = cap_to(&all, OUTPUT_CAP, file.as_deref());
@@ -979,6 +989,7 @@ async fn gate_and_run(
         text: Some(command.to_string()),
         ok: Some(o.ok()),
         output: command_output(ctx, &o),
+        ms: took,
         ..Default::default()
     });
     if o.ok() {

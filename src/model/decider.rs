@@ -111,6 +111,18 @@ impl Decider {
         })
     }
 
+    /// The journal's record of one request.
+    pub fn usage(&self, a: &Answers) -> crate::service::Usage {
+        crate::service::Usage {
+            model: self.model.to_string(),
+            calls: 1,
+            input: a.usage.input_tokens,
+            cached: 0,
+            output: a.usage.output_tokens,
+            reasoning: 0,
+        }
+    }
+
     /// One request with every question. 429 and 5xx answers are retried 3 times; a
     /// failed call is an error, which callers read as no answer, never as yes.
     pub async fn ask(

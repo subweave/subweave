@@ -16,7 +16,7 @@ use crate::weave::expr::Op;
 use crate::weave::{self, Action, Condition, Expr, Fact, FactSource, Rule, Step, Weave};
 
 use super::service::Ctx;
-use super::{now, save_json, sh};
+use super::{ms, now, save_json, sh};
 
 const TRIES: usize = 3;
 /// After a quoted fact could not be learned, the next try waits this long.
@@ -237,6 +237,7 @@ async fn learn_and_keep(ctx: &Ctx, fact: &Fact, hint: Option<&str>) -> Option<St
     }
     let mut cost = 0.0;
     let mut tally = Tally::default();
+    let start = Instant::now();
     let result = learn(ctx, fact, &text, hint, &mut cost, &mut tally).await;
     if tally.calls > 0 {
         let model = ctx
@@ -253,6 +254,7 @@ async fn learn_and_keep(ctx: &Ctx, fact: &Fact, hint: Option<&str>) -> Option<St
             )),
             cost_usd: Some(tally.cost_usd),
             usage: Some(tally.usage(model)),
+            ms: ms(start),
             ..Default::default()
         });
         cost -= tally.cost_usd;
@@ -275,6 +277,7 @@ async fn learn_and_keep(ctx: &Ctx, fact: &Fact, hint: Option<&str>) -> Option<St
                 kind: Kind::Learn,
                 text: Some(format!("fact {}: {command}", fact.name)),
                 cost_usd: Some(cost),
+                ms: ms(start),
                 ..Default::default()
             });
             ctx.message(
@@ -291,6 +294,7 @@ async fn learn_and_keep(ctx: &Ctx, fact: &Fact, hint: Option<&str>) -> Option<St
                 kind: Kind::Note,
                 text: Some(format!("cannot learn fact {}: {e:#}", fact.name)),
                 cost_usd: (cost > 0.0).then_some(cost),
+                ms: ms(start),
                 ..Default::default()
             });
             ctx.learn_wait
