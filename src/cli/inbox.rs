@@ -41,7 +41,14 @@ pub fn run() -> Result<ExitCode> {
             a.service,
             a.goal.as_deref().unwrap_or("-"),
             a.title.trim(),
-            a.answers.join(" "),
+            a.answers
+                .iter()
+                .map(|w| match a.labels.get(w).filter(|l| *l != w) {
+                    Some(l) => format!("{w}: {l}"),
+                    None => w.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join(" | "),
         );
     }
     println!("\nanswer with: subweave answer <n> <word>");

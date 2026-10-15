@@ -2,6 +2,7 @@
 //! answering channels for open asks. `WEAVEFILE.md` "The loop" says what a loop does.
 
 mod asks;
+mod card;
 mod coder_task;
 mod episode;
 mod facts;
@@ -444,6 +445,7 @@ impl Daemon {
             goal: ask.goal.clone(),
             title: format!("#{n} answered {word} by {by}"),
             text: format!("Ask #{n} is settled: {word}, by {by}."),
+            summary: Vec::new(),
             facts: BTreeMap::new(),
             ask: None,
         };
@@ -566,6 +568,7 @@ fn heartbeat() {
                 goal: None,
                 title: "tick".into(),
                 text: String::new(),
+                summary: Vec::new(),
                 facts: BTreeMap::new(),
                 ask: None,
             };

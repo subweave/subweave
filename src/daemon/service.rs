@@ -22,6 +22,7 @@ use crate::service::{
 use crate::weave::{self, Condition, Weave, expr, graph};
 
 use super::asks::{self, AskReq};
+use super::card;
 use super::facts::{self, Follower, Values};
 use super::goals::{self, Scope};
 use super::journal::Journal;
@@ -33,9 +34,28 @@ const LINE_EVERY: Duration = Duration::from_secs(3600);
 /// A goal failing again this soon after it held sends no new warning.
 const QUIET: Duration = Duration::from_secs(600);
 /// After `no`, a goal waits this long before the loop acts on it again.
-const NO_PARK: i64 = 3600;
+pub(crate) const NO_PARK: i64 = 3600;
 const CODE_EVERY: Duration = Duration::from_secs(60);
 const QUOTED_EVERY: Duration = Duration::from_secs(300);
+/// After a first failed check, the goal is checked again this soon, at most its EVERY.
+const RECHECK: Duration = Duration::from_secs(30);
+
+fn every(g: &weave::Goal) -> Duration {
+    g.every.unwrap_or(match g.cond {
+        Condition::Code(_) => CODE_EVERY,
+        Condition::Quoted(_) => QUOTED_EVERY,
+    })
+}
+
+/// How soon a goal's first failed check is checked again: a goal that reads `PREV()`
+/// compares over its whole EVERY, so it waits that long.
+fn recheck(g: &weave::Goal) -> Duration {
+    let mut prev = false;
+    if let Condition::Code(e) = &g.cond {
+        e.walk(&mut |n| prev |= matches!(n, weave::Expr::Prev(_)));
+    }
+    if prev { every(g) } else { RECHECK.min(every(g)) }
+}
 
 /// What the daemon hands a service's loop; `by` says who asked. An answer's `note`
 /// follows its answer line as a note by `by`.
@@ -66,11 +86,12 @@ pub(crate) struct Ctx {
     /// (name, value), longest value first.
     pub secrets: Vec<(String, String)>,
     pub decider: Option<Decider>,
-    pub coder: Option<Coder>,
+    /// Shared with the task that writes an ask's summary.
+    pub coder: Option<Arc<Coder>>,
     pub boxinfo: Option<BoxInfo>,
     /// What this box lacks for FROM and NEEDS.
     pub misfit: Vec<String>,
-    journal: Mutex<Journal>,
+    journal: Arc<Mutex<Journal>>,
     learned: Mutex<Learned>,
     pub follow: Mutex<BTreeMap<String, Follower>>,
     /// Per goal, the facts its last check read: `PREV()`.
@@ -154,7 +175,7 @@ impl Ctx {
             .collect::<Result<Vec<_>>>()
             .and_then(|m| Coder::new(&m))
         {
-            Ok(c) => Some(c),
+            Ok(c) => Some(Arc::new(c)),
             Err(e) => {
                 journal.note(None, format!("no coder: {e:#}"));
                 None
@@ -179,7 +200,7 @@ impl Ctx {
             coder,
             boxinfo,
             misfit,
-            journal: Mutex::new(journal),
+            journal: Arc::new(Mutex::new(journal)),
             learned: Mutex::new(learned),
             follow: Mutex::new(BTreeMap::new()),
             prev: Mutex::new(BTreeMap::new()),
@@ -193,6 +214,11 @@ impl Ctx {
 
     pub fn journal(&self) -> MutexGuard<'_, Journal> {
         lock(&self.journal)
+    }
+
+    /// The journal, for a task that outlives this borrow.
+    pub fn journal_handle(&self) -> Arc<Mutex<Journal>> {
+        self.journal.clone()
     }
 
     pub fn learned(&self) -> MutexGuard<'_, Learned> {
@@ -241,6 +267,7 @@ impl Ctx {
             goal,
             title,
             text: self.redact(&text),
+            summary: Vec::new(),
             facts: facts
                 .into_iter()
                 .map(|(k, v)| (k, self.redact(&v)))
@@ -266,6 +293,10 @@ struct Track {
     warned: bool,
     recovered: Option<Instant>,
     wait_until: Option<Instant>,
+    /// Failed checks in a row: the goal fails at the second.
+    fails: u32,
+    /// When a first failed check is checked again.
+    again: Option<Instant>,
 }
 
 struct Loop {
@@ -319,6 +350,8 @@ pub(crate) async fn run(
                     warned: false,
                     recovered: None,
                     wait_until: None,
+                    fails: 0,
+                    again: None,
                 },
             )
         })
@@ -379,14 +412,11 @@ impl Loop {
                         .get(a)
                         .is_some_and(|p| p.state == GoalState::Holds)
                 });
-                let every = g.every.unwrap_or(match g.cond {
-                    Condition::Code(_) => CODE_EVERY,
-                    Condition::Quoted(_) => QUOTED_EVERY,
-                });
                 parents_hold
                     && (t.blocked
+                        || t.again.is_some_and(|at| now >= at)
                         || t.last_check
-                            .is_none_or(|at| now.duration_since(at) >= every))
+                            .is_none_or(|at| now.duration_since(at) >= every(g)))
             })
             .map(|g| g.name.as_str())
             .collect();
@@ -531,6 +561,18 @@ impl Loop {
             });
             t.line = Some((ok, shown, Instant::now()));
         }
+        // One failed check is not yet a failing goal: no warning, repair or ask until a
+        // second check in a row fails too.
+        t.again = None;
+        if ok == Some(false) {
+            t.fails += 1;
+            if t.fails < 2 && t.state != GoalState::Fails {
+                t.again = Some(Instant::now() + recheck(g));
+                return;
+            }
+        } else {
+            t.fails = 0;
+        }
         let state = match ok {
             Some(true) => GoalState::Holds,
             Some(false) => GoalState::Fails,
@@ -551,8 +593,8 @@ impl Loop {
                 ctx.message(
                     channel::Kind::Info,
                     Some(g.name.clone()),
-                    format!("{} holds again", g.name),
-                    goals::describe(&ctx, g),
+                    format!("True again: {}", card::subject(&ctx, g)),
+                    format!("Goal `{}` holds again.", g.name),
                     facts::shown(&read),
                 );
             }
@@ -659,10 +701,8 @@ impl Loop {
                     goal: None,
                     action: None,
                     rule: None,
-                    title: "this box does not fit the weave".into(),
-                    text: format!("{}. Answer yes to go on anyway.", ctx.misfit.join(". ")),
+                    card: card::misfit(&ctx),
                     facts: BTreeMap::new(),
-                    answers: vec!["yes".into(), "no".into()],
                 });
             }
             if job.by_person() {
@@ -702,16 +742,14 @@ impl Loop {
         }
         t.warned = true;
         let facts = t.line.as_ref().map(|l| l.1.clone()).unwrap_or_default();
-        let what = ctx
-            .w
-            .goal(goal)
-            .map(|g| goals::failing(&ctx, g, &facts))
-            .unwrap_or_default();
+        let Some(g) = ctx.w.goal(goal) else { return };
+        let mut lines = card::goal_lines(&ctx, g, &facts);
+        lines.push("Subweave is fixing it, and asks you only if it needs you.".into());
         ctx.message(
             channel::Kind::Warning,
             Some(goal.to_string()),
-            format!("{goal} fails; Subweave is on it"),
-            format!("{what}\nSubweave is fixing it, and asks you only if it needs you."),
+            format!("Fixing: {}", card::subject(&ctx, g)),
+            lines.join("\n"),
             facts,
         );
     }

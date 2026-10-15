@@ -96,6 +96,8 @@ export interface Ask {
   text: string;
   facts: Record<string, string>;
   answers: string[];
+  /** Answer word → its button label. */
+  labels: Record<string, string>;
   t: string;
 }
 

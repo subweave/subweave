@@ -108,10 +108,11 @@ pub(super) async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
                 if data.len() > 64 {
                     bail!("answer {word:?} is too long for a Telegram button");
                 }
-                Ok(json!({"text": word, "callback_data": data}))
+                Ok(json!([{"text": ask.label(word), "callback_data": data}]))
             })
             .collect::<Result<Vec<_>>>()?;
-        body["reply_markup"] = json!({"inline_keyboard": [buttons]});
+        // One button per row: labels are short sentences.
+        body["reply_markup"] = json!({"inline_keyboard": buttons});
     }
     let posted: Posted = call(token, "sendMessage", &body).await?;
     let Some(ask) = &msg.ask else {

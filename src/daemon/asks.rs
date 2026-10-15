@@ -2,17 +2,20 @@
 //! inbox or from the answering channels, which one background task polls.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::channel::{self, AskInfo, Message, Sent};
+use crate::model::coder::{Coder, Tally};
 use crate::paths;
 use crate::service::{Kind, Line, TASK};
 
 use super::Shared;
+use super::card::{self, Card};
 use super::service::Ctx;
 
 /// Where one ask went, so its answer can be read back. Kept in `asks.sent.json`.
@@ -88,15 +91,14 @@ pub(crate) struct AskReq {
     pub action: Option<String>,
     /// The rule that holds the action, as written: its `always`/`never` answers are kept.
     pub rule: Option<String>,
-    pub title: String,
-    pub text: String,
+    pub card: Card,
     pub facts: BTreeMap<String, String>,
-    pub answers: Vec<String>,
 }
 
 /// Journals the ask (and its rule as a `gate` line), sends it to every channel. An ask a
 /// person's job raised carries their `by`: it waits for a person's answer and is never
-/// withdrawn.
+/// withdrawn. When a channel will show it, the coder's first model writes its summary
+/// first, journaled with what it cost.
 pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
     let n = ctx.shared.next_ask();
     let by = ctx
@@ -105,6 +107,8 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
         .unwrap_or_else(|e| e.into_inner())
         .clone()
         .filter(|b| !b.is_empty());
+    let answers = req.card.words();
+    let labels = req.card.labels();
     let (title, text, facts) = {
         let mut j = ctx.journal();
         if let Some(rule) = &req.rule {
@@ -122,11 +126,12 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
             kind: Kind::Ask,
             goal: req.goal.clone(),
             action: req.action.clone(),
-            text: Some(req.title.clone()),
+            text: Some(req.card.title.clone()),
             facts: Some(req.facts.clone()),
             n: Some(n),
-            answers: Some(req.answers.clone()),
-            body: Some(req.text.clone()),
+            answers: Some(answers.clone()),
+            labels: Some(labels.clone()),
+            body: Some(req.card.lines.join("\n")),
             by,
             ..Default::default()
         });
@@ -140,21 +145,28 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
         });
         (title, l.body.unwrap_or_default(), l.facts.unwrap_or_default())
     };
-    let msg = Message {
+    let mut msg = Message {
         kind: channel::Kind::Ask,
         host: ctx.shared.host.clone(),
         service: ctx.name.clone(),
         goal: req.goal,
         title,
         text,
+        summary: Vec::new(),
         facts,
         ask: Some(AskInfo {
             n,
-            answers: req.answers,
+            answers,
+            labels,
         }),
     };
     let shared = ctx.shared.clone();
     let service = ctx.name.clone();
+    let coder = ctx.coder.clone();
+    let journal = ctx.journal_handle();
+    let secrets = ctx.secrets.clone();
+    let about = ctx.w.about.clone();
+    let ep = super::episode::for_line().map(|(ep, _)| ep);
     tokio::spawn(async move {
         let channels = match channel::ls() {
             Ok(c) => c,
@@ -163,6 +175,22 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
                 return;
             }
         };
+        if channels.is_empty() {
+            return;
+        }
+        if let Some(coder) = coder {
+            let line = summarize(&coder, &msg, about.as_deref()).await;
+            let mut j = journal.lock().unwrap_or_else(|e| e.into_inner());
+            if let Ok(lines) = &line.lines {
+                msg.summary = lines.iter().map(|l| super::redact(l, &secrets)).collect();
+            }
+            j.add(Line {
+                goal: msg.goal.clone(),
+                n: Some(n),
+                ep,
+                ..line.line
+            });
+        }
         for ch in channels {
             match channel::send(&ch, &msg).await {
                 Ok(Some(s)) => {
@@ -185,6 +213,59 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
         }
     });
     n
+}
+
+/// The summary's journal line, and its lines when they can be used.
+struct Summarized {
+    lines: Result<Vec<String>, String>,
+    line: Line,
+}
+
+/// The card as the person reads it goes to the model, never the journal's raw facts:
+/// `msg` holds them redacted.
+async fn summarize(coder: &Coder, msg: &Message, about: Option<&str>) -> Summarized {
+    let ask = msg.ask.as_ref();
+    let card = json!({
+        "service": msg.service,
+        "host": msg.host,
+        "about": about,
+        "title": msg.title,
+        "lines": msg.text.lines().collect::<Vec<_>>(),
+        "facts": msg.facts,
+        "buttons": ask.map(|a| a.answers.iter().map(|w| a.label(w)).collect::<Vec<_>>()),
+    });
+    let start = Instant::now();
+    let model = coder.model(0).to_string();
+    match card::summary(coder, &card).await {
+        Ok(s) => {
+            let mut tally = Tally::default();
+            tally.add(&s.reply);
+            let text = match &s.lines {
+                Ok(l) => format!("card summary by {model}: {}", l.join(" / ")),
+                Err(e) => format!("card summary by {model} not used: {e}"),
+            };
+            Summarized {
+                lines: s.lines,
+                line: Line {
+                    kind: Kind::Note,
+                    text: Some(text),
+                    cost_usd: Some(tally.cost_usd),
+                    usage: Some(tally.usage(model)),
+                    ms: super::ms(start),
+                    ..Default::default()
+                },
+            }
+        }
+        Err(e) => Summarized {
+            lines: Err(format!("{e:#}")),
+            line: Line {
+                kind: Kind::Note,
+                text: Some(format!("card summary: {e:#}")),
+                ms: super::ms(start),
+                ..Default::default()
+            },
+        },
+    }
 }
 
 /// Polls every answering channel for its open asks; answers go to `tx` with the

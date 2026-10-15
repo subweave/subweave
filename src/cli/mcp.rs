@@ -128,7 +128,7 @@ fn tools() -> Vec<Value> {
     vec![
         json!({
             "name": "inbox",
-            "description": "Every open ask on this box: service, n, goal, action, rule, title, text (its body), facts, answers (the only words that answer it) and t (when it was raised).",
+            "description": "Every open ask on this box: service, n, goal, action, rule, title, text (its body), facts, answers (the only words that answer it), labels (each answer's button on the person's card) and t (when it was raised).",
             "inputSchema": none,
         }),
         json!({

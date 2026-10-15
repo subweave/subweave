@@ -18,6 +18,7 @@ use crate::service::{Kind, Line};
 use crate::weave::{self, Condition, Goal, Rule, Skill};
 
 use super::asks::AskReq;
+use super::card;
 use super::facts::{self, Values};
 use super::goals;
 use super::repair::{command, command_output, rule_text};
@@ -559,24 +560,13 @@ async fn session(
                             .as_str()
                             .unwrap_or("the coder needs the person")
                             .to_string();
-                        let text = match work.goal {
-                            Some(goal) => format!(
-                                "{}\nThe coder says only you can fix this. Answer yes once it is fixed to run {} again.",
-                                goals::failing(ctx, goal, &facts::shown(&values)),
-                                work.action
-                            ),
-                            None => format!(
-                                "Task: {task}\nThe coder says only you can fix this. Answer yes once it is fixed to run the task again, no to end it."
-                            ),
-                        };
+                        let shown = facts::shown(&values);
                         ctx.ask(AskReq {
                             goal: work.goal_name(),
                             action: Some(work.action.to_string()),
                             rule: None,
-                            title: q,
-                            text,
-                            facts: facts::shown(&values),
-                            answers: vec!["yes".into(), "no".into()],
+                            card: card::coder_asks(ctx, work.goal, task, &q, &shown),
+                            facts: shown,
                         });
                         end = Some(End::Asked);
                         String::new()
@@ -775,40 +765,23 @@ async fn judge(
                 r.purpose.clone()
             };
             let first = r.result.lines().next().unwrap_or_default();
-            ctx.redact(&format!("- {what} ({first})"))
+            ctx.redact(&format!("{what} ({first})"))
         })
         .collect();
-    let tried_text = format!(
-        "After {commands} commands the coder does not get closer ({closer:.2}): {why}. Its last commands:\n{}",
-        lines.join("\n")
-    );
-    let (title, text) = match work.goal {
-        Some(goal) => (
-            format!(
-                "{} for {}: the coder does not get closer",
-                work.action, goal.name
-            ),
-            format!(
-                "{}\n{tried_text}\nAnswer yes once it is fixed to run {} again.",
-                goals::failing(ctx, goal, &now),
-                work.action
-            ),
-        ),
-        None => (
-            "task: the coder does not get closer".to_string(),
-            format!(
-                "Task: {task}\n{tried_text}\nAnswer yes once it is fixed to run the task again, no to end it."
-            ),
-        ),
-    };
+    let mut tried_lines = vec![format!(
+        "After {commands} commands the coder does not get closer: {}.",
+        why.trim_end_matches('.')
+    )];
+    if !lines.is_empty() {
+        tried_lines.push("Its last commands:".into());
+        tried_lines.extend(lines);
+    }
     ctx.ask(AskReq {
         goal: work.goal_name(),
         action: Some(work.action.to_string()),
         rule: None,
-        title,
-        text,
+        card: card::coder_stuck(ctx, work.goal, task, tried_lines, &now),
         facts: now,
-        answers: vec!["yes".into(), "no".into()],
     });
     true
 }
@@ -965,26 +938,12 @@ async fn gate_and_run(
             continue;
         }
         let values = facts::known(ctx, &facts::all(&ctx.w)).await;
-        let (title, go_on) = match work.goal {
-            Some(goal) => (
-                format!("{} for {}: run `{command}`?", work.action, goal.name),
-                "Answer yes to let the task go on.",
-            ),
-            None => (
-                format!("task: run `{command}`?"),
-                "Answer yes to let the task go on, no to end it.",
-            ),
-        };
         ctx.ask(AskReq {
             goal: work.goal_name(),
             action: Some(work.action.to_string()),
             rule: Some(rule.clone()),
-            title,
-            text: format!(
-                "The coder wants to run `{command}` to {purpose}.\n{rule} holds ({p:.2}). {go_on}"
-            ),
+            card: card::command(ctx, work.goal, command, purpose, &rule),
             facts: facts::shown(&values),
-            answers: vec!["yes".into(), "no".into(), "always".into(), "never".into()],
         });
         return Err(());
     }

@@ -47,11 +47,12 @@ impl Mock {
         self.seen.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn count(&self, path: &str) -> usize {
+    /// Coder model requests, without the card summaries (they offer the `save` tool).
+    fn coder_requests(&self) -> usize {
         self.seen()
             .requests
             .iter()
-            .filter(|(p, _, _)| p == path)
+            .filter(|(p, _, b)| p == "/chat/completions" && !offers_tool(b, "save"))
             .count()
     }
 
@@ -216,6 +217,11 @@ const FACT_WRONG: &str =
 const TASK_TEXT: &str = "tidy the web root";
 const TASK_CMD: &str = "echo \"tidied $root on port $port\"";
 const TASK_SUMMARY: &str = "the web root was already tidy";
+/// The two lines the model writes on top of every card.
+const CARD_SUMMARY: [&str; 2] = [
+    "A step on the toy server waits for you.",
+    "Your answer decides if Subweave goes on.",
+];
 
 /// `/chat/completions`: a fact learner gets the fact command; a person's task gets one
 /// command and `done`; an action's coder goes on from the tool calls it already made: a
@@ -223,6 +229,9 @@ const TASK_SUMMARY: &str = "the web root was already tidy";
 async fn chat(State(m): State<Mock>, headers: HeaderMap, body: String) -> axum::Json<Value> {
     record(&m, "/chat/completions", &headers, &body);
     let req: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    if offers_tool(&body, "save") {
+        return tool_call("s1", "save", json!({"lines": CARD_SUMMARY}));
+    }
     if offers_tool(&body, "fact") {
         let tried = req["messages"]
             .as_array()
@@ -588,21 +597,22 @@ SECRET TOY_TOKEN "a token the page never shows"
 
 NEVER IF port < 1024
 NEVER "{FIREWALL_RULE}"
-ASK   BEFORE rotate
+ASK   BEFORE rotate BECAUSE "a rotate starts the server log over"
 
 FACT present  test -f $root/index.html
 FACT scene    echo "$(cat {d}/scene 2>/dev/null) $TOY_TOKEN"
 FACT served   "1 when http://127.0.0.1:$port/ answers HTTP 200 with a page that contains the word hello, else 0"
 
 GOAL installed                  EVERY 1s                   present
-GOAL running   AFTER installed  EVERY 1s  TRIES 10 PER 1h  served == 1
+GOAL running   "the hello page is up" \
+               AFTER installed  EVERY 1s  TRIES 10 PER 1h  served == 1
 GOAL rotated   AFTER running    EVERY 1s                   SINCE(rotate) < 1h
 
 ACTION install FOR installed WITHIN 5s
   WHEN "the directory or its index.html is missing: nothing is installed yet"
   DO   "create the directory $root and write $root/index.html, a small HTML page that says hello"
 
-ACTION restart FOR running WITHIN 5s
+ACTION restart "Restart the server" FOR running WITHIN 5s
   WHEN "the fix when the server process is gone, crashed or was killed, and its files are in place: a restart brings it back"
   RUN <<EOF
     kill "$(cat {d}/toy.pid 2>/dev/null)" 2>/dev/null || true
@@ -617,7 +627,7 @@ ACTION fix FOR installed, running WITHIN 5s
   WHEN "no other action fits, or the fitting ones already failed"
   DO   "make the failing goal hold again"
 
-ACTION rotate FOR rotated WITHIN 5s
+ACTION rotate "Start a fresh server log" FOR rotated WITHIN 5s
   WHEN "the server log needs a fresh start"
   RUN  date > {d}/rotated
 "#,
@@ -1011,7 +1021,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .unwrap_or_default();
     assert!(inbox.is_empty(), "the inbox holds {inbox:?}");
     assert!(!b.state.join("services/toy-bad").exists());
-    assert_eq!(mock.count("/chat/completions"), 0);
+    assert_eq!(mock.coder_requests(), 0);
 
     // The daemon, in the background.
     let log = std::fs::File::create(dir.join("daemon.log")).unwrap();
@@ -1116,7 +1126,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
             .len(),
         1
     );
-    let chats_after_install = mock.count("/chat/completions");
+    let chats_after_install = mock.coder_requests();
     // Two fact learner turns, four coder turns: firewall, mkdir, page, done.
     assert_eq!(chats_after_install, 6);
     // The note that ends the coder's conversation counts its reasoning tokens.
@@ -1261,10 +1271,13 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .find(|l| l.starts_with(&format!("#{n} ")))
         .unwrap_or_else(|| b.fail(&format!("no #{n} in inbox:\n{out}")));
     assert!(
-        row.contains("toy") && row.contains("rotated") && row.contains("rotated fails: run rotate?"),
+        row.contains("toy") && row.contains("rotated") && row.contains("Start a fresh server log?"),
         "{row}"
     );
-    assert!(row.contains("[yes no always never]"), "{row}");
+    assert!(
+        row.contains("[yes: Run it | no: Leave it for 1h | always: Always run it | never: Never run it]"),
+        "{row}"
+    );
     let hook_ask = b
         .until("the webhook to get the rotate ask", 10, || {
             mock.hooks()
@@ -1278,6 +1291,20 @@ async fn daemon_and_cli_keep_a_toy_service() {
         hook_ask["ask"]["answers"],
         json!(["yes", "no", "always", "never"])
     );
+    assert_eq!(hook_ask["ask"]["labels"]["yes"], "Run it", "{hook_ask}");
+    assert!(
+        hook_ask["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("The weave asks you first: a rotate starts the server log over.")),
+        "{hook_ask}"
+    );
+    // The summary the model wrote leads the card, and its call is journaled with its cost.
+    assert_eq!(hook_ask["summary"], json!(CARD_SUMMARY), "{hook_ask}");
+    let summary = b.lines("note", |l| {
+        l["n"] == n && l["text"].as_str().is_some_and(|t| t.starts_with("card summary by"))
+    });
+    assert_eq!(summary.len(), 1, "one summary per card");
+    assert!(summary[0]["usage"]["calls"] == 1 && summary[0]["cost_usd"].as_f64() > Some(0.0), "{}", summary[0]);
     assert!(!dir.join("rotated").exists(), "rotate waits for the answer");
     let out = b.ok(&["answer", &n.to_string(), "yes"]).await;
     assert!(
@@ -1329,7 +1356,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
         "the RUN step ran"
     );
     assert_eq!(
-        mock.count("/chat/completions"),
+        mock.coder_requests(),
         chats_after_install,
         "no coder for a RUN"
     );
@@ -1344,7 +1371,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
     .await;
     b.holds(&["installed", "running", "rotated"], 15).await;
     assert_eq!(
-        mock.count("/chat/completions"),
+        mock.coder_requests(),
         chats_after_install,
         "learned steps ran without the coder"
     );
@@ -1383,7 +1410,8 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .find(|l| l.starts_with(&format!("#{n} ")))
         .unwrap_or_else(|| b.fail(&format!("no #{n} in inbox:\n{out}")));
     assert!(
-        row.contains("running fails: which action?") && row.contains("[restart fix no]"),
+        row.contains("Which fix for: the hello page is up?")
+            && row.contains("[restart: Restart the server | fix | no: Leave it for 1h]"),
         "{row}"
     );
     b.until("the webhook to get the which-action ask", 10, || {
@@ -1432,7 +1460,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
         2,
         "the wrong form, then the right one"
     );
-    assert_eq!(mock.count("/chat/completions"), chats_after_install);
+    assert_eq!(mock.coder_requests(), chats_after_install);
 
     // 6f. An ask whose goal holds again is withdrawn: the person brought the server back.
     phase("6f withdrawn ask");

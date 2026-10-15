@@ -20,11 +20,13 @@ use sha2::{Digest as _, Sha256};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
-use super::{Answer, Channel, Message, Pin, Sent, client, http_json};
+use super::{Answer, Channel, Kind, Message, Pin, Sent, client, http_json};
 
 /// Read requests this long, so `poll` returns within about a minute.
 const WAIT_SECS: u64 = 50;
 const CONTROL: &str = "answer";
+/// The longest fact value a field shows.
+const FACT_VALUE: usize = 500;
 
 /// What we raised, kept to check the server's copy against.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,22 +73,65 @@ fn stance(word: &str) -> &'static str {
     }
 }
 
-fn label(word: &str) -> String {
-    match word {
-        "yes" => "Yes".into(),
-        "no" => "No".into(),
-        "always" => "Always".into(),
-        "never" => "Never".into(),
-        "seen" => "Seen".into(),
-        action => action.to_owned(),
+/// A button word's label when the message carries none: info's `seen`, and older asks.
+fn label(msg: &Message, word: &str) -> String {
+    if let Some(l) = msg.ask.as_ref().and_then(|a| a.labels.get(word)) {
+        return l.clone();
     }
+    let mut c = word.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
 }
 
-/// One Markdown paragraph: whitespace collapsed, led by the service, so it is never a
-/// list the card judge would read as a weave.
-fn paragraph(msg: &Message) -> String {
-    let text = msg.text.split_whitespace().collect::<Vec<_>>().join(" ");
-    format!("{} on {}: {text}", msg.service, msg.host)
+/// One line of a bullet: Markdown has no line break inside it.
+fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The body is a weave Steery checks for shape even unjudged: each gist a sentence of at
+/// most 20 words. The summary's lines, then one that names the service and the box.
+fn body(msg: &Message) -> String {
+    let mut out = String::new();
+    for s in &msg.summary {
+        out.push_str(&format!("- {}\n", one_line(s)));
+    }
+    let what = match msg.kind {
+        Kind::Ask => "needs your answer",
+        Kind::Warning => "has a problem that Subweave is fixing",
+        Kind::Info => "has news",
+    };
+    out.push_str(&format!("- **{}** on {} {what}.", msg.service, msg.host));
+    out
+}
+
+/// Under the body: the card's lines, then the facts as fields.
+fn view(msg: &Message) -> Value {
+    let mut view = Vec::new();
+    let lines: String = msg
+        .text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| format!("- {}\n", one_line(l)))
+        .collect();
+    if !lines.is_empty() {
+        view.push(json!({"kind": "markdown", "text": lines.trim_end()}));
+    }
+    if !msg.facts.is_empty() {
+        let fields: Vec<Value> = msg
+            .facts
+            .iter()
+            .map(|(k, v)| {
+                let v = match v.char_indices().nth(FACT_VALUE) {
+                    Some((i, _)) => format!("{}…", &v[..i]),
+                    None => v.clone(),
+                };
+                json!({"label": k, "value": v})
+            })
+            .collect();
+        view.push(json!({"kind": "fields", "fields": fields}));
+    }
+    Value::Array(view)
 }
 
 pub(super) async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
@@ -110,13 +155,13 @@ pub(super) async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
     };
     let options: Vec<Value> = words
         .iter()
-        .map(|w| json!({"id": w, "label": label(w), "stance": stance(w)}))
+        .map(|w| json!({"id": w, "label": label(msg, w), "stance": stance(w)}))
         .collect();
     let raised = Raised {
         id: id.clone(),
         workspace: workspace.to_owned(),
         title: msg.title.clone(),
-        body: paragraph(msg),
+        body: body(msg),
         payload,
         buttons: words
             .iter()
@@ -133,6 +178,7 @@ pub(super) async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
         "title": raised.title,
         "body": raised.body,
         "payload": raised.payload,
+        "view": view(msg),
         "input": [{"kind": "buttons", "name": CONTROL, "options": options}],
         "unjudged": true,
     });

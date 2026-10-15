@@ -66,7 +66,7 @@ export function AskCard({ ask, showService = false, onAnswered }: { ask: Ask; sh
       <AskFacts facts={ask.facts} />
       {sent ? (
         <p className="ask-sent">
-          Answered <b>{sent}</b>. The daemon picks it up within seconds.
+          Answered <b>{ask.labels[sent] ?? sent}</b>. The daemon picks it up within seconds.
         </p>
       ) : (
         <>
@@ -79,7 +79,7 @@ export function AskCard({ ask, showService = false, onAnswered }: { ask: Ask; sh
                 disabled={busy}
                 onClick={() => answer(w)}
               >
-                {w}
+                {ask.labels[w] ?? w}
               </button>
             ))}
           </div>

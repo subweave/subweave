@@ -14,6 +14,7 @@ use crate::service::{JobKind, Kind, LearnedSteps, Line, TASK};
 use crate::weave::{self, Action, Goal, Rule, Step, expr, show_duration};
 
 use super::asks::AskReq;
+use super::card;
 use super::coder_task::{self, DoResult, Work};
 use super::facts::{self, Values};
 use super::goals::{self, Scope};
@@ -127,10 +128,10 @@ pub(crate) enum Outcome {
     Nothing,
 }
 
-enum Gate {
+enum Gate<'a> {
     Pass,
-    Refused(String),
-    Ask(String),
+    Refused(&'a Rule),
+    Ask(&'a Rule),
 }
 
 enum Pick {
@@ -211,11 +212,11 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
             match gate(ctx, goal, &f.action, &values, f.approved) {
                 Gate::Pass => {}
                 Gate::Refused(rule) => {
-                    refused(ctx, goal, &f.action, &rule);
+                    refused(ctx, goal, &f.action, &rule_text(rule));
                     return Outcome::Nothing;
                 }
                 Gate::Ask(rule) => {
-                    ask_gate(ctx, goal, &f.action, &rule, &shown);
+                    ask_gate(ctx, goal, &f.action, rule, &shown);
                     return Outcome::Asked;
                 }
             }
@@ -231,40 +232,22 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                     goal: Some(goal.name.clone()),
                     action: None,
                     rule: None,
-                    title: format!(
-                        "{} still fails after {n} tries in {}",
-                        goal.name,
-                        show_duration(per)
-                    ),
-                    text: format!(
-                        "{}\nAnswer yes to try again, no to leave it for an hour.",
-                        goals::failing(ctx, goal, &shown)
-                    ),
+                    card: card::tries(ctx, goal, n, per, &shown),
                     facts: shown,
-                    answers: vec!["yes".into(), "no".into()],
                 });
                 return Outcome::Asked;
             }
             let mut out: BTreeSet<String> = BTreeSet::new();
+            let mut refusals: Vec<(&Action, &Rule)> = Vec::new();
             loop {
                 let cands = candidates(ctx, goal, &values, &out);
                 if cands.is_empty() {
-                    let why = if out.is_empty() {
-                        "no action fits"
-                    } else {
-                        "every fitting action is refused"
-                    };
                     ctx.ask(AskReq {
                         goal: Some(goal.name.clone()),
                         action: None,
                         rule: None,
-                        title: format!("{} fails and {why}", goal.name),
-                        text: format!(
-                            "{}\nFix it, then answer yes to check again.",
-                            goals::failing(ctx, goal, &shown)
-                        ),
+                        card: card::no_fit(ctx, goal, &refusals, &shown),
                         facts: shown,
-                        answers: vec!["yes".into(), "no".into()],
                     });
                     return Outcome::Asked;
                 }
@@ -275,20 +258,12 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                         Pick::Action(a) => a,
                         Pick::Wait => return Outcome::Wait,
                         Pick::Ask(why) => {
-                            let mut answers: Vec<String> =
-                                cands.iter().map(|a| a.name.clone()).collect();
-                            answers.push("no".into());
                             ctx.ask(AskReq {
                                 goal: Some(goal.name.clone()),
                                 action: None,
                                 rule: None,
-                                title: format!("{} fails: which action?", goal.name),
-                                text: format!(
-                                    "{}\n{why}\nAnswer an action's name to run it, or no.",
-                                    goals::failing(ctx, goal, &shown)
-                                ),
+                                card: card::which(ctx, goal, &cands, &why, &shown),
                                 facts: shown,
-                                answers,
                             });
                             return Outcome::Asked;
                         }
@@ -297,11 +272,14 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                 match gate(ctx, goal, &pick, &values, false) {
                     Gate::Pass => break (pick, Vec::new()),
                     Gate::Refused(rule) => {
-                        refused(ctx, goal, &pick, &rule);
+                        refused(ctx, goal, &pick, &rule_text(rule));
+                        if let Some(a) = ctx.w.action(&pick) {
+                            refusals.push((a, rule));
+                        }
                         out.insert(pick);
                     }
                     Gate::Ask(rule) => {
-                        ask_gate(ctx, goal, &pick, &rule, &shown);
+                        ask_gate(ctx, goal, &pick, rule, &shown);
                         return Outcome::Asked;
                     }
                 }
@@ -349,7 +327,13 @@ pub(crate) fn rule_text(r: &Rule) -> String {
 
 /// The code rules on one action. Quoted rules never gate an author's action. A rule the
 /// person answered `always` for passes with an `ok` gate line.
-fn gate(ctx: &Ctx, goal: &Goal, action: &str, values: &Values, approved: bool) -> Gate {
+fn gate<'a>(
+    ctx: &'a Ctx,
+    goal: &Goal,
+    action: &str,
+    values: &Values,
+    approved: bool,
+) -> Gate<'a> {
     let scope = Scope {
         ctx,
         facts: values,
@@ -358,7 +342,7 @@ fn gate(ctx: &Ctx, goal: &Goal, action: &str, values: &Values, approved: bool) -
     for r in &ctx.w.rules {
         if let Rule::NeverIf { expr: e, .. } = r {
             if expr::holds(e, &scope) {
-                return Gate::Refused(rule_text(r));
+                return Gate::Refused(r);
             }
         }
     }
@@ -376,7 +360,7 @@ fn gate(ctx: &Ctx, goal: &Goal, action: &str, values: &Values, approved: bool) -
         let text = rule_text(r);
         let kept = ctx.journal().kept(&text, action);
         match kept {
-            Some("never") => return Gate::Refused(text),
+            Some("never") => return Gate::Refused(r),
             Some(_) => {
                 ctx.journal().add(Line {
                     kind: Kind::Gate,
@@ -391,7 +375,7 @@ fn gate(ctx: &Ctx, goal: &Goal, action: &str, values: &Values, approved: bool) -
             None => {}
         }
         if !approved {
-            return Gate::Ask(text);
+            return Gate::Ask(r);
         }
     }
     Gate::Pass
@@ -407,36 +391,15 @@ fn refused(ctx: &Ctx, goal: &Goal, action: &str, rule: &str) {
     });
 }
 
-fn ask_gate(ctx: &Ctx, goal: &Goal, action: &str, rule: &str, shown: &BTreeMap<String, String>) {
+fn ask_gate(ctx: &Ctx, goal: &Goal, action: &str, rule: &Rule, shown: &BTreeMap<String, String>) {
+    let a = ctx.w.action(action).expect("a gated action is in the weave");
     ctx.ask(AskReq {
         goal: Some(goal.name.clone()),
         action: Some(action.to_string()),
-        rule: Some(rule.to_string()),
-        title: format!("{} fails: run {action}?", goal.name),
-        text: format!(
-            "{}\nSubweave wants to run `{action}`{}. The weave says to ask you first: {rule}.\n\
-             Answer yes to run it now; always or never to keep that answer.",
-            goals::failing(ctx, goal, shown),
-            plan(ctx, action)
-        ),
+        rule: Some(rule_text(rule)),
+        card: card::gate(ctx, goal, a, rule, shown),
         facts: shown.clone(),
-        answers: vec!["yes".into(), "no".into(), "always".into(), "never".into()],
     });
-}
-
-/// What an action does, for a person: its DO steps, else nothing (RUN lines are code).
-fn plan(ctx: &Ctx, action: &str) -> String {
-    let dos: Vec<String> = ctx
-        .w
-        .action(action)
-        .into_iter()
-        .flat_map(|a| &a.steps)
-        .filter_map(|s| match s {
-            Step::Do { task, .. } => Some(weave::subst(task, &ctx.spec.args)),
-            _ => None,
-        })
-        .collect();
-    if dos.is_empty() { String::new() } else { format!(": {}", dos.join("; ")) }
 }
 
 /// One decider request: a choice over the candidates' WHENs, `wait` and `ask`, and

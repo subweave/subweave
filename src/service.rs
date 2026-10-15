@@ -136,12 +136,15 @@ pub struct Line {
     pub p: Option<BTreeMap<String, f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
-    /// `ask` and `answer`: the ask's number.
+    /// `ask`, `answer` and the `note` of an ask's card summary: the ask's number.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n: Option<u64>,
     /// `ask`: the words that answer it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answers: Option<Vec<String>>,
+    /// `ask`: each answer word's button label, where it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BTreeMap<String, String>>,
     /// `ask`: what it says beyond its title, as the channels get it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
@@ -358,6 +361,8 @@ pub struct Ask {
     pub text: String,
     pub facts: BTreeMap<String, String>,
     pub answers: Vec<String>,
+    /// Answer word → button label.
+    pub labels: BTreeMap<String, String>,
     pub t: String,
 }
 
@@ -384,6 +389,7 @@ pub fn asks(service: &str, lines: &[Line]) -> Vec<Ask> {
                 text: l.body.clone().unwrap_or_default(),
                 facts: l.facts.clone().unwrap_or_default(),
                 answers: l.answers.clone().unwrap_or_default(),
+                labels: l.labels.clone().unwrap_or_default(),
                 t: l.t.clone(),
             })
         })

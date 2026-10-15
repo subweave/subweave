@@ -74,7 +74,11 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<String>,
     pub title: String,
+    /// One plain sentence per line.
     pub text: String,
+    /// A model's two plain lines that lead an ask's card; none on the rest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub summary: Vec<String>,
     #[serde(default)]
     pub facts: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -86,6 +90,16 @@ pub struct AskInfo {
     pub n: u64,
     /// `yes`, `no`, `always`, `never` or action names.
     pub answers: Vec<String>,
+    /// Answer word → its button label.
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+}
+
+impl AskInfo {
+    /// The button for `word`: its label, else the word.
+    pub fn label<'a>(&'a self, word: &'a str) -> &'a str {
+        self.labels.get(word).map_or(word, String::as_str)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,6 +391,7 @@ pub async fn test(name: &str) -> Result<()> {
         goal: None,
         title: "Channel test".into(),
         text: format!("This is a test message for channel {name}."),
+        summary: Vec::new(),
         facts: BTreeMap::new(),
         ask: None,
     };
@@ -477,10 +492,15 @@ pub(crate) fn headline(msg: &Message) -> String {
     format!("[{label}] {}/{}: {}", msg.host, msg.service, msg.title)
 }
 
-/// The text, goal and facts; for an ask on a channel that cannot answer, the answers
-/// and, last, the command that gives one.
+/// The summary, the text, goal and facts; for an ask on a channel that cannot answer,
+/// each answer word with its button and, last, the command that gives one.
 pub(crate) fn details(msg: &Message, answering: bool) -> String {
-    let mut out = msg.text.trim().to_owned();
+    let mut out = String::new();
+    if !msg.summary.is_empty() {
+        out.push_str(&msg.summary.join("\n"));
+        out.push_str("\n\n");
+    }
+    out.push_str(msg.text.trim());
     if let Some(goal) = &msg.goal {
         out.push_str(&format!("\n\nGoal: {goal}"));
     }
@@ -491,11 +511,11 @@ pub(crate) fn details(msg: &Message, answering: bool) -> String {
         }
     }
     if let (Some(ask), false) = (&msg.ask, answering) {
-        out.push_str(&format!(
-            "\n\n<word> is one of: {}\nsubweave answer {} <word>",
-            ask.answers.join(", "),
-            ask.n
-        ));
+        out.push_str("\n\nAnswers:");
+        for w in &ask.answers {
+            out.push_str(&format!("\n  {w}: {}", ask.label(w)));
+        }
+        out.push_str(&format!("\nsubweave answer {} <word>", ask.n));
     }
     out
 }

@@ -55,7 +55,7 @@ a goal fails ──► the decider picks an action
 ## Three rules
 
 1. **Keywords are capital words.** `GOAL`, `AFTER`, `IF`, `AND`. Names, commands and values are yours; a name cannot be a keyword.
-2. **Quoted means model.** A `"quoted"` argument, and the body of a `DO` or a `SKILL`, goes to a model. Everything else is code. Inside a command, quotes are bash's.
+2. **Quoted means model.** A `"quoted"` argument, and the body of a `DO` or a `SKILL`, goes to a model. Everything else is code. Inside a command, quotes are bash's. Three quoted texts are plain words for the person's cards instead: a goal's sentence, an action's label and a rule's `BECAUSE` ([Cards](#cards)).
 3. **Say what, not how.** A quoted `FACT` and a `DO` step let each box learn its own commands ([Learned commands](#learned-commands)). Write a command only when the exact command is the knowledge, like `pg_isready -q`. The wisdom goes into `WHEN`, the rules and `SKILL`s.
 
 ## Instructions
@@ -69,14 +69,14 @@ a goal fails ──► the decider picks an action
 | `ARG <name>[=<default>] MUST\|SHOULD\|MAY ["<what>"]` | a setting the request chooses |
 | `SECRET <NAME> "<what>"` | a value the person types once |
 | `FACT <name> [FOLLOW] <command>\|"<what>"` | what the box shows |
-| `GOAL <name> ... <condition>` | what must hold |
-| `ACTION <name> [FOR <goals>] [WITHIN <duration>]` | what the loop may do |
+| `GOAL <name> ["<sentence>"] ... <condition>` | what must hold |
+| `ACTION <name> ["<label>"] [FOR <goals>] [WITHIN <duration>]` | what the loop may do |
 | `... IF <expr>` | at the end of a `SECRET`, `GOAL`, `ACTION` or `ASK BEFORE` line: in effect only while `<expr>` holds |
 | `RUN <command>` | a step of the action above, in code |
 | `DO "<task>"` | a step of the action above, for the coder |
 | `ADD <<EOF <path>` | a step of the action above: write a file on the box |
-| `NEVER "<text>"`, `NEVER IF <expr>` | refuse |
-| `ASK "<text>"`, `ASK BEFORE <action>`, `ASK IF <expr>` | wait for the person |
+| `NEVER "<text>"`, `NEVER IF <expr> [BECAUSE "<why>"]` | refuse |
+| `ASK "<text>"`, `ASK BEFORE <action> [BECAUSE "<why>"]`, `ASK IF <expr> [BECAUSE "<why>"]` | wait for the person |
 | `SKILL <name> WHEN "<text>" <<EOF` | what the coder reads, and when |
 | `... IF <expr>` | at the end of an `ARG`-reading line: in effect only while `<expr>` holds |
 
@@ -180,17 +180,21 @@ GOAL archiving   AFTER running    EVERY 5m      archived == 1        IF bucket
 GOAL backed      AFTER archiving                SINCE(backup) < 25h
 GOAL drilled     AFTER backed     EVERY 1d      SINCE(drill) < 30d
 GOAL room        AFTER installed  EVERY 5m      disk < 85
+GOAL current     "PostgreSQL runs the newest minor release" \
+                 AFTER running    EVERY 1d      behind == 0
 GOAL quiet       AFTER running    EVERY 10m \
      "the new lines in `logs` and `kernel` show nothing that needs action"
 ```
 
-`GOAL <name> [AFTER <goal>, …] [EVERY <duration>] [TRIES <n> PER <duration>] <condition> [IF <expr>]`
+`GOAL <name> ["<sentence>"] [AFTER <goal>, …] [EVERY <duration>] [TRIES <n> PER <duration>] <condition> [IF <expr>]`
 
+- `"<sentence>"`: what the goal keeps true, in plain words for the person's cards. Quoted text right after the name is the sentence when a condition follows it, else it is the quoted condition. A code goal without one shows its condition on a card.
 - `AFTER`: the daemon checks this goal only while those goals hold. The goals make a graph; `subweave plan <weave>` draws it.
 - `IF`: off while the expression is false. A goal after an off goal is off too: with no bucket, `archiving`, `backed` and `drilled` are all off.
 - `EVERY`: `1m` by default for code, `5m` for quoted conditions.
 - `TRIES`: `3 PER 1h` by default. Past it, the daemon asks the person. Code counts this, not the model. A `wait` is not a try: a first sync that waits for hours asks nobody.
 - A goal that never held fails its first check: `SINCE(drill)` has no value until the first drill, so a new box drills right after its first backup.
+- A goal fails only when two checks in a row fail. After the first failed check the daemon checks again within 30 seconds, or after its `EVERY` when it reads `PREV()`; a goal that holds then sends no warning, runs no action and asks nobody.
 
 The `postgres` weave's graph:
 
@@ -232,7 +236,7 @@ A quoted condition goes to the decider as one yes/no question. Its backticked na
 ## ACTION
 
 ```weavefile
-ACTION restart FOR running WITHIN 2m
+ACTION restart "Restart PostgreSQL" FOR running WITHIN 2m
   WHEN "postgres was killed, for example by the out-of-memory killer, \
         or crashed once, and nothing on disk is wrong"
   RUN  systemctl restart postgresql@$version-main
@@ -246,8 +250,9 @@ ACTION fix WITHIN 30m
   DO   "make the failing goal hold again without losing data"
 ```
 
-`ACTION <name> [FOR <goal>, …] [WITHIN <duration>] [IF <expr>]`
+`ACTION <name> ["<label>"] [FOR <goal>, …] [WITHIN <duration>] [IF <expr>]`
 
+- `"<label>"`: the button that runs the action on a card, at most 40 characters: `"Restart PostgreSQL"`. Without one, the button shows the name.
 - `FOR`: the goals this action may fix. Without `FOR`, any goal.
 - `WITHIN`: after the last step, the goal must hold again within this time; `5m` by default. Until then the loop does nothing else for that goal. A restore that replays WAL for hours says `WITHIN 6h`.
 - `IF`: not a candidate while the expression is false.
@@ -264,26 +269,27 @@ ACTION fix WITHIN 30m
 NEVER IF version < 14
 NEVER "drop or truncate a database, or delete table rows"
 NEVER "delete files in pg_wal by hand"
-ASK   BEFORE restore
+ASK   BEFORE restore BECAUSE "a restore replaces the live data"
 ASK   BEFORE patch IF updates == 'ask'
 ASK   "before dropping a PostgreSQL cluster that holds data"
-ASK   IF blocks < 10064
+ASK   IF blocks < 10064 BECAUSE "the chain is too short to be mainnet"
 ```
 
 | Rule | Checked | Then |
 |---|---|---|
 | `NEVER "<text>"` | the request, each coder command | refused |
-| `NEVER IF <expr>` | the ARGs at `plan`, `run` and `tell`, and every action, in code | refused |
+| `NEVER IF <expr> [BECAUSE "<why>"]` | the ARGs at `plan`, `run` and `tell`, and every action, in code | refused |
 | `ASK "<text>"` | the request, each coder command | the person answers first |
-| `ASK BEFORE <action> [IF <expr>]` | every run of that action, in code | the person answers first |
-| `ASK IF <expr>` | the ARGs at `plan`, `run` and `tell`, and every action, in code | the person answers first |
+| `ASK BEFORE <action> [IF <expr>] [BECAUSE "<why>"]` | every run of that action, in code | the person answers first |
+| `ASK IF <expr> [BECAUSE "<why>"]` | the ARGs at `plan`, `run` and `tell`, and every action, in code | the person answers first |
 
 - A quoted rule checks what the person asked and what the coder writes. The author's own text passes the code rules only: an action the decider picks, a `RUN` step, a recipe, a learned step.
 - A rule that turns on a number is code: `NEVER IF version < 14`, not `NEVER "versions before 14"`.
 - Every box also has the daemon's own rule, `NEVER "cut off SSH access to this box, or risk it: a firewall change that does not allow SSH in the same command, stopping sshd, or taking the network down"`. The person and `--on` reach the box over SSH.
 - Name the service in a rule about the network: `"let PostgreSQL accept connections from the internet"`. SSH is also a connection from the internet, so the wider rule refuses the command that keeps SSH open ([LIMITS.md](LIMITS.md#5-gating-shell-commands-depends-on-their-stated-purpose)).
 - After a refusal, the loop picks again or asks the person.
-- The person answers `yes`, `no`, `always` or `never`. The daemon keeps `always` and `never` in the journal for that rule and action, and does not ask again.
+- `BECAUSE "<why>"`: why a code rule asks or refuses, in plain words for the person's card. A quoted rule is its own reason.
+- The person answers `yes`, `no`, `always` or `never`. The daemon keeps `always` and `never` in the journal for that rule and action, and does not ask again. A changed `BECAUSE` keeps them.
 
 ## SKILL
 
@@ -572,10 +578,22 @@ subweave channel test steery
 - An ask goes to every channel that answers, and as a message to the rest, with the command that answers it: `subweave answer 3 yes`.
 - The first answer settles the ask. The other channels show who answered.
 - A withdrawn ask loses its buttons in `telegram`. Steery has no withdraw call: a request the daemon stops polling is withdrawn by Steery after 15 minutes.
-- `steery`: the daemon raises each ask as a request with its own key, and reads the answer with a long poll, so the box needs no open port. Steery shows the person the facts and the rule; the answer is a signature from the person's device, which the daemon checks before it acts.
+- `steery`: the daemon raises each ask as a request with its own key, and reads the answer with a long poll, so the box needs no open port. The summary leads the card; its lines and facts sit under it. The answer is a signature from the person's device, which the daemon checks before it acts.
 - `heartbeat`: a service such as healthchecks.io alerts when the pings stop. That is the only alert when the whole box is down: see [LIMITS.md](LIMITS.md#9-one-box-no-failover).
 - On the person's computer, `subweave watch` shows every box's messages as system notifications.
 - Channel keys stay on the box in `/etc/subweave/channels.json`, mode 600. They never go to a model.
+
+### Cards
+
+Each ask is a card, written in code from the weave's plain words:
+
+1. The title is the question: `Make JSON-RPC local only?`, `Can you make this true: reth runs its newest release?`.
+2. A short summary, two lines from the coder's first model: what happened, and what it means for the person. Without a coder the card has none.
+3. The lines in code: what does not hold, what the facts say now, what Subweave did or wants to do, and the rule's `BECAUSE`.
+4. The facts the goal reads.
+5. Buttons that name the move: `Run it`, `Fixed it, check again`, `Leave it for an hour`. The answer is still a word (`yes`, `no`, an action's name): `subweave answer`, MCP and the journal use the words.
+
+The summary's model call is journaled with its cost. The journal's `ask` line keeps the title and the lines in code, without the summary.
 
 ### Agents
 
@@ -750,18 +768,19 @@ instruction
   | "ARG" name [ "=" word ] level [ quoted ]
   | "SECRET" name quoted [ if ]
   | "FACT" name [ "FOLLOW" ] ( body | quoted )
-  | "GOAL" name [ "AFTER" names ] [ "EVERY" dur ]
+  | "GOAL" name [ quoted ] [ "AFTER" names ] [ "EVERY" dur ]
            [ "TRIES" num "PER" dur ] ( expr | quoted ) [ if ]
-  | "ACTION" name [ "FOR" names ] [ "WITHIN" dur ] [ if ]
+  | "ACTION" name [ quoted ] [ "FOR" names ] [ "WITHIN" dur ] [ if ]
   | "WHEN" quoted
   | "RUN" body
   | "DO" ( quoted | heredoc )
   | "ADD" heredoc path
-  | "NEVER" ( quoted | if )
-  | "ASK" ( quoted | "BEFORE" name [ if ] | if )
+  | "NEVER" ( quoted | if [ because ] )
+  | "ASK" ( quoted | "BEFORE" name [ if ] [ because ] | if [ because ] )
   | "SKILL" name "WHEN" quoted heredoc ;
 level    = "MUST" | "SHOULD" | "MAY" ;
 if       = "IF" expr ;
+because  = "BECAUSE" quoted ;             (* plain words for the person *)
 body     = command | heredoc ;
 heredoc  = "<<" WORD newline { text newline } WORD ;
 size     = num ( "CPU" | "GPU" | "GB" ( "RAM" | "DISK" ) | "TB" "DISK" ) ;
