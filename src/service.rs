@@ -115,14 +115,14 @@ pub enum Command {
         by: String,
     },
     /// A new Weavefile an agent proposed, checked by `weave --change` and bundled as `run`
-    /// bundles a service run again. The daemon applies it at once when the rules stay as
-    /// they are; otherwise a signed ask decides, unless `approved` names the ask whose
-    /// signed yes it carries.
+    /// bundles a service run again. `base`: the Weavefile it was written against; the
+    /// daemon drops the change once the running one differs. It applies at once when the
+    /// rules stay as they are; otherwise a signed ask decides, and the daemon applies it
+    /// on that ask's signed yes.
     Change {
         bundle: Bundle,
+        base: String,
         why: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        approved: Option<u64>,
         by: String,
     },
 }

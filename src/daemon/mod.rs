@@ -29,7 +29,7 @@ use crate::channel::{self, Message};
 use crate::paths;
 use crate::service::{self as svc, Command, Kind, Line, TASK};
 
-use service::{Ctl, Tasks};
+use service::{Ctl, PendingChange, Tasks};
 
 pub(crate) use service::command_env;
 
@@ -260,47 +260,86 @@ impl Daemon {
         self.start(&name, true);
     }
 
-    /// A weave change applies as a run again when its rules stay as they are, or when
-    /// `approved` names the ask whose signed yes it carries; otherwise the service's loop
-    /// raises that signed ask.
-    async fn change(&mut self, bundle: svc::Bundle, why: String, approved: Option<u64>, by: String) {
-        let name = bundle.spec.name.clone();
+    /// A weave change applies as a run again when its rules stay as they are; otherwise
+    /// the service's loop raises a signed ask, whose signed yes applies it
+    /// (`apply_change`).
+    async fn change(&mut self, pending: PendingChange) {
+        let name = pending.bundle.spec.name.clone();
         if !valid_name(&name) {
             tracing::warn!(service = %name, "weave change: no service name");
             return;
         }
-        let old_text = std::fs::read_to_string(paths::weavefile(&name)).unwrap_or_default();
-        let parsed = (
-            crate::weave::parse(&name, &old_text),
-            crate::weave::parse(&name, &bundle.weavefile),
-        );
-        let (Ok(old), Ok(new)) = parsed else {
-            let text = format!("weave change by {by} dropped: a Weavefile does not parse");
-            journal::note(&name, &text, &by);
-            return;
+        let by = pending.by.clone();
+        let (bundle, change) = match rebase(&name, &pending) {
+            Ok(r) => r,
+            Err(why) => {
+                journal::note(&name, &format!("weave change by {by} dropped: {why}"), &by);
+                return;
+            }
         };
-        let change = crate::weave::change::compare(&old_text, &old, &bundle.weavefile, &new);
-        if !change.rules() || approved.is_some() {
-            let signed = approved
-                .map(|n| format!("; signed yes on #{n}"))
-                .unwrap_or_default();
-            let note = format!("weave changed by {by}: {why}; {}{signed}", change.summary());
+        if !change.rules() {
+            let note = format!("weave changed by {by}: {}; {}", pending.why, change.summary());
             self.run(bundle, &note, &by).await;
             return;
         }
         match self.tasks.get(&name) {
             Some(t) => {
-                let _ = t.ctl.send(Ctl::Change {
-                    bundle,
-                    why,
-                    change,
-                    by,
-                });
+                let _ = t.ctl.send(Ctl::Change { pending, change });
             }
             None => {
                 let text = format!("weave change by {by} dropped: the service is stopped");
                 journal::note(&name, &text, &by);
             }
+        }
+    }
+
+    /// The signed yes to weave change `n`, by `by`: the loop stops, the answer is
+    /// journaled, and the change the loop kept applies to the service as it is now. One
+    /// that no longer fits is dropped, and the loop starts again.
+    async fn apply_change(&mut self, service: &str, n: u64, by: &str, note: Option<String>) {
+        let running = self.tasks.contains_key(service);
+        self.halt(service, Some("the service restarted for new settings"))
+            .await;
+        journal::append(
+            service,
+            &Line {
+                t: now(),
+                kind: Kind::Answer,
+                action: Some(svc::WEAVE.to_string()),
+                text: Some("yes".to_string()),
+                n: Some(n),
+                by: Some(by.to_string()),
+                ..Default::default()
+            },
+        );
+        if let Some(text) = note {
+            journal::note(service, &text, by);
+        }
+        let path = paths::change(service, n);
+        let kept: Option<PendingChange> = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok());
+        let _ = std::fs::remove_file(&path);
+        let dropped = match kept {
+            None => "nothing kept to apply".to_string(),
+            Some(_) if !running => "the service is stopped; propose it again once it runs".into(),
+            Some(p) => match rebase(service, &p) {
+                Ok((bundle, change)) => {
+                    let text = format!(
+                        "weave changed by {}: {}; {}; signed yes on #{n} by {by}",
+                        p.by,
+                        p.why,
+                        change.summary()
+                    );
+                    self.run(bundle, &text, &p.by).await;
+                    return;
+                }
+                Err(why) => why,
+            },
+        };
+        journal::note(service, &format!("weave change #{n} dropped: {dropped}"), by);
+        if running {
+            self.start(service, false);
         }
     }
 
@@ -312,10 +351,18 @@ impl Daemon {
             }
             Command::Change {
                 bundle,
+                base,
                 why,
-                approved,
                 by,
-            } => self.change(bundle, why, approved, by).await,
+            } => {
+                self.change(PendingChange {
+                    bundle,
+                    base,
+                    why,
+                    by,
+                })
+                .await
+            }
             Command::Tell {
                 service,
                 request,
@@ -467,9 +514,15 @@ impl Daemon {
             .unwrap_or_else(|e| e.into_inner())
             .insert(n);
         asks::forget_sent(&self.shared, n);
-        match self.tasks.get(&service) {
-            Some(t) => {
-                let _ = t.ctl.send(Ctl::Answer {
+        let weave = ask.action.as_deref() == Some(svc::WEAVE);
+        let ctl = self.tasks.get(&service).map(|t| t.ctl.clone());
+        match ctl {
+            // A signed yes to a weave change: the daemon applies what the loop kept.
+            _ if weave && word == "yes" && ask.signed == Some(true) => {
+                self.apply_change(&service, n, by, note).await;
+            }
+            Some(ctl) => {
+                let _ = ctl.send(Ctl::Answer {
                     n,
                     word: word.to_string(),
                     by: by.to_string(),
@@ -506,6 +559,9 @@ impl Daemon {
                             ..Default::default()
                         },
                     );
+                }
+                if weave {
+                    let _ = std::fs::remove_file(paths::change(&service, n));
                 }
                 // No loop runs the task again: it ends here.
                 if task {
@@ -567,6 +623,39 @@ pub(crate) fn valid_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// A weave change on the service as it is now: its spec and README as they stand, its
+/// ARGs as they stand plus those only the new weave adds, and what it changes. Refused,
+/// with why, when the running Weavefile is no longer the one the change was written
+/// against, or a Weavefile does not parse.
+fn rebase(
+    name: &str,
+    p: &PendingChange,
+) -> std::result::Result<(svc::Bundle, crate::weave::change::Change), String> {
+    let current = std::fs::read_to_string(paths::weavefile(name)).unwrap_or_default();
+    if current != p.base {
+        return Err(
+            "the Weavefile changed since it was read: read it again and propose again".into(),
+        );
+    }
+    let spec = svc::spec(name).map_err(|e| format!("{e:#}"))?;
+    let (Ok(old), Ok(new)) = (
+        crate::weave::parse(name, &current),
+        crate::weave::parse(name, &p.bundle.weavefile),
+    ) else {
+        return Err("a Weavefile does not parse".into());
+    };
+    let change = crate::weave::change::compare(&current, &old, &p.bundle.weavefile, &new);
+    let mut args = p.bundle.spec.args.clone();
+    args.extend(spec.args.clone());
+    let bundle = svc::Bundle {
+        spec: svc::Spec { args, ..spec },
+        weavefile: p.bundle.weavefile.clone(),
+        readme: std::fs::read_to_string(paths::readme(name)).ok(),
+        secrets: BTreeMap::new(),
+    };
+    Ok((bundle, change))
 }
 
 fn write_bundle(b: &svc::Bundle) -> Result<()> {

@@ -190,8 +190,8 @@ pub(crate) async fn propose(service: &str, text: &str, why: &str, by: String) ->
     };
     service::put(&Command::Change {
         bundle,
+        base: old_text,
         why: why.to_owned(),
-        approved: None,
         by,
     })?;
     Ok(Proposed { signed, change })

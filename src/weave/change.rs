@@ -17,12 +17,16 @@ pub struct Change {
     pub removed: Vec<String>,
     /// The Weavefile lines of each rule item only the new weave has, in file order.
     pub added: Vec<String>,
+    /// Whether anything but facts, goals, actions and skills differs, read from the whole
+    /// weave: a kind of item `removed` and `added` do not list yet still counts.
+    #[serde(skip)]
+    rules: bool,
 }
 
 impl Change {
     /// Whether the rules differ: the change waits for the person's signed answer.
     pub fn rules(&self) -> bool {
-        !self.removed.is_empty() || !self.added.is_empty()
+        self.rules
     }
 
     /// `GOAL running changed, FACT disk added`, or what says nothing of them changed.
@@ -73,7 +77,25 @@ pub fn compare(old_text: &str, old: &Weave, new_text: &str, new: &Weave) -> Chan
             change.added.extend(lines.iter().cloned());
         }
     }
+    change.rules = rest(old) != rest(new);
     change
+}
+
+/// The weave without its facts, goals, actions and skills and without line numbers,
+/// each list in a fixed order: moving an item is no change.
+fn rest(w: &Weave) -> Value {
+    let mut v = unlined(w);
+    if let Value::Object(map) = &mut v {
+        for free in ["facts", "goals", "actions", "skills"] {
+            map.remove(free);
+        }
+        for item in map.values_mut() {
+            if let Value::Array(items) = item {
+                items.sort_by_cached_key(Value::to_string);
+            }
+        }
+    }
+    v
 }
 
 /// Each item by name, as its JSON without line numbers.

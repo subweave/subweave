@@ -77,11 +77,19 @@ pub(crate) enum Ctl {
     Forget { name: String, by: String },
     /// A weave change whose rules differ: a signed ask decides it.
     Change {
-        bundle: svc::Bundle,
-        why: String,
+        pending: PendingChange,
         change: weave::change::Change,
-        by: String,
     },
+}
+
+/// A weave change as proposed, kept in `changes/<n>.json` until its signed answer:
+/// `base` is the Weavefile it was written against.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct PendingChange {
+    pub bundle: svc::Bundle,
+    pub base: String,
+    pub why: String,
+    pub by: String,
 }
 
 /// The person's tasks a loop runs or has queued, kept current for the daemon: when it
@@ -941,27 +949,16 @@ impl Loop {
                     &by,
                 );
             }
-            Ctl::Change {
-                bundle,
-                why,
-                change,
-                by,
-            } => {
+            Ctl::Change { pending, change } => {
                 let n = ctx.ask(AskReq {
                     goal: None,
                     action: Some(WEAVE.to_string()),
                     rule: None,
-                    card: card::weave_change(&ctx, &by, &why, &change),
+                    card: card::weave_change(&ctx, &pending.by, &pending.why, &change),
                     facts: BTreeMap::new(),
                     signed: true,
                 });
                 // What a signed yes applies.
-                let pending = svc::Command::Change {
-                    bundle,
-                    why,
-                    approved: Some(n),
-                    by,
-                };
                 let path = paths::change(&ctx.name, n);
                 let kept = path
                     .parent()
@@ -976,8 +973,8 @@ impl Loop {
         }
     }
 
-    /// The person's signed answer to a weave change: yes hands the daemon the change it
-    /// kept; any other word drops it.
+    /// The person's signed answer to a weave change, other than the yes the daemon
+    /// applies itself: it drops the change.
     fn answer_change(&mut self, n: u64, word: &str, by: &str, note: Option<String>) {
         let ctx = self.ctx.clone();
         let mut j = ctx.journal();
@@ -992,20 +989,8 @@ impl Loop {
         if let Some(text) = note {
             j.note_by(None, text, by);
         }
-        let path = paths::change(&ctx.name, n);
-        let kept: Option<svc::Command> = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok());
-        let _ = std::fs::remove_file(&path);
-        match (word, kept) {
-            ("yes", Some(cmd)) => {
-                if let Err(e) = svc::put(&cmd) {
-                    j.note(None, format!("weave change #{n} cannot be applied: {e:#}"));
-                }
-            }
-            ("yes", None) => j.note(None, format!("weave change #{n}: nothing kept to apply")),
-            _ => j.note(None, format!("weave change #{n} dropped: answered {word}")),
-        }
+        let _ = std::fs::remove_file(paths::change(&ctx.name, n));
+        j.note(None, format!("weave change #{n} dropped: answered {word}"));
     }
 
     /// An answer to an ask a person's task raised: yes runs the task again with every

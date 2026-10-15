@@ -619,10 +619,10 @@ The ladder settles a failing goal in order: code (learned steps, `RUN`), the dec
 
 1. The first escalation of a service goes to Steery as words with no conversation, and a request that points at them.
 2. In the app, the person picks the conversation: steer one, fork one, or a new one. Then Go.
-3. The daemon keeps that conversation in `services/<service>/escalation.json`. Later escalations go straight there.
+3. The daemon keeps that conversation in `services/<service>/escalation.json`. Later escalations go straight there. It watches the words until the Go delivers them, even when their escalation is settled first.
 4. The person can move one escalation to another conversation in Steery. The kept conversation does not change.
 5. When the kept conversation is gone, the next escalation connects again from step 1.
-6. When none of the person's machines is online, the escalation goes as a card.
+6. When Steery bounces the words or cannot hold them (no machine of the person's is online), the escalation goes as a card.
 
 The words hold the escalation as a card shows it, the box and the service, the commands through `--reach` (`inbox`, `answer`, `log`, `weave`, `mcp`) and the [skill](#the-skill). The skill goes whole when a conversation connects and in its first escalation; later ones point at `subweave skill`.
 
@@ -637,7 +637,9 @@ The words hold the escalation as a card shows it, the box and the service, the c
 
 ### Signed escalations
 
-A signed escalation is settled only by the person's signed answer on a Steery card. It goes to no other target, in either Steery mode. `subweave answer`, MCP and the dashboard refuse it: `only a signed answer on Steery settles this`. A change that needs one is refused at once on a box with no Steery channel.
+A signed escalation is settled only by the person's signed answer on a Steery card. It goes to no other target, in either Steery mode, and its card has no model summary: the person signs the daemon's own words. `subweave answer`, MCP and the dashboard refuse it: `only a signed answer on Steery settles this`. A change that needs one is refused at once on a box with no Steery channel.
+
+An escalation answered or withdrawn before a target heard of it goes to no more targets.
 
 ### Weave changes
 
@@ -648,8 +650,9 @@ An agent changes a service's weave only through the daemon, never in place.
 
 1. It must parse, pass the checks, and pass the request check with the service's ARGs and no request. Else it is refused with the findings.
 2. Only `FACT`, `GOAL`, `ACTION` and `SKILL` differ: it applies at once.
-3. Anything else differs (`NEVER`, `ASK`, `ARG`, `SECRET`, `MODEL`, `NEEDS`, `FROM`, `ABOUT`): a signed escalation, `Change the rules of <service>?`, with what differs and why. `yes` applies it; `no` drops it.
-4. It applies as a new `run` of the weave: ARGs, SECRETs and models stay. The journal gets a note, `weave changed by <by>: <why>`, with what changed.
+3. Anything else differs (`NEVER`, `ASK`, `ARG`, `SECRET`, `MODEL`, `NEEDS`, `FROM`, `ABOUT`): a signed escalation, `Change the rules of <service>?`, with what differs and why. The daemon applies it only on that escalation's verified signed `yes`; `no` drops it.
+4. It applies as a new `run` of the weave: SECRETs and models stay, and ARGs stay as they are when it applies (an ARG only the new weave has takes its checked value). The journal gets a note, `weave changed by <by>: <why>`, with what changed.
+5. A change written against a Weavefile that is no longer the running one is dropped with a note: read the weave again and propose again. So is a signed `yes` while the service is stopped.
 
 ### The skill
 
