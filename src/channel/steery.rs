@@ -126,12 +126,15 @@ pub(super) async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
             })
             .collect(),
     };
+    // The daemon's code builds this form, not a model: Steery's card judge, which holds
+    // an agent's words to its guidelines, does not apply to it.
     let request = json!({
         "id": id,
         "title": raised.title,
         "body": raised.body,
         "payload": raised.payload,
         "input": [{"kind": "buttons", "name": CONTROL, "options": options}],
+        "unjudged": true,
     });
     let _: Value = http_json(
         "steery raise",
