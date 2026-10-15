@@ -37,9 +37,15 @@ const NO_PARK: i64 = 3600;
 const CODE_EVERY: Duration = Duration::from_secs(60);
 const QUOTED_EVERY: Duration = Duration::from_secs(300);
 
-/// What the daemon hands a service's loop; `by` says who asked.
+/// What the daemon hands a service's loop; `by` says who asked. An answer's `note`
+/// follows its answer line as a note by `by`.
 pub(crate) enum Ctl {
-    Answer { n: u64, word: String, by: String },
+    Answer {
+        n: u64,
+        word: String,
+        by: String,
+        note: Option<String>,
+    },
     Do { action: String, by: String },
     Task { text: String, by: String },
     Forget { name: String, by: String },
@@ -738,7 +744,7 @@ impl Loop {
     fn control(&mut self, c: Ctl) {
         let ctx = self.ctx.clone();
         match c {
-            Ctl::Answer { n, word, by } => {
+            Ctl::Answer { n, word, by, note } => {
                 let (ask, rule) = {
                     let j = ctx.journal();
                     if j.answered(n) {
@@ -749,7 +755,7 @@ impl Loop {
                 };
                 let Some(ask) = ask else { return };
                 if ask.action.as_deref() == Some(TASK) {
-                    self.answer_task(n, &word, &by);
+                    self.answer_task(n, &word, &by, note);
                     return;
                 }
                 let action = ctx.w.action(&word).map(|a| a.name.clone());
@@ -762,6 +768,9 @@ impl Loop {
                     by: Some(by.clone()),
                     ..Default::default()
                 });
+                if let Some(text) = note {
+                    ctx.journal().note_by(ask.goal.as_deref(), text, &by);
+                }
                 let Some(goal) = ask.goal.clone() else {
                     return;
                 };
@@ -871,7 +880,7 @@ impl Loop {
     /// An answer to an ask a person's task raised: yes runs the task again with every
     /// rule the person passed for it and what its earlier runs did; any other word ends
     /// it.
-    fn answer_task(&mut self, n: u64, word: &str, by: &str) {
+    fn answer_task(&mut self, n: u64, word: &str, by: &str, note: Option<String>) {
         let ctx = self.ctx.clone();
         let mut j = ctx.journal();
         j.add(Line {
@@ -882,6 +891,9 @@ impl Loop {
             by: Some(by.to_string()),
             ..Default::default()
         });
+        if let Some(text) = note {
+            j.note_by(None, text, by);
+        }
         let Some(lines) = j.task_lines(n) else { return };
         let mut job = TaskJob::new(
             lines[0].text.clone().unwrap_or_default(),

@@ -81,11 +81,14 @@ pub enum Command {
         text: String,
         by: String,
     },
-    /// `word`: `yes`, `no`, `always`, `never` or an action name.
+    /// `word`: `yes`, `no`, `always`, `never` or an action name. `note`: the answerer's
+    /// words, journaled as a note by `by` after the answer line.
     Answer {
         n: u64,
         word: String,
         by: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     Stop {
         service: String,

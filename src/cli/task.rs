@@ -14,17 +14,22 @@ pub struct Args {
     pub on: Option<String>,
 }
 
-pub fn run(args: Args) -> Result<ExitCode> {
-    super::known(&args.service)?;
-    let text = args.text.trim();
+/// Hands `service` a task in words.
+pub(crate) fn send(service: &str, text: &str, by: String) -> Result<()> {
+    super::known(service)?;
+    let text = text.trim();
     if text.is_empty() {
         bail!("say what to do");
     }
     service::put(&Command::Task {
-        service: args.service.clone(),
+        service: service.to_string(),
         text: text.to_string(),
-        by: super::by(),
-    })?;
+        by,
+    })
+}
+
+pub fn run(args: Args) -> Result<ExitCode> {
+    send(&args.service, &args.text, super::by())?;
     println!(
         "gave {} the task; it runs when no repair does: subweave log -f {}",
         args.service, args.service

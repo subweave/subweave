@@ -59,13 +59,21 @@ pub(crate) fn check_answer(n: u64, word: &str) -> Result<Ask> {
     Ok(ask)
 }
 
-pub fn answer(args: AnswerArgs) -> Result<ExitCode> {
-    let ask = check_answer(args.n, &args.word)?;
+/// Hands the daemon `word` for open ask `n`, when `word` answers it; `note` goes in the
+/// journal after the answer.
+pub(crate) fn send_answer(n: u64, word: &str, by: String, note: Option<String>) -> Result<Ask> {
+    let ask = check_answer(n, word)?;
     service::put(&Command::Answer {
-        n: args.n,
-        word: args.word.clone(),
-        by: super::by(),
+        n,
+        word: word.to_string(),
+        by,
+        note,
     })?;
+    Ok(ask)
+}
+
+pub fn answer(args: AnswerArgs) -> Result<ExitCode> {
+    let ask = send_answer(args.n, &args.word, super::by(), None)?;
     println!("answered #{} for {}: {}", args.n, ask.service, args.word);
     Ok(ExitCode::SUCCESS)
 }

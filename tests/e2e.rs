@@ -473,6 +473,77 @@ impl Box_ {
     }
 }
 
+/// `subweave mcp` with the test's environment: one JSON-RPC message per line.
+struct Mcp {
+    _child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    stdout: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    id: u64,
+}
+
+impl Mcp {
+    fn start(b: &Box_) -> Mcp {
+        let mut child = b
+            .command()
+            .arg("mcp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("subweave mcp runs");
+        let stdin = child.stdin.take().unwrap();
+        let stdout = tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(
+            child.stdout.take().unwrap(),
+        ));
+        Mcp {
+            _child: child,
+            stdin,
+            stdout,
+            id: 0,
+        }
+    }
+
+    async fn send(&mut self, msg: &Value) {
+        use tokio::io::AsyncWriteExt;
+        eprintln!("mcp > {msg}");
+        self.stdin
+            .write_all(format!("{msg}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+
+    /// A request's response.
+    async fn request(&mut self, method: &str, params: Value) -> Value {
+        self.id += 1;
+        let id = self.id;
+        self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+            .await;
+        loop {
+            let line = tokio::time::timeout(Duration::from_secs(20), self.stdout.next_line())
+                .await
+                .expect("an MCP response within 20s")
+                .unwrap()
+                .expect("subweave mcp is still running");
+            eprintln!("mcp < {line}");
+            let v: Value = serde_json::from_str(&line).expect("stdout holds only JSON-RPC");
+            if v["id"] == id {
+                return v;
+            }
+        }
+    }
+
+    /// A `tools/call` result, and its text parsed as JSON when it is JSON.
+    async fn call(&mut self, tool: &str, args: Value) -> (Value, Value) {
+        let r = self
+            .request("tools/call", json!({"name": tool, "arguments": args}))
+            .await;
+        let result = r["result"].clone();
+        assert!(result.is_object(), "{r}");
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        let parsed = serde_json::from_str(text).unwrap_or(Value::Null);
+        (result, parsed)
+    }
+}
+
 /// `macos:26` or `ubuntu:24.04`: what `src/boxinfo.rs` reads here.
 fn from_line() -> String {
     if cfg!(target_os = "macos") {
@@ -1413,7 +1484,85 @@ async fn daemon_and_cli_keep_a_toy_service() {
         b.lines("answer", |l| l["n"] == n).is_empty(),
         "a person's ask is not withdrawn"
     );
-    b.ok(&["answer", &n.to_string(), "no"]).await;
+
+    // 6g. An agent answers it over MCP: a word the ask does not take is refused, the
+    // answer and its note are journaled by the agent.
+    phase("6g mcp");
+    let mut mcp = Mcp::start(&b);
+    let init = mcp
+        .request(
+            "initialize",
+            json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "e2e-agent", "version": "1"},
+            }),
+        )
+        .await;
+    assert_eq!(init["result"]["serverInfo"]["name"], "subweave", "{init}");
+    assert_eq!(init["result"]["capabilities"], json!({"tools": {}}), "{init}");
+    assert!(init["result"]["instructions"].is_string(), "{init}");
+    mcp.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        .await;
+    let list = mcp.request("tools/list", json!({})).await;
+    let tools: Vec<&str> = list["result"]["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert_eq!(
+        tools,
+        ["inbox", "wait_ask", "answer", "status", "log", "task", "do"],
+        "{list}"
+    );
+    let (_, asks) = mcp.call("inbox", json!({})).await;
+    let ask = asks
+        .as_array()
+        .and_then(|a| a.iter().find(|a| a["n"] == n))
+        .unwrap_or_else(|| b.fail(&format!("no #{n} in the mcp inbox: {asks}")));
+    assert_eq!(ask["service"], "toy", "{ask}");
+    assert_eq!(ask["answers"], json!(["yes", "no", "always", "never"]), "{ask}");
+    let (_, waited) = mcp
+        .call("wait_ask", json!({"timeout_secs": 5, "seen": []}))
+        .await;
+    assert!(
+        waited.as_array().is_some_and(|a| a.iter().any(|a| a["n"] == n)),
+        "an unseen ask ends the wait at once: {waited}"
+    );
+    let (bad, _) = mcp
+        .call("answer", json!({"service": "toy", "n": n, "word": "reboot"}))
+        .await;
+    assert_eq!(bad["isError"], true, "{bad}");
+    assert!(
+        bad["content"][0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("yes, no, always, never")),
+        "{bad}"
+    );
+    let note = "the rotate by hand is not needed today";
+    let (ok, _) = mcp
+        .call(
+            "answer",
+            json!({"service": "toy", "n": n, "word": "no", "note": note}),
+        )
+        .await;
+    assert!(ok.get("isError").is_none(), "{ok}");
+    let answer = b
+        .until("the mcp answer", 10, || {
+            b.lines("answer", |l| l["n"] == n).into_iter().next()
+        })
+        .await;
+    assert_eq!(answer["text"], "no", "{answer}");
+    assert_eq!(answer["by"], "mcp:e2e-agent", "{answer}");
+    let noted = b.lines("note", |l| l["text"] == note);
+    assert_eq!(noted.len(), 1, "the note is journaled once");
+    assert_eq!(noted[0]["by"], "mcp:e2e-agent", "{}", noted[0]);
+    assert_eq!(noted[0]["goal"], "rotated", "{}", noted[0]);
+    assert!(b.open_ask("rotated").is_none(), "#{n} is still open");
+    let (_, asks) = mcp.call("inbox", json!({})).await;
+    assert_eq!(asks, json!([]), "the mcp inbox is empty");
+    drop(mcp);
 
     // 7. ps, log, learned.
     phase("7 ps, log, learned");

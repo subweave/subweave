@@ -13,6 +13,7 @@ mod key;
 mod learn;
 pub(crate) mod learned;
 pub(crate) mod log;
+mod mcp;
 mod plan;
 mod provider;
 mod ps;
@@ -81,6 +82,8 @@ enum Command {
     Channel(channel::Args),
     /// Every box's asks and warnings, as notifications on this computer
     Watch,
+    /// An MCP server on stdin and stdout, for an agent that answers asks
+    Mcp,
     /// Store a provider's key, read from stdin
     Key(key::Args),
     /// Add, remove or list model providers
@@ -121,6 +124,7 @@ impl Command {
             | Command::Review(_)
             | Command::Daemon(_)
             | Command::Watch
+            | Command::Mcp
             | Command::Version => (None, None),
         }
     }
@@ -174,6 +178,7 @@ async fn local(command: Command) -> Result<ExitCode> {
         Command::Rm(args) => control::rm(args),
         Command::Channel(args) => channel::run(args).await,
         Command::Watch => watch::run().await,
+        Command::Mcp => mcp::run().await,
         Command::Key(args) => key::run(args),
         Command::Provider(args) => provider::run(args),
         Command::Review(args) => review::run(args).await,

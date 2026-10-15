@@ -54,6 +54,7 @@ pub(crate) async fn answer(
         n: b.n,
         word: b.word,
         by: auth::by(&headers, peer),
+        note: None,
     })
 }
 

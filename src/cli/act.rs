@@ -24,13 +24,18 @@ pub(crate) fn check_action(service: &str, action: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn run(args: Args) -> Result<ExitCode> {
-    check_action(&args.service, &args.action)?;
+/// Hands the daemon `action` for `service`, when its weave has the action.
+pub(crate) fn send(service: &str, action: &str, by: String) -> Result<()> {
+    check_action(service, action)?;
     service::put(&Command::Do {
-        service: args.service.clone(),
-        action: args.action.clone(),
-        by: super::by(),
-    })?;
+        service: service.to_string(),
+        action: action.to_string(),
+        by,
+    })
+}
+
+pub fn run(args: Args) -> Result<ExitCode> {
+    send(&args.service, &args.action, super::by())?;
     println!(
         "asked the daemon to run {} on {}: subweave log -f {}",
         args.action, args.service, args.service

@@ -95,7 +95,7 @@ pub async fn run() -> Result<()> {
             _ = tick.tick() => {}
             Some((answer, from)) = answers_rx.recv() => {
                 let answer: channel::Answer = answer;
-                d.answer(answer.n, &answer.word, &answer.by, Some(from)).await;
+                d.answer(answer.n, &answer.word, &answer.by, None, Some(from)).await;
                 continue;
             }
             _ = tokio::signal::ctrl_c() => break,
@@ -298,7 +298,7 @@ impl Daemon {
                 ),
                 None => tracing::warn!(service = %service, "task: no such service"),
             },
-            Command::Answer { n, word, by } => self.answer(n, &word, &by, None).await,
+            Command::Answer { n, word, by, note } => self.answer(n, &word, &by, note, None).await,
             Command::Stop { service, by } => {
                 self.halt(&service, Some("the service stopped")).await;
                 if let Err(e) = set_stopped(&service, true) {
@@ -341,8 +341,16 @@ impl Daemon {
         }
     }
 
-    /// The first answer to an open ask wins; `from` is the channel it came on.
-    async fn answer(&mut self, n: u64, word: &str, by: &str, from: Option<String>) {
+    /// The first answer to an open ask wins; `from` is the channel it came on. `note`, when
+    /// given, follows the answer line as a note by `by`.
+    async fn answer(
+        &mut self,
+        n: u64,
+        word: &str,
+        by: &str,
+        note: Option<String>,
+        from: Option<String>,
+    ) {
         if self
             .shared
             .answered
@@ -373,6 +381,7 @@ impl Daemon {
                     n,
                     word: word.to_string(),
                     by: by.to_string(),
+                    note,
                 });
             }
             None => {
@@ -394,6 +403,19 @@ impl Daemon {
                         ..Default::default()
                     },
                 );
+                if let Some(text) = note {
+                    journal::append(
+                        &service,
+                        &Line {
+                            t: now(),
+                            kind: Kind::Note,
+                            goal: ask.goal.clone(),
+                            text: Some(text),
+                            by: Some(by.to_string()),
+                            ..Default::default()
+                        },
+                    );
+                }
                 // No loop runs the task again: it ends here.
                 if task {
                     let lines = svc::journal(&service).unwrap_or_default();
