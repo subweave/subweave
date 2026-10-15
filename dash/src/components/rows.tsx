@@ -47,9 +47,13 @@ export function KindGlyph({ line }: { line: Line }) {
   );
 }
 
-function gateTone(l: Line): "red" | "amber" {
+/** A gate refused (red), asked (amber), or passed by a kept `always` (ink). */
+function gateTone(l: Line): "red" | "amber" | "ink" {
+  if (l.ok === true) return "ink";
   return /^ASK\b/.test(l.text ?? "") ? "amber" : "red";
 }
+
+const GATE_SAYS = { red: ["t-red", "Refused"], amber: ["t-amber", "Asked"], ink: ["t-accent", "Passed, always"] } as const;
 
 export function Time({ t, now }: { t: string; now: number }) {
   const sameDay = new Date(ms(t)).toDateString() === new Date(now).toDateString();
@@ -132,11 +136,12 @@ function describe({ line: l, gate }: Step): { main: ReactNode; tags?: ReactNode;
     case "gate": {
       const g = splitGate(l.text ?? "");
       const tone = gateTone(l);
+      const [cls, says] = GATE_SAYS[tone];
       const p = l.p ? Object.values(l.p)[0] : undefined;
       return {
         main: (
           <>
-            <span className={tone === "red" ? "t-red" : "t-amber"}>{tone === "red" ? "Refused" : "Asked"}</span>{" "}
+            <span className={cls}>{says}</span>{" "}
             <span className="t-model">{g.rule}</span>
             {g.command && (
               <>

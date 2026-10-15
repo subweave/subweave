@@ -11,11 +11,12 @@ mod journal;
 mod learned;
 mod repair;
 mod service;
+mod trace;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -55,6 +56,8 @@ struct Daemon {
 
 /// Runs every service in the foreground until SIGINT or SIGTERM.
 pub async fn run() -> Result<()> {
+    crate::logs::init();
+    trace::init();
     for dir in [paths::inbox(), paths::services()] {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     }
@@ -78,10 +81,10 @@ pub async fn run() -> Result<()> {
         tasks: BTreeMap::new(),
         broken: BTreeSet::new(),
     };
-    eprintln!(
-        "subweave daemon: state {}, config {}",
-        paths::state().display(),
-        paths::config().display()
+    tracing::info!(
+        state = %paths::state().display(),
+        config = %paths::config().display(),
+        "subweave daemon started"
     );
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("listening for SIGTERM")?;
@@ -101,10 +104,10 @@ pub async fn run() -> Result<()> {
         for (path, cmd) in inbox::take() {
             match cmd {
                 Ok(cmd) => d.apply(cmd).await,
-                Err(e) => eprintln!("inbox {}: {e:#}", path.display()),
+                Err(e) => tracing::warn!(path = %path.display(), error = %format!("{e:#}"), "unreadable inbox command"),
             }
             if let Err(e) = std::fs::remove_file(&path) {
-                eprintln!("remove {}: {e}", path.display());
+                tracing::error!(path = %path.display(), error = %e, "cannot remove an inbox command");
             }
         }
         d.keep();
@@ -115,6 +118,7 @@ pub async fn run() -> Result<()> {
         let _ = t.handle.await;
     }
     let _ = std::fs::remove_file(paths::daemon());
+    let _ = tokio::task::spawn_blocking(trace::shutdown).await;
     Ok(())
 }
 
@@ -141,7 +145,7 @@ impl Daemon {
         let names = match svc::names() {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("{e:#}");
+                tracing::error!(error = %format!("{e:#}"), "cannot list the services");
                 return;
             }
         };
@@ -152,7 +156,7 @@ impl Daemon {
                 }
                 self.tasks.remove(&name);
                 self.broken.insert(name.clone());
-                eprintln!("{name}: its loop ended; it starts again on its next command");
+                tracing::warn!(service = %name, "its loop ended; it starts again on its next command");
             }
             if self.broken.contains(&name) {
                 continue;
@@ -161,7 +165,7 @@ impl Daemon {
                 Ok(spec) if !spec.stopped => self.start(&name, false),
                 Ok(_) => {}
                 Err(e) => {
-                    eprintln!("{name}: {e:#}");
+                    tracing::error!(service = %name, error = %format!("{e:#}"), "cannot read the service");
                     self.broken.insert(name);
                 }
             }
@@ -196,16 +200,15 @@ impl Daemon {
         let _ = t.handle.await;
         let Some(why) = why else { return };
         let open = std::mem::take(&mut *t.tasks.lock().unwrap_or_else(|e| e.into_inner()));
-        let path = paths::journal(name);
         for job in open {
             if !job.again {
                 let mut start = job.line(None, job.text.clone());
                 start.t = now();
-                journal::append(&path, &start);
+                journal::append(name, &start);
             }
             let mut end = job.line(Some(false), format!("ended: {why}"));
             end.t = now();
-            journal::append(&path, &end);
+            journal::append(name, &end);
         }
     }
 
@@ -214,13 +217,13 @@ impl Daemon {
             Command::Run { bundle, by } => {
                 let name = bundle.spec.name.clone();
                 if !valid_name(&name) {
-                    eprintln!("run: {name:?} is no service name");
+                    tracing::warn!(service = %name, "run: no service name");
                     return;
                 }
                 self.halt(&name, Some("the service restarted for new settings"))
                     .await;
                 if let Err(e) = write_bundle(&bundle) {
-                    eprintln!("run {name}: {e:#}");
+                    tracing::error!(service = %name, error = %format!("{e:#}"), "run: cannot write the service");
                     return;
                 }
                 journal::note(
@@ -241,7 +244,7 @@ impl Daemon {
                 by,
             } => {
                 let Ok(mut spec) = svc::spec(&service) else {
-                    eprintln!("tell: no service {service}");
+                    tracing::warn!(service = %service, "tell: no such service");
                     return;
                 };
                 self.halt(&service, Some("the service restarted for new settings"))
@@ -260,7 +263,7 @@ impl Daemon {
                     write_secrets(&service, &all)
                 });
                 if let Err(e) = saved {
-                    eprintln!("tell {service}: {e:#}");
+                    tracing::error!(service = %service, error = %format!("{e:#}"), "tell: cannot save");
                     return;
                 }
                 journal::note(&service, &format!("tell: {request}"), &by);
@@ -282,7 +285,7 @@ impl Daemon {
                     &format!("do {action}: the service is stopped"),
                     &by,
                 ),
-                None => eprintln!("do: no service {service}"),
+                None => tracing::warn!(service = %service, action = %action, "do: no such service"),
             },
             Command::Task { service, text, by } => match self.tasks.get(&service) {
                 Some(t) => {
@@ -293,20 +296,20 @@ impl Daemon {
                     &format!("task {text:?}: the service is stopped"),
                     &by,
                 ),
-                None => eprintln!("task: no service {service}"),
+                None => tracing::warn!(service = %service, "task: no such service"),
             },
             Command::Answer { n, word, by } => self.answer(n, &word, &by, None).await,
             Command::Stop { service, by } => {
                 self.halt(&service, Some("the service stopped")).await;
                 if let Err(e) = set_stopped(&service, true) {
-                    eprintln!("stop {service}: {e:#}");
+                    tracing::error!(service = %service, error = %format!("{e:#}"), "stop failed");
                     return;
                 }
                 journal::note(&service, "stopped", &by);
             }
             Command::Start { service, by } => {
                 if let Err(e) = set_stopped(&service, false) {
-                    eprintln!("start {service}: {e:#}");
+                    tracing::error!(service = %service, error = %format!("{e:#}"), "start failed");
                     return;
                 }
                 self.broken.remove(&service);
@@ -317,7 +320,7 @@ impl Daemon {
                 self.broken.remove(&service);
                 if valid_name(&service) {
                     if let Err(e) = std::fs::remove_dir_all(paths::service(&service)) {
-                        eprintln!("rm {service}: {e}");
+                        tracing::error!(service = %service, error = %e, "rm failed");
                     }
                 }
             }
@@ -332,7 +335,7 @@ impl Daemon {
                         &format!("forget: nothing learned for {name}"),
                         &by,
                     ),
-                    Err(e) => eprintln!("forget {service}: {e:#}"),
+                    Err(e) => tracing::error!(service = %service, error = %format!("{e:#}"), "forget failed"),
                 },
             },
         }
@@ -350,12 +353,12 @@ impl Daemon {
             return;
         }
         let Some((service, ask)) = find_ask(n) else {
-            eprintln!("answer: no open ask #{n}");
+            tracing::warn!(ask = n, "answer: no open ask");
             return;
         };
         let answers = ask.answers.clone().unwrap_or_default();
         if !answers.iter().any(|a| a == word) {
-            eprintln!("answer #{n}: {word:?} is not one of {}", answers.join(", "));
+            tracing::warn!(ask = n, word, answers = %answers.join(", "), "answer: not one of the ask's words");
             return;
         }
         self.shared
@@ -374,9 +377,8 @@ impl Daemon {
             }
             None => {
                 let task = ask.action.as_deref() == Some(TASK);
-                let path = paths::journal(&service);
                 journal::append(
-                    &path,
+                    &service,
                     &Line {
                         t: now(),
                         kind: Kind::Answer,
@@ -397,7 +399,7 @@ impl Daemon {
                     let lines = svc::journal(&service).unwrap_or_default();
                     let start_by = journal::task_lines(&lines, n).and_then(|l| l[0].by.clone());
                     journal::append(
-                        &path,
+                        &service,
                         &Line {
                             t: now(),
                             kind: Kind::Action,
@@ -511,7 +513,7 @@ pub(crate) fn notify(msg: Message, except: Option<String>) {
         let channels = match channel::ls() {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("channels: {e:#}");
+                tracing::error!(error = %format!("{e:#}"), "cannot read the channels");
                 return;
             }
         };
@@ -520,7 +522,7 @@ pub(crate) fn notify(msg: Message, except: Option<String>) {
                 continue;
             }
             if let Err(e) = channel::send(&ch, &msg).await {
-                eprintln!("{e:#}");
+                tracing::warn!(service = %msg.service, goal = msg.goal.as_deref(), channel = %ch.name, error = %format!("{e:#}"), "sending a message failed");
             }
         }
     });
@@ -546,7 +548,7 @@ fn heartbeat() {
                 ask: None,
             };
             if let Err(e) = channel::send(ch, &msg).await {
-                eprintln!("{e:#}");
+                tracing::warn!(channel = %ch.name, error = %format!("{e:#}"), "heartbeat failed");
             }
         }
     });
@@ -562,6 +564,11 @@ pub(crate) fn now() -> String {
 /// Seconds since the epoch of an RFC 3339 time.
 pub(crate) fn epoch_of(t: &str) -> Option<i64> {
     t.parse::<jiff::Timestamp>().ok().map(|ts| ts.as_second())
+}
+
+/// Milliseconds since `start`: a line's `ms`.
+pub(crate) fn ms(start: Instant) -> Option<u64> {
+    Some(u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX))
 }
 
 pub(crate) fn epoch() -> i64 {

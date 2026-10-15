@@ -3,6 +3,7 @@ pub mod channel;
 pub mod cli;
 pub mod daemon;
 pub mod dash;
+pub mod logs;
 pub mod model;
 pub mod paths;
 pub mod plan;

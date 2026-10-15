@@ -8,6 +8,7 @@ mod auth;
 pub mod config;
 mod live;
 mod logs;
+mod metrics;
 mod read;
 mod vitals;
 
@@ -44,6 +45,7 @@ pub(crate) struct App {
     pub sessions: auth::Sessions,
     pub live: live::Live,
     pub vitals: vitals::Vitals,
+    pub metrics: metrics::Metrics,
 }
 
 /// `{error}` with a status.
@@ -121,6 +123,7 @@ impl<S: Send + Sync> FromRequestParts<S> for Svc {
 /// Runs the dashboard in the foreground until SIGINT or SIGTERM.
 pub async fn serve(config: Config) -> Result<()> {
     config.need_password()?;
+    crate::logs::init();
     let ip = config.addr()?;
     let port = config.port;
     let app = Arc::new(App {
@@ -128,6 +131,7 @@ pub async fn serve(config: Config) -> Result<()> {
         sessions: auth::Sessions::default(),
         live: live::Live::new(),
         vitals: vitals::Vitals::default(),
+        metrics: metrics::Metrics::default(),
     });
     tokio::spawn(live::tail(app.clone()));
     tokio::spawn(vitals::sample(app.clone()));
@@ -154,16 +158,17 @@ pub async fn serve(config: Config) -> Result<()> {
         .fallback(any(|| async { ApiError::not_found("no such API route") }));
     let router = Router::new()
         .nest("/api", api)
+        .route("/metrics", get(metrics::get))
         .fallback(assets::serve)
         .layer(middleware::from_fn_with_state(app.clone(), auth::guard))
         .with_state(app);
     let listener = tokio::net::TcpListener::bind((ip, port))
         .await
         .with_context(|| format!("listening on {ip}:{port}"))?;
-    eprintln!(
-        "subweave dash: http://{} (state {})",
-        SocketAddr::new(ip, port),
-        crate::paths::state().display()
+    tracing::info!(
+        url = %format!("http://{}", SocketAddr::new(ip, port)),
+        state = %crate::paths::state().display(),
+        "subweave dash started"
     );
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("listening for SIGTERM")?;
@@ -178,7 +183,7 @@ pub async fn serve(config: Config) -> Result<()> {
                 Ok(c) => c,
                 Err(e) => {
                     // Out of file descriptors, most likely: let some close.
-                    eprintln!("accept: {e}");
+                    tracing::warn!(error = %e, "accept failed");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 }

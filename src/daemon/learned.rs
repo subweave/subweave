@@ -11,12 +11,12 @@ use sha2::{Digest, Sha256};
 use crate::model::coder::{Msg, Tally, Tool};
 use crate::model::decider::Question;
 use crate::paths;
-use crate::service::{self as svc, Kind, Learned, LearnedFact, Line};
+use crate::service::{self as svc, JobKind, Kind, Learned, LearnedFact, Line};
 use crate::weave::expr::Op;
 use crate::weave::{self, Action, Condition, Expr, Fact, FactSource, Rule, Step, Weave};
 
 use super::service::Ctx;
-use super::{now, save_json, sh};
+use super::{ms, now, save_json, sh};
 
 const TRIES: usize = 3;
 /// After a quoted fact could not be learned, the next try waits this long.
@@ -56,7 +56,7 @@ pub(crate) fn steps_key(ctx: &Ctx, a: &Action) -> String {
 
 pub(crate) fn save(service: &str, l: &Learned) {
     if let Err(e) = save_json(&paths::learned(service), l) {
-        eprintln!("{e:#}");
+        tracing::error!(service, error = %format!("{e:#}"), "cannot save learned.json");
     }
 }
 
@@ -169,7 +169,7 @@ pub(crate) async fn fact_command(ctx: &Ctx, fact: &Fact) -> Option<String> {
     if let Some(c) = learned_command(ctx, fact) {
         return Some(c);
     }
-    super::episode::scope(learn_and_keep(ctx, fact, None)).await
+    super::episode::scope(JobKind::Learn, learn_and_keep(ctx, fact, None)).await
 }
 
 /// Whether a nonzero exit of this fact's command is a failed read, not a value: true for
@@ -218,7 +218,7 @@ pub(crate) async fn relearn(
     let hint = format!(
         "The last command for this fact failed on this box ({code}):\n{command}\nIt printed:\n{output}\nWrite one that works here."
     );
-    super::episode::scope(learn_and_keep(ctx, fact, Some(&hint))).await
+    super::episode::scope(JobKind::Learn, learn_and_keep(ctx, fact, Some(&hint))).await
 }
 
 /// Learns a quoted fact's command and keeps it. The caller holds `ctx.learning`.
@@ -239,6 +239,7 @@ async fn learn_and_keep(ctx: &Ctx, fact: &Fact, hint: Option<&str>) -> Option<St
     }
     let mut cost = 0.0;
     let mut tally = Tally::default();
+    let start = Instant::now();
     let result = learn(ctx, fact, &text, hint, &mut cost, &mut tally).await;
     if tally.calls > 0 {
         let model = ctx
@@ -255,6 +256,7 @@ async fn learn_and_keep(ctx: &Ctx, fact: &Fact, hint: Option<&str>) -> Option<St
             )),
             cost_usd: Some(tally.cost_usd),
             usage: Some(tally.usage(model)),
+            ms: ms(start),
             ..Default::default()
         });
         cost -= tally.cost_usd;
@@ -277,6 +279,7 @@ async fn learn_and_keep(ctx: &Ctx, fact: &Fact, hint: Option<&str>) -> Option<St
                 kind: Kind::Learn,
                 text: Some(format!("fact {}: {command}", fact.name)),
                 cost_usd: Some(cost),
+                ms: ms(start),
                 ..Default::default()
             });
             ctx.message(
@@ -293,6 +296,7 @@ async fn learn_and_keep(ctx: &Ctx, fact: &Fact, hint: Option<&str>) -> Option<St
                 kind: Kind::Note,
                 text: Some(format!("cannot learn fact {}: {e:#}", fact.name)),
                 cost_usd: (cost > 0.0).then_some(cost),
+                ms: ms(start),
                 ..Default::default()
             });
             ctx.learn_wait

@@ -42,6 +42,14 @@ pub(crate) struct Vitals {
     recent: Mutex<VecDeque<(i64, Sample)>>,
 }
 
+impl Vitals {
+    /// The newest sample; none elsewhere than Linux or before the first.
+    pub(crate) fn last(&self) -> Option<Sample> {
+        let recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
+        recent.back().map(|(_, s)| s.clone())
+    }
+}
+
 /// This box reads like Linux: `/proc` is there.
 fn linux() -> bool {
     std::path::Path::new("/proc/stat").is_file()
@@ -195,7 +203,7 @@ pub(crate) async fn sample(app: Arc<App>) {
         return;
     }
     if let Err(e) = std::fs::create_dir_all(paths::dash_state()) {
-        eprintln!("create {}: {e}", paths::dash_state().display());
+        tracing::error!(path = %paths::dash_state().display(), error = %e, "cannot create the dashboard's state");
     }
     prune();
     let mut pruned = Instant::now();
@@ -306,7 +314,7 @@ fn append(s: &Sample) {
         f.write_all(&line)
     };
     if let Err(e) = write() {
-        eprintln!("write {}: {e}", file().display());
+        tracing::error!(path = %file().display(), error = %e, "cannot write a vitals sample");
     }
 }
 
@@ -334,7 +342,7 @@ fn prune() {
     }
     let tmp = file().with_extension("jsonl.tmp");
     if let Err(e) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, file())) {
-        eprintln!("prune {}: {e}", file().display());
+        tracing::error!(path = %file().display(), error = %e, "cannot prune the vitals");
     }
 }
 

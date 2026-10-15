@@ -15,6 +15,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
 use super::{ApiError, App, Body};
@@ -47,6 +48,8 @@ pub(crate) struct Sessions {
     queued: AtomicUsize,
     /// Token → its open log streams.
     streams: Mutex<HashMap<String, usize>>,
+    /// SHA-256 of the password a `/metrics` scraper sent, once argon2 passed it.
+    scrape: Mutex<Option<[u8; 32]>>,
 }
 
 impl Default for Sessions {
@@ -57,6 +60,7 @@ impl Default for Sessions {
             verify: Semaphore::new(VERIFY_AT_ONCE),
             queued: AtomicUsize::new(0),
             streams: Mutex::default(),
+            scrape: Mutex::default(),
         }
     }
 }
@@ -320,16 +324,12 @@ pub(crate) struct Login {
     password: String,
 }
 
-pub(crate) async fn login(
-    State(app): State<Arc<App>>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    Body(body): Body<Login>,
-) -> Result<Response, ApiError> {
+/// The dashboard's password, checked under the login limits: wrong tries per client, and
+/// argon2 checks at once.
+async fn check(app: &App, ip: IpAddr, password: String) -> Result<(), ApiError> {
     let Some(phc) = app.config.password.clone() else {
         return Err(ApiError::internal(anyhow::anyhow!("no password set")));
     };
-    let ip = client_ip(&headers, peer);
     let too_many = || {
         ApiError(
             StatusCode::TOO_MANY_REQUESTS,
@@ -357,7 +357,7 @@ pub(crate) async fn login(
                 .map_err(|e| ApiError::internal(e.into()))?
         }
     };
-    let ok = tokio::task::spawn_blocking(move || super::config::verify(&body.password, &phc))
+    let ok = tokio::task::spawn_blocking(move || super::config::verify(&password, &phc))
         .await
         .unwrap_or(false);
     drop(permit);
@@ -366,6 +366,51 @@ pub(crate) async fn login(
         tokio::time::sleep(WRONG_DELAY).await;
         return Err(ApiError(StatusCode::UNAUTHORIZED, "wrong password".into()));
     }
+    Ok(())
+}
+
+/// A `/metrics` scraper: on this box (a loopback peer no proxy forwarded for), or sending
+/// the dashboard password as `Authorization: Bearer`. The first good password is kept as
+/// its SHA-256, so later scrapes skip argon2.
+pub(crate) async fn scraper(app: &App, headers: &HeaderMap, peer: SocketAddr) -> Result<(), ApiError> {
+    let ip = client_ip(headers, peer);
+    // A proxy on this box reaches the dashboard over loopback for clients anywhere.
+    let forwarded = headers.contains_key("x-forwarded-for");
+    if ip.is_loopback() && !forwarded {
+        return Ok(());
+    }
+    let Some(password) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    else {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "send the dashboard password: Authorization: Bearer <password>".into(),
+        ));
+    };
+    let digest: [u8; 32] = Sha256::digest(password.as_bytes()).into();
+    let kept: Option<[u8; 32]> = *lock(&app.sessions.scrape);
+    if kept.is_some_and(|k| same(&k, &digest)) {
+        return Ok(());
+    }
+    check(app, ip, password.to_string()).await?;
+    *lock(&app.sessions.scrape) = Some(digest);
+    Ok(())
+}
+
+/// Equal in time that does not depend on where they differ.
+fn same(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+}
+
+pub(crate) async fn login(
+    State(app): State<Arc<App>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Body(body): Body<Login>,
+) -> Result<Response, ApiError> {
+    check(&app, client_ip(&headers, peer), body.password).await?;
     let token = app.sessions.new_session();
     let https = headers
         .get("x-forwarded-proto")

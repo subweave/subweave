@@ -63,8 +63,12 @@ export interface Line {
   body?: string;
   /** The episode the line belongs to: one job run or one learn. Older lines have none. */
   ep?: string;
-  /** What a model conversation used, on the coder note that ends it. */
+  /** What a model conversation used, on the line that ends it: a coder note, a decide. */
   usage?: Usage;
+  /** Wall time of the step the line ends, in ms. */
+  ms?: number;
+  /** On an episode's first line: the job it runs. */
+  job?: "repair" | "task" | "learn";
 }
 
 export interface Usage {
