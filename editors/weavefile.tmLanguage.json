@@ -21,12 +21,12 @@
       "captures": { "1": { "name": "punctuation.definition.comment.weavefile" } }
     },
     "heredoc-shell": {
-      "begin": "^\\s*(?:(RUN)|(FACT)\\s+([a-z_][a-z0-9_-]*)(?:\\s+(FOLLOW))?)\\s+(<<)([A-Z]+)\\s*$",
+      "begin": "^\\s*(?:(RUN)|(FACT)\\s+([a-z_][a-z0-9_-]*)\\s+(BOOL|NUMBER(?:\\s+(?:%|ms|s|m|h|d|B|KB|MB|GB|TB))?|TEXT|VERSION|LINES))\\s+(<<)([A-Z]+)\\s*$",
       "beginCaptures": {
         "1": { "name": "keyword.control.instruction.weavefile" },
         "2": { "name": "keyword.control.instruction.weavefile" },
         "3": { "name": "entity.name.fact.weavefile" },
-        "4": { "name": "keyword.other.weavefile" },
+        "4": { "name": "storage.type.fact.weavefile" },
         "5": { "name": "keyword.operator.heredoc.weavefile" },
         "6": { "name": "keyword.control.heredoc-token.weavefile" }
       },
@@ -96,11 +96,11 @@
       "patterns": [{ "include": "source.shell" }]
     },
     "fact-command-line": {
-      "begin": "^\\s*(FACT)\\s+([a-z_][a-z0-9_-]*)\\s+(?:(FOLLOW)\\s+)?(?=[^\"\\s])",
+      "begin": "^\\s*(FACT)\\s+([a-z_][a-z0-9_-]*)\\s+(BOOL|NUMBER(?:\\s+(?:%|ms|s|m|h|d|B|KB|MB|GB|TB))?|TEXT|VERSION|LINES)\\s+(?=[^\"\\s])",
       "beginCaptures": {
         "1": { "name": "keyword.control.instruction.weavefile" },
         "2": { "name": "entity.name.fact.weavefile" },
-        "3": { "name": "keyword.other.weavefile" }
+        "3": { "name": "storage.type.fact.weavefile" }
       },
       "end": "(?<!\\\\)\\n",
       "contentName": "meta.embedded.line.shell",
@@ -131,7 +131,7 @@
         { "include": "#single-quoted" },
         { "include": "#keyword" },
         { "include": "#function" },
-        { "include": "#duration" },
+        { "include": "#quantity" },
         { "include": "#number" },
         { "include": "#operator" },
         { "include": "#variable" },
@@ -167,13 +167,14 @@
     "keyword": {
       "patterns": [
         { "match": "\\b(MUST|SHOULD|MAY)\\b", "name": "storage.modifier.level.weavefile" },
-        { "match": "\\b(AFTER|EVERY|TRIES|PER|FOR|WITHIN|IF|BEFORE|BECAUSE|FOLLOW|THEN|DECIDE|CODE|NORMAL|TROUBLE)\\b", "name": "keyword.other.weavefile" },
+        { "match": "\\b(AFTER|EVERY|OVER|TRIES|PER|FOR|WITHIN|IF|BEFORE|BECAUSE|THEN|DECIDE|CODE|NORMAL|TROUBLE)\\b", "name": "keyword.other.weavefile" },
+        { "match": "\\b(BOOL|NUMBER|TEXT|VERSION|LINES)\\b", "name": "storage.type.fact.weavefile" },
         { "match": "\\b(AND|OR|NOT)\\b", "name": "keyword.operator.logical.weavefile" },
         { "match": "\\b(CPU|GPU|GB|TB|RAM|DISK)\\b", "name": "support.type.unit.weavefile" }
       ]
     },
     "function": {
-      "match": "\\b(SINCE|PREV)(\\()([a-z_][a-z0-9_-]*)(\\))",
+      "match": "\\b(SINCE|MIN|MAX|AVG|DELTA|COUNT)(\\()([a-z_][a-z0-9_-]*)(\\))",
       "captures": {
         "1": { "name": "support.function.weavefile" },
         "2": { "name": "punctuation.section.parens.weavefile" },
@@ -181,7 +182,7 @@
         "4": { "name": "punctuation.section.parens.weavefile" }
       }
     },
-    "duration": { "match": "\\b\\d+[smhd]\\b", "name": "constant.numeric.duration.weavefile" },
+    "quantity": { "match": "\\b\\d+(?:\\.\\d+)?(?:%|(?:ms|s|m|h|d|B|KB|MB|GB|TB)\\b)", "name": "constant.numeric.quantity.weavefile" },
     "number": { "match": "\\b\\d+(?:\\.\\d+)?\\b", "name": "constant.numeric.weavefile" },
     "operator": { "match": "<=|>=|==|!=|<|>|=|\\+|-(?=\\s)|\\*|/", "name": "keyword.operator.weavefile" },
     "variable": { "match": "\\$\\{?[A-Za-z_][A-Za-z0-9_]*\\}?", "name": "variable.other.weavefile" },

@@ -1992,6 +1992,9 @@ a.card:hover {
 .w-name {
   color: var(--accent);
 }
+.w-num {
+  color: var(--accent);
+}
 .w-comment {
   color: var(--muted);
 }

@@ -3,8 +3,10 @@ import { useMemo, type ReactNode } from "react";
 import { Panel } from "../components/ui";
 import type { ServiceProps } from "./ServiceView";
 
-const KEYWORDS = new Set(
-  "ABOUT ACTION ADD AFTER AND ARG ASK BECAUSE BEFORE CODE CPU DECIDE DISK DO EVERY FACT FOLLOW FOR FROM GB GOAL GPU IF MAY MODEL MUST NEEDS NEVER NOT OR PER PREV RAM RUN SECRET SHOULD SINCE SKILL TB THEN TRIES WHEN WITHIN".split(" "),
+const KEYWORDS: Record<string, true> = Object.fromEntries(
+  "ABOUT ACTION ADD AFTER AND ARG ASK AVG BECAUSE BEFORE BOOL CODE COUNT CPU DECIDE DELTA DISK DO EVERY FACT FOR FROM GB GOAL GPU IF KNOWN LINES MAX MAY MIN MODEL MUST NEEDS NEVER NORMAL NOT NUMBER OR OVER PER RAM RUN SECRET SHOULD SINCE SKILL TB TEXT THEN TRIES TROUBLE VERSION WHEN WITHIN"
+    .split(" ")
+    .map((w) => [w, true]),
 );
 
 /** One line outside a heredoc: keywords, quoted text, $names, comments. `open`: the line
@@ -19,7 +21,7 @@ function inline(line: string, key: string, open: boolean): { nodes: ReactNode[];
     if (!end) return { nodes: out, open: true };
     line = line.slice(part.length);
   }
-  const re = /("(?:[^"\\]|\\.)*"?)|(\$[A-Za-z_][A-Za-z0-9_]*)|\b([A-Z]{2,})\b/g;
+  const re = /("(?:[^"\\]|\\.)*"?)|(\$[A-Za-z_][A-Za-z0-9_]*)|\b([A-Z]{2,})\b|(\b\d+(?:\.\d+)?(?:%|(?:ms|s|m|h|d|B|KB|MB|GB|TB)\b))/g;
   let at = 0;
   let m: RegExpExecArray | null;
   let k = 0;
@@ -31,7 +33,8 @@ function inline(line: string, key: string, open: boolean): { nodes: ReactNode[];
       // A quote left open runs on to the next line.
       open_ = m[1].length === 1 || !m[1].endsWith('"');
     } else if (m[2]) out.push(<span key={`${key}-${k++}`} className="w-name">{m[2]}</span>);
-    else if (KEYWORDS.has(m[3])) out.push(<span key={`${key}-${k++}`} className="w-key">{m[3]}</span>);
+    else if (m[3] && KEYWORDS[m[3]]) out.push(<span key={`${key}-${k++}`} className="w-key">{m[3]}</span>);
+    else if (m[4]) out.push(<span key={`${key}-${k++}`} className="w-num">{m[4]}</span>);
     else out.push(m[3]);
     at = m.index + m[0].length;
   }

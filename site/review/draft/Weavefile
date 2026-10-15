@@ -15,19 +15,19 @@ SECRET PW          "a password nobody reads"
 NEVER "allow more than 100 connections"
 NEVER "be insecure"
 
-FACT up       "postgres"
-FACT disk     "the disk"
-FACT clean    "delete old logs, then print the free space"
-FACT pending  apt-get update -qq && apt list --upgradable 2>/dev/null | wc -l
-FACT latency  "the average query time"
-FACT weblog   FOLLOW tail -F /var/log/nginx/access.log
+FACT up       BOOL    "postgres"
+FACT disk     NUMBER  "the disk"
+FACT clean    NUMBER  "delete old logs, then print the free space"
+FACT pending  NUMBER  apt-get update -qq && apt list --upgradable 2>/dev/null | wc -l
+FACT latency  NUMBER  "the average query time"
+FACT weblog   LINES   tail -F /var/log/nginx/access.log
 
-GOAL installed               up
-GOAL room      AFTER installed  disk < 85
-GOAL fast      AFTER installed  "queries take under 200 ms on average per `latency`"
-GOAL tidy      AFTER installed  clean > 10
-GOAL current   AFTER installed  pending == 0
-GOAL served    AFTER installed  "the new lines in `weblog` show no attack"
+GOAL installed "postgres is installed"                 up
+GOAL room      "the disk has room"     AFTER installed  disk < 85
+GOAL fast      "queries are fast"      AFTER installed  "queries take under 200 ms on average per `latency`"
+GOAL tidy      "old logs are gone"     AFTER installed  clean > 10
+GOAL current   "packages are current"  AFTER installed  pending == 0
+GOAL served    "the site is safe"      AFTER installed  "the new lines in `weblog` show no attack"
 
 ACTION install FOR installed WITHIN 20m
   WHEN "postgres is missing"

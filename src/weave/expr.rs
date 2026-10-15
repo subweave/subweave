@@ -450,9 +450,6 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                     "OR" => Tok::Op(Op::Or),
                     "NOT" => Tok::Not,
                     "SINCE" => Tok::Since,
-                    "PREV" => {
-                        return Err("PREV is gone: DELTA(name) reads the change over the goal's window".into());
-                    }
                     w => match Window::word(w) {
                         Some(f) => Tok::Win(f),
                         None => Tok::Name(w.to_string()),
@@ -550,6 +547,9 @@ impl Parser {
 
     fn atom(&mut self) -> Result<Expr, String> {
         match self.next() {
+            Some(Tok::Name(n)) if self.peek() == Some(&Tok::Open) => Err(format!(
+                "`{n}` is no function: SINCE, MIN, MAX, AVG, DELTA and COUNT are"
+            )),
             Some(Tok::Name(n)) => Ok(Expr::Name(n)),
             Some(Tok::Num(n, u)) => Ok(Expr::Num(n, u)),
             Some(Tok::Str(s)) => Ok(Expr::Str(s)),
