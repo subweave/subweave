@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 use crate::channel;
 use crate::model::Usage;
 use crate::service::{TASK, WEAVE};
+use crate::weave::Class;
 
 use super::epoch_of;
+use super::memory::{Memory, Told};
 
 /// One journal line: when, what happened, who caused it, the episode it belongs to, and
 /// what its step cost and took.
@@ -85,6 +87,22 @@ pub enum Kind {
         lines: BTreeMap<String, Vec<Line>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         p: Option<f64>,
+    },
+    /// The model judged one line of a quoted goal's window: `p` that lines of its kind
+    /// show trouble the goal must act on.
+    Verdict {
+        goal: String,
+        text: String,
+        p: f64,
+    },
+    /// A person or an agent (`by`) said lines of `text`'s kind are `class` for `goal`;
+    /// none: the box forgets what it knew of them.
+    Known {
+        goal: String,
+        text: String,
+        class: Option<Class>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why: Option<String>,
     },
     /// The decider chose to wait on a failing goal: the loop leaves it alone `until`
     /// (RFC 3339), across a restart too.
@@ -167,6 +185,9 @@ pub enum Kind {
         /// Only the person's signed answer on a Steery card settles it.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         signed: bool,
+        /// The window's lines of the kinds not known normal: an answer may teach them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        lines: Vec<String>,
     },
     /// Escalation `n` answered with the word `text`; `action` the action the word names,
     /// or `task` and `weave` for those escalations. `signed`: a signature from a pinned
@@ -262,6 +283,10 @@ pub enum Act {
         text: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         within: Option<u64>,
+        /// Lines of the known trouble kinds the goal fails on: a pass is remembered for
+        /// them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        on: Vec<String>,
     },
 }
 
@@ -313,6 +338,8 @@ impl Kind {
         match self {
             Kind::Goals { .. } => "goals",
             Kind::Check { .. } => "check",
+            Kind::Verdict { .. } => "verdict",
+            Kind::Known { .. } => "known",
             Kind::Off { .. } => "off",
             Kind::Waiting { .. } => "waiting",
             Kind::Wait { .. } => "wait",
@@ -336,6 +363,8 @@ impl Kind {
     pub fn goal(&self) -> Option<&str> {
         match self {
             Kind::Check { goal, .. }
+            | Kind::Verdict { goal, .. }
+            | Kind::Known { goal, .. }
             | Kind::Off { goal, .. }
             | Kind::Waiting { goal, .. }
             | Kind::Wait { goal, .. } => Some(goal),
@@ -376,6 +405,8 @@ impl Kind {
             Kind::Refused { refused, .. } => refused.action(),
             Kind::Goals { .. }
             | Kind::Check { .. }
+            | Kind::Verdict { .. }
+            | Kind::Known { .. }
             | Kind::Off { .. }
             | Kind::Waiting { .. }
             | Kind::Wait { .. }
@@ -396,6 +427,8 @@ impl Kind {
             | Kind::Answer { text, .. }
             | Kind::Message { text, .. }
             | Kind::Note { text, .. }
+            | Kind::Verdict { text, .. }
+            | Kind::Known { text, .. }
             | Kind::Off { why: text, .. }
             | Kind::Withdraw { why: text, .. }
             | Kind::Refused { why: text, .. }
@@ -464,11 +497,21 @@ impl Kind {
                     .for_each(|l| each(&mut l.text));
             }
             Kind::Ask {
-                text, body, facts, ..
+                text,
+                body,
+                facts,
+                lines,
+                ..
             } => {
                 each(text);
                 each(body);
                 facts.values_mut().for_each(&mut each);
+                lines.iter_mut().for_each(&mut each);
+            }
+            Kind::Verdict { text, .. } => each(text),
+            Kind::Known { text, why, .. } => {
+                each(text);
+                why.iter_mut().for_each(&mut each);
             }
             Kind::Command { text, output, .. } | Kind::Learn { text, output, .. } => {
                 each(text);
@@ -482,8 +525,10 @@ impl Kind {
             | Kind::Withdraw { why: text, .. }
             | Kind::Refused { why: text, .. }
             | Kind::Action(Act::Stopped { stopped: text, .. }) => each(text),
-            Kind::Action(Act::Ended { text, .. } | Act::Started { text, .. }) => {
-                text.iter_mut().for_each(&mut each)
+            Kind::Action(Act::Ended { text, .. }) => text.iter_mut().for_each(&mut each),
+            Kind::Action(Act::Started { text, on, .. }) => {
+                text.iter_mut().for_each(&mut each);
+                on.iter_mut().for_each(&mut each);
             }
             Kind::Goals { .. }
             | Kind::Waiting { .. }
@@ -521,6 +566,9 @@ pub struct ServiceState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub waits: BTreeMap<String, String>,
     pub spend: Spend,
+    /// What the box knows of kinds of log lines, and which actions fixed them.
+    #[serde(default)]
+    pub memory: Memory,
 }
 
 /// Outcomes kept per goal: more than any TRIES counts and the decider's 10.
@@ -564,6 +612,9 @@ pub struct Attempt {
     pub within: u64,
     /// The episode it runs in.
     pub ep: Option<String>,
+    /// Lines of the known trouble kinds the goal failed on when it started.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on: Vec<String>,
 }
 
 impl GoalState {
@@ -638,6 +689,10 @@ pub struct Escalation {
     pub ep: Option<String>,
     pub raised: String,
     pub state: EscalationState,
+    /// The window's lines of the kinds not known normal, when it was raised: an answer
+    /// may say what they are.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<String>,
 }
 
 /// What the person reads.
@@ -768,6 +823,20 @@ fn set_goal(s: &mut ServiceState, goal: &str, new: GoalState) -> Result<(), Stri
     Ok(())
 }
 
+/// The attempt of `action` for `goal`, wherever it is kept.
+fn attempt_of<'a>(s: &'a ServiceState, goal: &str, action: &str) -> Option<&'a Attempt> {
+    let failing = match s.goals.get(goal) {
+        Some(GoalState::Failing {
+            attempt: Some(a), ..
+        }) => Some(a),
+        _ => None,
+    };
+    failing
+        .into_iter()
+        .chain(s.outside.iter().filter(|(g, _)| g == goal).map(|(_, a)| a))
+        .find(|a| a.action == action)
+}
+
 /// `action` no longer runs for `goal`, wherever its attempt is kept.
 fn end_attempt(s: &mut ServiceState, goal: &str, action: &str) {
     if let Some(GoalState::Failing { attempt, .. }) = s.goals.get_mut(goal) {
@@ -813,6 +882,25 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
             }
             set_goal(s, goal, new)?;
         }
+        Kind::Verdict { goal, text, p } => {
+            goal_mut(s, goal)?;
+            s.memory.verdict(goal, text, *p);
+        }
+        Kind::Known {
+            goal,
+            text,
+            class,
+            why,
+        } => {
+            goal_mut(s, goal)?;
+            let told = class.map(|class| Told {
+                class,
+                by: e.by.clone(),
+                why: why.clone(),
+                t: e.t.clone(),
+            });
+            s.memory.told(goal, text, told);
+        }
         Kind::Wait { goal, until } => {
             goal_mut(s, goal)?;
             s.waits.insert(goal.clone(), until.clone());
@@ -824,6 +912,7 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
             action,
             text,
             within,
+            on,
         }) => {
             if action == TASK {
                 if let Some(ep) = &e.ep {
@@ -844,6 +933,7 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
                     started: e.t.clone(),
                     within: within.unwrap_or_default(),
                     ep: e.ep.clone(),
+                    on: on.clone(),
                 };
                 match s.goals.get_mut(goal) {
                     Some(GoalState::Failing { attempt: a, .. }) => *a = Some(attempt),
@@ -869,6 +959,8 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
                     if all.len() > OUTCOMES {
                         all.remove(0);
                     }
+                    let on = attempt_of(s, goal, action).map(|a| a.on.clone()).unwrap_or_default();
+                    s.memory.ran(goal, &on, action, *ok);
                     end_attempt(s, goal, action);
                 }
                 if *ok {
@@ -908,6 +1000,7 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
             answers,
             labels,
             signed,
+            lines,
         } => {
             if s.escalations.contains_key(n) {
                 return Err(format!("#{n} was raised already"));
@@ -931,6 +1024,7 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
                     ep: e.ep.clone(),
                     raised: e.t.clone(),
                     state: EscalationState::Open { sent: Vec::new() },
+                    lines: lines.clone(),
                 },
             );
             // A repair that asks has stopped: nothing runs for the goal until the answer.
@@ -1137,11 +1231,12 @@ impl ServiceState {
         self.passed.get(action).map(String::as_str)
     }
 
-    /// The newest `always` or `never` the person gave for this rule and action.
-    pub fn kept(&self, rule: &str, action: &str) -> Option<&'static str> {
+    /// The newest `always` or `never` the person gave for this rule: it covers every
+    /// action the rule holds.
+    pub fn kept(&self, rule: &str) -> Option<&'static str> {
         self.escalations
             .values()
-            .filter(|e| e.rule.as_deref() == Some(rule) && e.action.as_deref() == Some(action))
+            .filter(|e| e.rule.as_deref() == Some(rule))
             .filter_map(|e| match &e.state {
                 EscalationState::Answered { word, t, .. } => match word.as_str() {
                     "always" => Some((t, e.n, "always")),

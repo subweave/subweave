@@ -78,6 +78,7 @@ a goal fails ──► the decider picks an action
 | `NEVER "<text>"`, `NEVER IF <expr> [BECAUSE "<why>"]` | refuse |
 | `ASK "<text>"`, `ASK BEFORE <action> [BECAUSE "<why>"]`, `ASK IF <expr> [BECAUSE "<why>"]` | wait for the person |
 | `SKILL <name> WHEN "<text>" <<EOF` | what the coder reads, and when |
+| `KNOWN <goal> NORMAL\|TROUBLE "<sample line>"` | what lines of the sample's kind show a goal over log lines ([Memory](#memory)) |
 | `... IF <expr>` | at the end of an `ARG`-reading line: in effect only while `<expr>` holds |
 
 ## Lines
@@ -253,7 +254,9 @@ A code condition:
 - **ARGs.** An `ARG`'s words take the type of what they meet: with `lag=60`, `head_age < lag` reads 60 seconds, the base unit of a duration (`s`, `B` and `%` are the base units). An empty `ARG` is false, and makes its comparison false. In a command, it is an empty variable.
 - **Unknown.** A fact with no value (not learned yet, or a broken read) is unknown, and so is a comparison that reads it. `AND` with a false side is false and `OR` with a true side is true; otherwise the condition is unknown. An unknown goal runs no repair.
 
-A quoted condition goes to the decider as one yes/no question, with the facts its backticked names give: a `LINES` fact gives its lines in the goal's window. The check journals the decider's `p`. Quoted goals due in one tick with the same window share one decider request. A threshold is code, never prose: see [LIMITS.md](LIMITS.md#1-numbers-inside-prose).
+A quoted condition goes to the decider as one yes/no question, with the facts its backticked names give. The check journals the decider's `p`. Quoted goals due in one tick with the same window share one decider request. A threshold is code, never prose: see [LIMITS.md](LIMITS.md#1-numbers-inside-prose).
+
+A quoted condition that names a `LINES` fact judges its window one kind of line at a time ([Memory](#memory)): a goal over log lines says what trouble is, never which lines are normal.
 
 ## ACTION
 
@@ -341,6 +344,35 @@ A skill is the weave's knowledge about one situation: what goes wrong, what caus
 - A body may hold a fenced block with the info string `recipe`: steps the author knows work.
   - The daemon runs a recipe first, command by command, through the code rules.
   - When the task's goal then holds, the coder is not called.
+
+## Memory
+
+Every judgment a model repeats becomes code. The box keeps what it was told and what the model judged twice as data, and code applies it from then on.
+
+```weavefile
+FACT log  LINES  journalctl -u myapp -f -n 0 -o cat
+GOAL quiet "the app logs no trouble"  EVERY 1m OVER 5m \
+  "the lines in `log` show nothing that needs action"
+
+KNOWN quiet NORMAL  "peer 10.0.0.7:30303 disconnected after 1200ms"
+KNOWN quiet TROUBLE "database disk image is malformed"
+```
+
+- **Kinds of line.** A line's kind is its template: the line with its values masked as `<*>`. Masked: quoted text, any word with a digit (numbers, times, hex, UUIDs, IPs), hex words of 8 letters or more, base64 runs, a month or weekday name before a date. `KNOWN` takes one sample line; it stands for every line of its kind.
+- **Judging a window.** A quoted goal over a `LINES` fact reads the kinds in its window:
+  1. A kind known trouble fails the goal in code.
+  2. Kinds known normal are dropped. An empty window, or one of normal kinds only, holds with no model call.
+  3. Each kind nobody knows yet is one decider yes/no question: does this line show trouble? Each answer is a `verdict` line in the journal, with `p`. The goal fails when one says trouble.
+- **Who knows.** In this order; the first that says a kind decides:
+  1. A person or an agent on this box: `subweave known <service> <goal> normal|trouble "<line>" [--why "<why>"]`, or an escalation answer with `--known normal|trouble`, which says it of every line the escalation shows. `subweave forget-known <service> <goal> "<line>"` takes it back.
+  2. The weave's `KNOWN`.
+  3. The model: 2 verdicts in a row on the kind, both at `p` ≥ 0.8 (trouble) or both ≤ 0.2 (normal).
+- **Choices.** An action that passed 2 times in a row for a goal failing on a known trouble kind runs for it again without the decider; the rules still gate it, and a `note` says why. A failure of it drops that.
+- **Rules.** An `always` or `never` answer covers its rule: every action the rule holds.
+- **Cards and the decider** get the window's kinds, each with how many lines, a sample and what is known of it.
+- `subweave learn <service>` drafts `KNOWN` lines from what the box knows. Take out names private to the box before they go in a weave.
+
+What memory cannot catch: [LIMITS.md](LIMITS.md#13-a-kind-of-line-hides-its-numbers).
 
 ## The loop
 
@@ -671,7 +703,7 @@ An agent changes a service's weave only through the daemon, never in place.
 - `subweave weave <service> --change <file|-> --why "<why>"` (MCP `weave_change`) proposes a new Weavefile.
 
 1. It must parse, pass the checks, and pass the request check with the service's ARGs and no request. Else it is refused with the findings.
-2. Only `FACT`, `GOAL`, `ACTION` and `SKILL` differ: it applies at once.
+2. Only `FACT`, `GOAL`, `ACTION`, `SKILL` and `KNOWN` differ: it applies at once.
 3. Anything else differs (`NEVER`, `ASK`, `ARG`, `SECRET`, `MODEL`, `NEEDS`, `FROM`, `ABOUT`): a signed escalation, `Change the rules of <service>?`, with what differs and why. The daemon applies it only on that escalation's verified signed `yes`; `no` drops it.
 4. It applies as a new `run` of the weave: SECRETs and models stay, and ARGs stay as they are when it applies (an ARG only the new weave has takes its checked value). The journal gets a note, `weave changed by <by>: <why>`, with what changed.
 5. A change written against a Weavefile that is no longer the running one is dropped with a note: read the weave again and propose again. So is a signed `yes` while the service is stopped.
@@ -688,9 +720,10 @@ An agent changes a service's weave only through the daemon, never in place.
 
 | Tool | Does |
 |---|---|
-| `inbox` | every open escalation: service, `n`, goal, action, title, body, facts, answers, `signed`, when raised |
+| `inbox` | every open escalation: service, `n`, goal, action, title, body, facts, answers, `signed`, when raised, `lines` (kinds not known normal) |
 | `wait_ask` | blocks until an escalation not in `seen` is open, then gives every open one; `[]` after `timeout_secs` (default 600) |
-| `answer` | answers escalation `n` of a service with one of its answers; `note` goes in the journal after the answer |
+| `answer` | answers escalation `n` of a service with one of its answers; `note` goes in the journal after the answer; `known` (`normal` or `trouble`) teaches its `lines` |
+| `known`, `forget_known` | `subweave known`, `subweave forget-known` ([Memory](#memory)) |
 | `status` | what `ps` shows, as JSON |
 | `log` | a service's newest journal lines, at most 200 |
 | `task`, `do` | `subweave task`, `subweave do` |
@@ -712,14 +745,15 @@ An agent changes a service's weave only through the daemon, never in place.
 
 The journal is the service's state. The daemon folds each line into that state as it writes the line, and replays the journal when it starts; `ps`, `inbox`, `stats`, the dashboard and MCP read the same fold. `state.json` caches a fold with the part of the journal it covers.
 
-- `kind`: `goals`, `check`, `off`, `waiting`, `decide`, `gate`, `action`, `command`, `learn`, `ask`, `answer`, `withdraw`, `sent`, `watch`, `unwatch`, `refused`, `message`, `note`.
+- `kind`: `goals`, `check`, `verdict`, `known`, `off`, `waiting`, `decide`, `gate`, `action`, `command`, `learn`, `ask`, `answer`, `withdraw`, `sent`, `watch`, `unwatch`, `refused`, `message`, `note`.
+- A `verdict` line is the model's `p` that one line (`text`) of a quoted goal's window shows trouble. A `known` line says what a person or an agent (`by`) said lines of `text`'s kind are for the goal: `class` `normal` or `trouble`, `why`; `class: null` forgets them.
 - A `goals` line names the weave's goals, in graph order, when they change. An `off` line says why a goal does not apply; a `waiting` line names the goal it comes AFTER that does not hold (`on`).
 - A `check` line holds the facts the goal read. A goal fails at its second failed check in a row; after one it is `suspect`.
 - A `command` line holds `output`: stdout and stderr, secrets redacted, the last 4 KB.
-- An `ask` line holds `text`, its title, `body`, what the channels got with it, `answers`, and `rule`, the rule that holds its action. The `gate` line before it names the rule and the escalation, `n`.
+- An `ask` line holds `text`, its title, `body`, what the channels got with it, `answers`, and `rule`, the rule that holds its action. The `gate` line before it names the rule and the escalation, `n`. `lines` are the window's lines of kinds not known normal: an answer with `known` teaches them.
 - `answer` settles escalation `n` with the word in `text`; `withdraw` closes it with no answer, `text` saying why. `sent` says which channel it went to and what that channel reads the answer by; `watch`, a Steery connect the daemon reads whatever becomes of the escalation; `unwatch`, that a channel has nothing more to read for it.
 - A `refused` line keeps an event the state did not allow under `refused`, and why in `text`: an answer to an escalation answered or withdrawn already, an unsigned answer to a signed one.
-- An action's run starts with an `action` line with no `ok`, `within` the seconds its goal has to hold, and ends with one whose `ok` says whether the goal held within them. A run its loop's stop cut off ends with `stopped`, saying why, instead: it counts toward no `TRIES`.
+- An action's run starts with an `action` line with no `ok`, `within` the seconds its goal has to hold and `on` the known trouble lines its goal failed on, and ends with one whose `ok` says whether the goal held within them. A run its loop's stop cut off ends with `stopped`, saying why, instead: it counts toward no `TRIES`.
 - `by` says who acted, on lines a person causes: `answer`, a task, `do`, `tell`, `stop`, `start`, `forget`, and the `ask` and `gate` lines of a job a person asked for. `cli:<user>` at a terminal, `dash@<ip>` from the dashboard, `mcp:<client name>` from an [agent](#agents), an agent channel's name from its command, the channel's answerer for an answer from a channel.
 - An `ask` line of a signed escalation has `signed: true`. A weave change's `ask` and `answer` lines have `action: "weave"`.
 - An answer's note follows it as a `note` line with the same `by`.
@@ -745,7 +779,7 @@ cargo install --locked --git https://github.com/subweave/subweave   # macOS: CLI
 | `ps` | services, failing goals, models, spend this month |
 | `log [-f] [--json] [--all] [<service>]` | the journal; `--all` interleaves every service |
 | `stats <service>` | metrics from numeric facts; the ladder per week |
-| `inbox`, `answer <n> <word> [--note "<why>"]` | open escalations from every service |
+| `inbox`, `answer <n> <word> [--note "<why>"] [--known normal\|trouble]` | open escalations from every service |
 | `watch` | messages from every box, as system notifications on this computer |
 | `mcp` | an MCP server on stdin and stdout, for an [agent](#agents) |
 | `weave <service> [--change <file\|-> --why "<why>"]` | the running weave; propose a new one ([Weave changes](#weave-changes)) |
@@ -753,7 +787,8 @@ cargo install --locked --git https://github.com/subweave/subweave   # macOS: CLI
 | `do <service> <action>` | run one action now |
 | `task <service> "<what to do>"` | give the coder a task in words, through the same rules |
 | `learned <service>`, `forget <service> <name>` | the commands this box learned; drop one |
-| `learn <service>` | draft skill recipes from learned steps |
+| `known <service> <goal> normal\|trouble "<line>" [--why "<why>"]`, `forget-known <service> <goal> "<line>"` | what a kind of log line is for a goal ([Memory](#memory)) |
+| `learn <service>` | draft skill recipes from learned steps, `KNOWN` lines from known kinds of line |
 | `channel add <kind> [<target>] [--level <l>] [--escalate session\|card] [--reach USER@HOST]`, `channel ls`, `channel rm <name>`, `channel test <name>` | where messages and escalations go |
 | `stop`, `start`, `rm <service>` | pause, resume, remove (asks) |
 | `key <provider>` | store a provider's key, read from stdin |
@@ -875,7 +910,8 @@ instruction
   | "ADD" heredoc path
   | "NEVER" ( quoted | if [ because ] )
   | "ASK" ( quoted | "BEFORE" name [ if ] [ because ] | if [ because ] )
-  | "SKILL" name "WHEN" quoted heredoc ;
+  | "SKILL" name "WHEN" quoted heredoc
+  | "KNOWN" name ( "NORMAL" | "TROUBLE" ) quoted ;   (* a sample log line *)
 level    = "MUST" | "SHOULD" | "MAY" ;
 type     = "BOOL" | "NUMBER" [ unit ] | "TEXT" | "VERSION" | "LINES" ;
 unit     = "%" | "ms" | "s" | "m" | "h" | "d" | "B" | "KB" | "MB" | "GB" | "TB" ;

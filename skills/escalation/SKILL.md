@@ -32,7 +32,21 @@ same tools.
 - An escalation marked signed is not yours to answer: only the person's signed answer
   on Steery settles it.
 
-## 3. Fix the weave, not only the box
+## 3. Teach kinds of log lines
+
+- A goal that judges log lines (a quoted GOAL naming a LINES fact) is judged one kind
+  of line at a time. A kind is the line with its values masked: numbers, times, hex,
+  IDs, IPs, quoted text. The escalation's `lines` are the kinds nobody knows normal.
+- When its lines are routine or real trouble, say so with the answer:
+  `subweave answer <n> <word> --known normal|trouble --note "why"` (MCP: `known`).
+- Outside an escalation: `subweave known <service> <goal> normal|trouble "<line>"
+  --why "<reason>"`; `subweave forget-known <service> <goal> "<line>"` takes it back.
+- Never add lists of normal lines to a goal's sentence: teach the kinds. The box
+  drops normal ones in code and fails on trouble ones without a model.
+- `subweave learn <service>` drafts KNOWN lines from what the box knows; generic ones
+  belong in the weave (section 4).
+
+## 4. Fix the weave, not only the box
 
 - Ask: could the cheap ladder have settled this with a better FACT, GOAL wording,
   ACTION or SKILL? If yes, change the local weave, so the next case does not
@@ -42,13 +56,13 @@ same tools.
   box in place.
 - The box checks the change first: it must parse, and the request check must pass
   with the service's ARGs.
-- FACT, GOAL, ACTION and SKILL changes apply at once. Every other change (NEVER, ASK,
-  ARG, SECRET, MODEL, NEEDS, FROM, ABOUT) is a rule change: it waits for the
-  person's signed answer. Propose it; do not insist.
+- FACT, GOAL, ACTION, SKILL and KNOWN changes apply at once. Every other change
+  (NEVER, ASK, ARG, SECRET, MODEL, NEEDS, FROM, ABOUT) is a rule change: it waits for
+  the person's signed answer. Propose it; do not insist.
 - Write the general rule, not the incident. Leave out hostnames, versions and
   one-off strings unless the weave's job needs them.
 
-## 4. Upstream generic fixes
+## 5. Upstream generic fixes
 
 - `subweave weave <service>` shows where the weave came from. Library weaves live in
   `github.com/subweave/library`.
@@ -61,7 +75,7 @@ same tools.
 - Describe the evidence in general words: "a healthy mainnet node logs X every few
   minutes".
 
-## 5. Never
+## 6. Never
 
 - Never weaken a NEVER rule.
 - Never read or print SECRET values.

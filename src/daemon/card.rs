@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use crate::model::coder::{Coder, Msg, Reply, Tool};
 use crate::weave::{self, Action, Condition, Goal, Rule, Step, show_duration};
 
+use super::observe::Snapshot;
 use super::service::{Ctx, no_park};
 use super::{cap, goals};
 
@@ -28,6 +29,8 @@ const SUMMARY_WORDS: usize = 20;
 const SUBJECT: usize = 80;
 const COMMAND: usize = 60;
 const FACT: usize = 300;
+/// The most kinds of line a card shows.
+const KINDS: usize = 8;
 
 pub(crate) struct Card {
     /// The question the buttons answer.
@@ -146,7 +149,8 @@ fn why(ctx: &Ctx, r: &Rule) -> String {
 }
 
 /// A goal that does not hold: what it keeps true and how it is checked, then each fact
-/// it reads as it is now.
+/// it reads as it is now. A goal that judges lines shows its window's kinds of line
+/// instead of their text, each with what is known of it.
 pub(crate) fn goal_lines(ctx: &Ctx, g: &Goal, now: &BTreeMap<String, String>) -> Vec<String> {
     let window = if ctx.w.windowed(g) {
         format!(" over the last {}", weave::show_duration(g.over()))
@@ -164,13 +168,29 @@ pub(crate) fn goal_lines(ctx: &Ctx, g: &Goal, now: &BTreeMap<String, String>) ->
             ),
         },
     ];
+    let judged: Vec<&str> = ctx.w.judged_lines(g).collect();
     for f in goals::needs(&ctx.w, g) {
+        if judged.contains(&f.as_str()) {
+            continue;
+        }
         if let Some(v) = now.get(&f) {
             let v = v.trim();
             out.push(format!(
                 "`{f}` now: {}",
                 cap(if v.is_empty() { "nothing" } else { v }, FACT)
             ));
+        }
+    }
+    if !judged.is_empty() {
+        let kinds = goals::kinds(ctx, g, goals::span(g, Snapshot::now()));
+        if kinds.is_empty() {
+            out.push("No lines in the window.".into());
+        }
+        for k in kinds.iter().take(KINDS) {
+            out.push(format!("{}× {}: `{}`", k.count, k.known_words(), cap(&k.sample, FACT)));
+        }
+        if kinds.len() > KINDS {
+            out.push(format!("…and {} more kinds of line.", kinds.len() - KINDS));
         }
     }
     out

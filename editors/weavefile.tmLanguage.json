@@ -118,7 +118,7 @@
           "patterns": [{ "include": "#arguments" }]
         },
         {
-          "begin": "^\\s*(ABOUT|FROM|NEEDS|MODEL|WHEN|DO|NEVER|ASK)\\b",
+          "begin": "^\\s*(ABOUT|FROM|NEEDS|MODEL|WHEN|DO|NEVER|ASK|KNOWN)\\b",
           "beginCaptures": { "1": { "name": "keyword.control.instruction.weavefile" } },
           "end": "(?<!\\\\)\\n",
           "patterns": [{ "include": "#arguments" }]
@@ -167,7 +167,7 @@
     "keyword": {
       "patterns": [
         { "match": "\\b(MUST|SHOULD|MAY)\\b", "name": "storage.modifier.level.weavefile" },
-        { "match": "\\b(AFTER|EVERY|TRIES|PER|FOR|WITHIN|IF|BEFORE|BECAUSE|FOLLOW|THEN|DECIDE|CODE)\\b", "name": "keyword.other.weavefile" },
+        { "match": "\\b(AFTER|EVERY|TRIES|PER|FOR|WITHIN|IF|BEFORE|BECAUSE|FOLLOW|THEN|DECIDE|CODE|NORMAL|TROUBLE)\\b", "name": "keyword.other.weavefile" },
         { "match": "\\b(AND|OR|NOT)\\b", "name": "keyword.operator.logical.weavefile" },
         { "match": "\\b(CPU|GPU|GB|TB|RAM|DISK)\\b", "name": "support.type.unit.weavefile" }
       ]

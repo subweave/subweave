@@ -31,6 +31,13 @@ const SIGNER: &str = "0199f3a0-2d3e-7f40-9b6c-7d8e9f0a1b2c";
 const SIGNER_NAME: &str = "e2e phone";
 /// How an agent elsewhere runs subweave on the toy's box.
 const REACH: &str = "root@box-e2e";
+/// Lines of the toy's event log: a kind the weave knows normal, a routine kind the model
+/// learns, a kind a person says is trouble, and one the model calls trouble that the
+/// person's answer says is normal.
+const HEARTBEAT: &str = "heartbeat 1 ok from 10.0.0.2";
+const ROUTINE_CONN: &str = "conn 17 from 10.0.0.7 closed after 1200ms";
+const DISK_FAILED: &str = "disk 3 failed: I/O error at sector 81920";
+const CACHE_WARM: &str = "cache warmed in 3 passes";
 
 /// Every request the mock got.
 #[derive(Default)]
@@ -335,6 +342,13 @@ async fn systemone(State(m): State<Mock>, headers: HeaderMap, body: String) -> a
                     choice(&q, "restart", 0.31)
                 } else if goal.starts_with("running") {
                     choice(&q, "restart", 0.93)
+                } else if goal.starts_with("quiet") {
+                    let kinds = text(&state["program_output"]["line kinds"]);
+                    if kinds.contains("cache warmed") {
+                        choice(&q, "ask", 0.9)
+                    } else {
+                        choice(&q, "hush", 0.9)
+                    }
                 } else {
                     m.seen().unexpected.push(format!("next for {goal}"));
                     choice(&q, "ask", 0.9)
@@ -365,6 +379,18 @@ async fn systemone(State(m): State<Mock>, headers: HeaderMap, body: String) -> a
                 })
             }
             "kind" => choice(&q, "other", 0.8),
+            // One kind of line of a goal's window: does it show trouble?
+            k if k.starts_with("line.") => {
+                let line = text(&state["program_output"][k]);
+                if line.contains("closed after") {
+                    noul(0.05)
+                } else if line.contains("cache warmed") {
+                    noul(0.9)
+                } else {
+                    m.seen().unexpected.push(format!("line {line}"));
+                    noul(0.0)
+                }
+            }
             other => {
                 m.seen().unexpected.push(format!("question {other}"));
                 noul(0.0)
@@ -519,12 +545,14 @@ impl Drop for Box_ {
             let _ = c.start_kill();
         }
         kill_pidfile(&self.dir.join("toy.pid"));
-        // A killed daemon leaves its LINES follower behind.
-        let _ = std::process::Command::new("pkill")
-            .arg("-f")
-            .arg(self.dir.join("app.log"))
-            .stderr(Stdio::null())
-            .status();
+        // A killed daemon leaves its LINES followers behind.
+        for log in ["app.log", "events.log"] {
+            let _ = std::process::Command::new("pkill")
+                .arg("-f")
+                .arg(self.dir.join(log))
+                .stderr(Stdio::null())
+                .status();
+        }
     }
 }
 
@@ -895,12 +923,17 @@ FACT present  BOOL    test -f $root/index.html
 FACT scene    TEXT    echo "$(cat {d}/scene 2>/dev/null) $TOY_TOKEN"
 FACT served   NUMBER  "1 when http://127.0.0.1:$port/ answers HTTP 200 with a page that contains the word hello, else 0"
 FACT errors   LINES   tail -n 0 -F {d}/app.log
+FACT events   LINES   tail -n 0 -F {d}/events.log
 
 GOAL installed "the hello page is installed"                  EVERY 1s                   present
 GOAL running   "the hello page is up" \
                AFTER installed  EVERY 1s  TRIES 10 PER 1h  served == 1
 GOAL rotated   "the server log is fresh"  AFTER running    EVERY 1s                   SINCE(rotate) < 1h
 GOAL calm      "the app log stays quiet"  EVERY 2s  OVER 12s  COUNT(errors) == 0
+GOAL quiet     "the event log shows no trouble"  EVERY 1s  OVER 4s  TRIES 10 PER 1h \
+               "the lines in `events` show nothing that needs action"
+
+KNOWN quiet NORMAL "{HEARTBEAT}"
 
 ACTION install FOR installed WITHIN 5s
   WHEN "the directory or its index.html is missing: nothing is installed yet"
@@ -924,6 +957,14 @@ ACTION fix FOR installed, running WITHIN 5s
 ACTION rotate "Start a fresh server log" FOR rotated WITHIN 5s
   WHEN "the server log needs a fresh start"
   RUN  date > {d}/rotated
+
+ACTION hush "Clear the disk alarm" FOR quiet WITHIN 2s
+  WHEN "a line in `events` says a disk failed"
+  RUN  date >> {d}/hushed
+
+ACTION mute "Mute the event log" FOR quiet WITHIN 2s
+  WHEN "the event log is noisy with lines that need no action"
+  RUN  date >> {d}/muted
 "#,
         from = from_line(),
         www = www.display(),
@@ -1573,7 +1614,7 @@ async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
     assert_eq!(
         applied["text"],
         format!(
-            "weave changed by agent: {RULE_WHY}; no fact, goal, action or skill changed; signed yes on #{ns} by steery:{SIGNER_NAME}"
+            "weave changed by agent: {RULE_WHY}; no fact, goal, action, skill or KNOWN line changed; signed yes on #{ns} by steery:{SIGNER_NAME}"
         )
     );
     let answer = b.answered(ns, 5).await;
@@ -1642,6 +1683,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
     std::fs::write(weave_dir.join("Weavefile"), weavefile(&dir, &www)).unwrap();
     std::fs::write(dir.join("scene"), "calm").unwrap();
     std::fs::write(dir.join("app.log"), "").unwrap();
+    std::fs::write(dir.join("events.log"), "").unwrap();
     let weave = weave_dir.display().to_string();
 
     // The vendors: OpenRouter and a webhook, on one local server.
@@ -2314,8 +2356,8 @@ async fn daemon_and_cli_keep_a_toy_service() {
     assert_eq!(
         tools,
         [
-            "inbox", "wait_ask", "answer", "status", "log", "task", "do", "weave",
-            "weave_change", "skill"
+            "inbox", "wait_ask", "answer", "known", "forget_known", "status", "log", "task",
+            "do", "weave", "weave_change", "skill"
         ],
         "{list}"
     );
@@ -2485,6 +2527,171 @@ async fn daemon_and_cli_keep_a_toy_service() {
         "an action ran for calm"
     );
 
+    // 6j. Memory: `quiet` judges each kind of line in its window once. A kind the weave
+    // knows normal never reaches the decider; a routine kind does twice, then never again.
+    // A kind a person says is trouble fails in code; the action that fixed it twice runs
+    // for it without the decider. An escalation answered with `--known normal` settles
+    // and teaches.
+    phase("6j memory");
+    let event = |line: &str| {
+        use std::io::Write;
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("events.log"))
+            .unwrap();
+        writeln!(log, "{line}").unwrap();
+    };
+    let asked = |what: &str| {
+        mock.seen()
+            .requests
+            .iter()
+            .filter(|(p, _, body)| p == "/systemone" && body.contains(what))
+            .count()
+    };
+    let verdicts = |b: &Box_, what: &str| {
+        b.lines("verdict", |l| {
+            l["goal"] == "quiet" && l["text"].as_str().is_some_and(|t| t.contains(what))
+        })
+    };
+    let failed_quiet = |b: &Box_| b.lines("check", |l| l["goal"] == "quiet" && l["ok"] == false).len();
+    b.holds(&["quiet"], 20).await;
+    let failed_before = failed_quiet(&b);
+    // The weave's KNOWN: another heartbeat is dropped in code.
+    event("heartbeat 2 ok from 10.0.0.3");
+    // A routine kind: the decider says normal twice while it is in the window.
+    event(ROUTINE_CONN);
+    let two = b
+        .until("two verdicts on the routine kind", 15, || {
+            let v = verdicts(&b, "closed after");
+            (v.len() >= 2).then_some(v)
+        })
+        .await;
+    assert!(
+        two.iter().all(|v| v["p"].as_f64().is_some_and(|p| p <= 0.2)),
+        "{two:?}"
+    );
+    let conn_asks = asked("closed after");
+    assert_eq!(conn_asks, 2, "the routine kind went to the decider {conn_asks} times");
+    event("conn 42 from 10.0.0.9 closed after 37ms");
+    // Three EVERYs with the new line in the window: none asks the decider.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(asked("closed after"), 2, "a known normal kind reached the decider");
+    assert_eq!(verdicts(&b, "closed after").len(), 2);
+    assert_eq!(asked("heartbeat"), 0, "a KNOWN kind reached the decider");
+    assert_eq!(failed_quiet(&b), failed_before, "a normal line failed quiet");
+    assert_eq!(b.goal("quiet"), "holds");
+
+    // A person says a disk failure is trouble: each one fails quiet in code.
+    let out = b
+        .ok(&["known", "toy", "quiet", "trouble", DISK_FAILED, "--why", "a failed disk loses data"])
+        .await;
+    assert!(out.contains("known trouble"), "{out}");
+    let told = b
+        .until("the known line", 10, || {
+            let t = b.lines("known", |l| l["text"] == DISK_FAILED);
+            (!t.is_empty()).then_some(t)
+        })
+        .await;
+    assert!(
+        told.len() == 1
+            && told[0]["class"] == "trouble"
+            && told[0]["why"] == "a failed disk loses data"
+            && told[0]["by"].as_str().is_some_and(|by| by.starts_with("cli:")),
+        "{told:?}"
+    );
+    for (i, disk) in ["disk 4 failed: I/O error at sector 512", "disk 5 failed: I/O error at sector 7", "disk 6 failed: I/O error at sector 90"]
+        .iter()
+        .enumerate()
+    {
+        let decides = b.lines("decide", |l| l["goal"] == "quiet").len();
+        let checks = b.lines("check", |l| l["goal"] == "quiet").len();
+        let passes = b.passes("hush");
+        event(disk);
+        let failed = b
+            .until("quiet to fail on the disk line", 10, || {
+                b.lines("check", |l| l["goal"] == "quiet")
+                    .into_iter()
+                    .skip(checks)
+                    .find(|l| l["ok"] == false)
+            })
+            .await;
+        assert!(failed["p"].is_null(), "a known trouble kind asked the decider: {failed}");
+        b.until("hush to pass", 30, || (b.passes("hush") > passes).then_some(()))
+            .await;
+        let started = b
+            .lines("action", |l| l["action"] == "hush" && l.get("ok").is_none())
+            .pop()
+            .unwrap_or_else(|| b.fail("no start of hush"));
+        assert!(
+            started["on"].as_array().is_some_and(|on| on.iter().any(|x| x == *disk)),
+            "hush did not run for the disk line: {started}"
+        );
+        b.holds(&["quiet"], 20).await;
+        let decided = b.lines("decide", |l| l["goal"] == "quiet").len() - decides;
+        if i < 2 {
+            assert_eq!(decided, 1, "pass {i} of hush was not the decider's");
+        } else {
+            assert_eq!(decided, 0, "memory asked the decider on the third disk line");
+            let note = b.note("memory: hush passed 2 times", 5).await;
+            assert_eq!(note["goal"], "quiet", "{note}");
+        }
+    }
+    assert!(verdicts(&b, "failed: I/O error").is_empty(), "a told kind got model verdicts");
+    assert_eq!(asked("failed: I/O error"), 2, "the decider saw the disk lines beyond two picks");
+
+    // The model calls a cache line trouble; the person answers that it is normal.
+    event(CACHE_WARM);
+    let (n, words) = b
+        .until("quiet's escalation on the cache line", 30, || b.open_ask("quiet"))
+        .await;
+    assert!(words.contains(&"no".to_string()), "{words:?}");
+    let ask = b
+        .lines("ask", |l| l["n"] == n)
+        .pop()
+        .unwrap_or_else(|| b.fail("no ask line"));
+    assert_eq!(ask["lines"], json!([CACHE_WARM]), "{ask}");
+    assert!(
+        ask["body"].as_str().is_some_and(|t| t.contains("known trouble (the model): `cache warmed in 3 passes`")),
+        "the card lacks the kind with its verdict: {ask}"
+    );
+    let out = b
+        .ok(&["answer", &n.to_string(), "no", "--known", "normal", "--note", "a warm cache is routine"])
+        .await;
+    assert!(out.contains("its lines are known normal"), "{out}");
+    let taught = b
+        .until("the answer's known line", 10, || {
+            b.lines("known", |l| l["text"] == CACHE_WARM).into_iter().next()
+        })
+        .await;
+    assert_eq!(taught["class"], "normal", "{taught}");
+    assert_eq!(b.answered(n, 5).await["text"], "no");
+    let cache_verdicts = verdicts(&b, "cache warmed").len();
+    event("cache warmed in 9 passes");
+    b.holds(&["quiet"], 15).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(b.goal("quiet"), "holds", "a kind the person said is normal fails quiet");
+    assert_eq!(verdicts(&b, "cache warmed").len(), cache_verdicts);
+
+    // What the box knows, drafted as KNOWN lines; a forgotten kind is gone from them.
+    let out = b.ok(&["learn", "toy"]).await;
+    for want in [
+        format!("KNOWN quiet TROUBLE \"disk"),
+        format!("KNOWN quiet NORMAL \"conn"),
+        format!("KNOWN quiet NORMAL \"cache warmed"),
+    ] {
+        assert!(out.contains(&want), "learn lacks {want}:\n{out}");
+    }
+    assert!(!out.contains("heartbeat"), "learn drafts what the weave knows:\n{out}");
+    b.ok(&["forget-known", "toy", "quiet", "cache warmed in 1 passes"]).await;
+    b.until("the forget", 10, || {
+        b.lines("known", |l| l["class"].is_null()).into_iter().next()
+    })
+    .await;
+    let out = b.ok(&["learn", "toy"]).await;
+    assert!(!out.contains("cache warmed"), "{out}");
+    let o = b.sw(&["forget-known", "toy", "quiet", "never seen 1"]).await;
+    assert!(!o.status.success(), "forgetting an unknown kind passed");
+
     // 7. ps, log, learned.
     phase("7 ps, log, learned");
     let out = b.ok(&["ps"]).await;
@@ -2492,7 +2699,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .lines()
         .find(|l| l.starts_with("toy "))
         .unwrap_or_else(|| b.fail(&format!("no toy in ps:\n{out}")));
-    assert!(row.contains("4/4"), "{row}");
+    assert!(row.contains("5/5"), "{row}");
     assert!(
         row.contains("typesafe/jev-1.13@mock / deepseek/x@mock"),
         "{row}"

@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use super::Problem;
 use super::ast::{
-    Action, Arg, ArgKind, ArgOption, Condition, Fact, FactSource, Goal, Level, ModelHint, Needs,
-    Rule, Secret, Skill, Step, Weave,
+    Action, Arg, ArgKind, ArgOption, Class, Condition, Fact, FactSource, Goal, Known, Level,
+    ModelHint, Needs, Rule, Secret, Skill, Step, Weave,
 };
 use super::expr::{self, Expr};
 use super::lex::{self, Line};
@@ -15,16 +15,16 @@ use super::value::{FactType, Unit};
 /// Instruction keywords: a line starts with one of these.
 pub const INSTRUCTIONS: &[&str] = &[
     "ABOUT", "FROM", "NEEDS", "MODEL", "ARG", "SECRET", "FACT", "GOAL", "ACTION", "WHEN", "RUN",
-    "DO", "ADD", "NEVER", "ASK", "SKILL",
+    "DO", "ADD", "NEVER", "ASK", "SKILL", "KNOWN",
 ];
 
 /// Every capital word with a meaning; none of them can be a name.
 pub const KEYWORDS: &[&str] = &[
     "ABOUT", "FROM", "NEEDS", "MODEL", "ARG", "SECRET", "FACT", "GOAL", "ACTION", "WHEN", "RUN",
-    "DO", "ADD", "NEVER", "ASK", "SKILL", "AFTER", "EVERY", "OVER", "TRIES", "PER", "FOR",
-    "WITHIN", "IF", "AND", "OR", "NOT", "SINCE", "MIN", "MAX", "AVG", "DELTA", "COUNT", "BOOL",
-    "NUMBER", "TEXT", "VERSION", "LINES", "MUST", "SHOULD", "MAY", "BEFORE", "DECIDE", "CODE",
-    "THEN", "CPU", "GPU", "GB", "TB", "RAM", "DISK", "BECAUSE",
+    "DO", "ADD", "NEVER", "ASK", "SKILL", "KNOWN", "AFTER", "EVERY", "OVER", "TRIES", "PER",
+    "FOR", "WITHIN", "IF", "AND", "OR", "NOT", "SINCE", "MIN", "MAX", "AVG", "DELTA", "COUNT",
+    "BOOL", "NUMBER", "TEXT", "VERSION", "LINES", "MUST", "SHOULD", "MAY", "BEFORE", "DECIDE",
+    "CODE", "THEN", "CPU", "GPU", "GB", "TB", "RAM", "DISK", "BECAUSE", "NORMAL", "TROUBLE",
 ];
 
 /// An ACTION's label is a button on a phone.
@@ -257,6 +257,7 @@ pub fn parse(name: &str, text: &str) -> (Weave, Vec<Problem>) {
             actions: Vec::new(),
             rules: Vec::new(),
             skills: Vec::new(),
+            known: Vec::new(),
         },
         problems,
         action: None,
@@ -485,6 +486,24 @@ impl Parser {
                     when,
                     body: body.to_string(),
                     recipes: lex::recipes(body),
+                    line: no,
+                });
+            }
+            "KNOWN" => {
+                const FORM: &str = "KNOWN <goal> NORMAL|TROUBLE \"<sample line>\"";
+                let goal = name(c.word().unwrap_or_default(), is_item_name, ITEM_FORM)?;
+                let class = c.word().and_then(Class::parse).ok_or(FORM)?;
+                let sample = c.quoted()?;
+                if !c.at_end() {
+                    return Err(format!("{FORM}: text after the quoted line"));
+                }
+                if sample.trim().is_empty() {
+                    return Err(format!("KNOWN {goal}: the sample line is empty"));
+                }
+                self.w.known.push(Known {
+                    goal,
+                    class,
+                    sample,
                     line: no,
                 });
             }

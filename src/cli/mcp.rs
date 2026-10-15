@@ -14,9 +14,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdout};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
-use super::{act, inbox, ps, task, weavefile};
+use super::{act, inbox, known, ps, task, weavefile};
 use crate::daemon::journal::{self, Ask};
 use crate::paths;
+use crate::weave::Class;
 
 const PROTOCOL: &str = "2025-06-18";
 const INSTRUCTIONS: &str = "This box escalates to you what its ladder (code, the decider, the coder) could not settle. Read the `skill` tool first: it says how to settle an escalation, how to fix the weave with `weave_change`, and what never to do. Then read `inbox`, and call `wait_ask` to block until a new escalation comes. Answer only with one of its `answers`; a signed escalation is the person's alone.";
@@ -128,10 +129,13 @@ fn tool_result(r: Result<Value>) -> Value {
 fn tools() -> Vec<Value> {
     let none = json!({"type": "object", "properties": {}, "additionalProperties": false});
     let service = json!({"type": "string", "description": "The service's name"});
+    let goal = json!({"type": "string", "description": "A quoted goal over a LINES fact"});
+    let class = json!({"type": "string", "enum": ["normal", "trouble"], "description": "normal: needs no action; trouble: the goal fails on it"});
+    let line = json!({"type": "string", "description": "One log line of the kind, as printed"});
     vec![
         json!({
             "name": "inbox",
-            "description": "Every open escalation on this box: service, n, goal, action, rule, title, text (its body), facts, answers (the only words that answer it), labels (each answer's button on a card), signed (only the person's signed answer on Steery settles it) and t (when it was raised).",
+            "description": "Every open escalation on this box: service, n, goal, action, rule, title, text (its body), facts, answers (the only words that answer it), labels (each answer's button on a card), signed (only the person's signed answer on Steery settles it), t (when it was raised) and lines (log lines of kinds nobody knows normal: `answer` with `known` teaches them).",
             "inputSchema": none,
         }),
         json!({
@@ -156,7 +160,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "answer",
-            "description": "Answers an open escalation with one of its `answers`; the daemon acts on it. `note`, why, goes in the journal with the answer. A signed escalation is refused.",
+            "description": "Answers an open escalation with one of its `answers`; the daemon acts on it. `note`, why, goes in the journal with the answer. `known` says what the escalation's `lines` are: the box knows lines of their kinds from then on, and never escalates them again. A signed escalation is refused.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -164,8 +168,35 @@ fn tools() -> Vec<Value> {
                     "n": {"type": "integer", "description": "The ask's number"},
                     "word": {"type": "string", "description": "One of the ask's answers"},
                     "note": {"type": "string", "description": "Why, in a sentence"},
+                    "known": class.clone(),
                 },
                 "required": ["service", "n", "word"],
+                "additionalProperties": false,
+            },
+        }),
+        json!({
+            "name": "known",
+            "description": "Tells the box what a kind of log line is for a quoted goal over a LINES fact, as `subweave known`: normal lines are dropped from its window, trouble fails it in code. One sample line stands for every line of its kind (same text once numbers, times, ids and quoted values are masked). Teach the kind; never edit the goal's sentence to list normal lines.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "service": service,
+                    "goal": goal.clone(),
+                    "class": class,
+                    "line": line.clone(),
+                    "why": {"type": "string", "description": "Why, in a sentence"},
+                },
+                "required": ["service", "goal", "class", "line"],
+                "additionalProperties": false,
+            },
+        }),
+        json!({
+            "name": "forget_known",
+            "description": "Makes the box forget what it knows of a kind of log line for a goal, as `subweave forget-known`: what it was told, the model's verdicts and the actions remembered for it. A KNOWN line in the weave stays.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"service": service, "goal": goal, "line": line},
+                "required": ["service", "goal", "line"],
                 "additionalProperties": false,
             },
         }),
@@ -225,7 +256,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "weave_change",
-            "description": "Proposes a new Weavefile for a service, as `subweave weave --change`. It must parse and pass the request check with the service's ARGs. FACT, GOAL, ACTION and SKILL changes apply at once; any other change waits for the person's signed answer on Steery (`signed: true`).",
+            "description": "Proposes a new Weavefile for a service, as `subweave weave --change`. It must parse and pass the request check with the service's ARGs. FACT, GOAL, ACTION, SKILL and KNOWN changes apply at once; any other change waits for the person's signed answer on Steery (`signed: true`).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -250,6 +281,17 @@ async fn call(name: &str, args: Value, by: &str) -> Result<Value> {
         "inbox" => serde_json::to_value(journal::all_asks()?)?,
         "wait_ask" => serde_json::to_value(wait_ask(parse(args)?).await?)?,
         "answer" => answer(parse(args)?, by)?,
+        "known" => {
+            let a: KnownArgs = parse(args)?;
+            let why = a.why.map(|w| w.trim().to_string()).filter(|w| !w.is_empty());
+            let template = known::send(&a.service, &a.goal, &a.line, Some(a.class), why, by.to_string())?;
+            json!({"service": a.service, "goal": a.goal, "class": a.class, "template": template, "by": by})
+        }
+        "forget_known" => {
+            let a: ForgetKnownArgs = parse(args)?;
+            let template = known::send(&a.service, &a.goal, &a.line, None, None, by.to_string())?;
+            json!({"service": a.service, "goal": a.goal, "forgot": template, "by": by})
+        }
         "status" => serde_json::to_value(ps::rows()?)?,
         "log" => log(parse(args)?)?,
         "task" => {
@@ -339,6 +381,7 @@ struct AnswerArgs {
     n: u64,
     word: String,
     note: Option<String>,
+    known: Option<Class>,
 }
 
 fn answer(a: AnswerArgs, by: &str) -> Result<Value> {
@@ -346,8 +389,24 @@ fn answer(a: AnswerArgs, by: &str) -> Result<Value> {
         .note
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
-    inbox::send_answer(Some(&a.service), a.n, &a.word, by.to_string(), note.clone())?;
-    Ok(json!({"service": a.service, "n": a.n, "word": a.word, "by": by, "note": note}))
+    inbox::send_answer(Some(&a.service), a.n, &a.word, by.to_string(), note.clone(), a.known)?;
+    Ok(json!({"service": a.service, "n": a.n, "word": a.word, "by": by, "note": note, "known": a.known}))
+}
+
+#[derive(Deserialize)]
+struct KnownArgs {
+    service: String,
+    goal: String,
+    class: Class,
+    line: String,
+    why: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ForgetKnownArgs {
+    service: String,
+    goal: String,
+    line: String,
 }
 
 #[derive(Deserialize)]

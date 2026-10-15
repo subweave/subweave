@@ -48,7 +48,7 @@ pub async fn run(args: Args) -> Result<ExitCode> {
     })
 }
 
-/// The ARGs, the SECRETs, the FACTs with their types and the goal tree.
+/// The ARGs, the SECRETs, the FACTs with their types, the goal tree and the KNOWN lines.
 fn overview(w: &Weave) -> String {
     let mut out = String::new();
     let nw = w.args.iter().map(|a| a.name.len()).max().unwrap_or(0);
@@ -103,6 +103,15 @@ fn overview(w: &Weave) -> String {
             out.push('\n');
         }
         out.push_str(&graph::tree(w, &BTreeSet::new()));
+    }
+    if !w.known.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        let gw = w.known.iter().map(|k| k.goal.len()).max().unwrap_or(0);
+        for k in &w.known {
+            let _ = writeln!(out, "KNOWN {:gw$}  {:7}  {}", k.goal, k.class.keyword(), k.sample);
+        }
     }
     out
 }

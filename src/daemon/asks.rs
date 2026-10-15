@@ -14,9 +14,12 @@ use crate::channel::{self, AskInfo, Message};
 use crate::model::coder::{Coder, Tally};
 use crate::paths;
 use crate::service::{self as svc, TASK};
+use crate::weave::Class;
 
 use super::card::{self, Card};
+use super::goals;
 use super::journal::Journal;
+use super::observe::Snapshot;
 use super::service::Ctx;
 use super::state::{Event, Kind, Sent};
 use super::{Shared, lock};
@@ -97,6 +100,16 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> Option<u64> {
     let by = lock(&ctx.by).clone().filter(|b| !b.is_empty());
     let answers = req.card.words();
     let labels = req.card.labels();
+    // The kinds of line its goal's window holds that nobody knows normal: an answer may
+    // teach them.
+    let lines: Vec<String> = match req.goal.as_deref().and_then(|g| ctx.w.goal(g)) {
+        Some(g) => goals::kinds(ctx, g, goals::span(g, Snapshot::now()))
+            .into_iter()
+            .filter(|k| !k.is(Class::Normal))
+            .map(|k| k.sample)
+            .collect(),
+        None => Vec::new(),
+    };
     let (title, text, facts) = {
         let mut j = ctx.journal();
         if let (Some(rule), Some(action)) = (&req.rule, &req.action) {
@@ -126,6 +139,7 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> Option<u64> {
                 answers: answers.clone(),
                 labels: labels.clone(),
                 signed: req.signed,
+                lines,
             }
             .into()
         });

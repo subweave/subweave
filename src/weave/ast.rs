@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 
 use super::expr::Expr;
 use super::value::FactType;
@@ -19,6 +19,52 @@ pub struct Weave {
     pub actions: Vec<Action>,
     pub rules: Vec<Rule>,
     pub skills: Vec<Skill>,
+    /// The author's verdicts on kinds of log lines.
+    pub known: Vec<Known>,
+}
+
+/// `KNOWN <goal> NORMAL|TROUBLE "<sample line>"`: lines of the sample's kind are routine
+/// for the goal, or trouble.
+#[derive(Debug, Clone, Serialize)]
+pub struct Known {
+    pub goal: String,
+    pub class: Class,
+    pub sample: String,
+    pub line: u32,
+}
+
+/// What a kind of log line shows a goal: nothing that needs action, or trouble.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Class {
+    Normal,
+    Trouble,
+}
+
+impl Class {
+    /// `normal` or `trouble`, as the CLI and the journal spell it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Class::Normal => "normal",
+            Class::Trouble => "trouble",
+        }
+    }
+
+    /// `NORMAL` or `TROUBLE`, as a Weavefile spells it.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Class::Normal => "NORMAL",
+            Class::Trouble => "TROUBLE",
+        }
+    }
+
+    pub fn parse(word: &str) -> Option<Class> {
+        match word {
+            "normal" | "NORMAL" => Some(Class::Normal),
+            "trouble" | "TROUBLE" => Some(Class::Trouble),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -275,10 +321,18 @@ impl Weave {
     pub fn windowed(&self, g: &Goal) -> bool {
         match &g.cond {
             Condition::Code(e) => e.windowed(),
-            Condition::Quoted(t) => {
-                backticked(t).any(|n| self.fact(n).is_some_and(|f| f.ty == FactType::Lines))
-            }
+            Condition::Quoted(_) => self.judged_lines(g).next().is_some(),
         }
+    }
+
+    /// The LINES facts a quoted goal names in backticks: its window's lines are judged one
+    /// kind at a time, and KNOWN lines apply to it.
+    pub fn judged_lines<'a>(&'a self, g: &'a Goal) -> impl Iterator<Item = &'a str> {
+        let text = match &g.cond {
+            Condition::Quoted(t) => t.as_str(),
+            Condition::Code(_) => "",
+        };
+        backticked(text).filter(|n| self.fact(n).is_some_and(|f| f.ty == FactType::Lines))
     }
 }
 

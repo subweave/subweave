@@ -17,6 +17,7 @@ use super::asks::AskReq;
 use super::card;
 use super::coder_task::{self, DoResult, Work};
 use super::goals::{self, Scope};
+use super::memory;
 use super::observe::{self, Span, Values};
 use super::service::Ctx;
 use super::state::{Act, Event, JobKind, Kind};
@@ -114,6 +115,7 @@ impl TaskJob {
                 action: TASK.to_string(),
                 text: Some(self.text.clone()),
                 within: None,
+                on: Vec::new(),
             })
         }
     }
@@ -214,6 +216,8 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
     let span = goals::fresh(ctx, Some(goal)).await;
     let values = ctx.observe.values(&goals::all(&ctx.w), span);
     let shown = observe::shown(&values);
+    // The known trouble lines it fails on: a pass is remembered for their kinds.
+    let on = goals::trouble(ctx, goal, span);
     let (action, rules_ok) = match &job.forced {
         Some(f) => {
             let Some(a) = ctx.w.action(&f.action) else {
@@ -275,11 +279,15 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                 }
                 // An action its IF keeps off still takes part in the diagnosis: when it is
                 // the fix, the person gets its steps instead of a bare "make this true".
-                let pick = if cands.len() == 1 && off.is_empty() {
+                let remembered = remembered(ctx, goal, &on, &cands);
+                let pick = if let Some((a, why)) = remembered {
+                    ctx.journal().note(Some(&goal.name), why);
+                    a
+                } else if cands.len() == 1 && off.is_empty() {
                     cands[0].name.clone()
                 } else {
                     let all: Vec<&Action> = cands.iter().chain(&off).copied().collect();
-                    match decide(ctx, goal, &all, &values).await {
+                    match decide(ctx, goal, &all, &values, span).await {
                         Pick::Action(a) => match off.iter().find(|o| o.name == a) {
                             Some(o) => {
                                 ctx.ask(AskReq {
@@ -331,8 +339,26 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
         }
     };
     let a = ctx.w.action(&action).expect("an action checked above");
-    run_action(ctx, goal, a, &rules_ok).await;
+    run_action(ctx, goal, a, &rules_ok, &on).await;
     Outcome::Done
+}
+
+/// The action memory picks for `goal` failing on the known trouble lines `on`, with why:
+/// one that passed `CHOICE_PASSES` times in a row for one of their kinds and is a
+/// candidate now. The decider is not asked; the rules still are.
+fn remembered(ctx: &Ctx, goal: &Goal, on: &[String], cands: &[&Action]) -> Option<(String, String)> {
+    let j = ctx.journal();
+    let mem = &j.state().memory;
+    on.iter().find_map(|line| {
+        let (a, n) = mem.choice(&goal.name, &memory::template(line))?;
+        cands.iter().any(|c| c.name == a).then(|| {
+            let why = format!(
+                "memory: {a} passed {n} times in a row for {} failing on lines like `{line}`",
+                goal.name
+            );
+            (a.to_string(), why)
+        })
+    })
 }
 
 /// The actions for this goal, not ruled out yet: those that run on this box, then the
@@ -422,7 +448,7 @@ fn gate<'a>(ctx: &'a Ctx, goal: &Goal, action: &str, span: Span, approved: bool)
             continue;
         }
         let text = rule_text(r);
-        let kept = ctx.journal().state().kept(&text, action);
+        let kept = ctx.journal().state().kept(&text);
         match kept {
             Some("never") => return Gate::Refused(r, true),
             Some(_) => {
@@ -469,8 +495,10 @@ fn ask_gate(ctx: &Ctx, goal: &Goal, action: &str, rule: &Rule, shown: &BTreeMap<
 }
 
 /// One decider request: a choice over the candidates' WHENs, `wait` and `ask`, and
-/// `steered`. Under 0.5 confidence, steered at 0.5 or more, or no answer: ask.
-async fn decide(ctx: &Ctx, goal: &Goal, cands: &[&Action], values: &Values) -> Pick {
+/// `steered`. Under 0.5 confidence, steered at 0.5 or more, or no answer: ask. A goal
+/// that judges lines shows the window's kinds of line with what is known of each, under
+/// `program_output["line kinds"]`.
+async fn decide(ctx: &Ctx, goal: &Goal, cands: &[&Action], values: &Values, span: Span) -> Pick {
     let Some(decider) = &ctx.decider else {
         return Pick::Ask("No decider to pick an action.".into());
     };
@@ -494,7 +522,14 @@ async fn decide(ctx: &Ctx, goal: &Goal, cands: &[&Action], values: &Values) -> P
             instructions: STEERED.into(),
         },
     );
-    let (f, o) = observe::for_decider(values);
+    let (f, mut o) = observe::for_decider(values);
+    let kinds: Vec<String> = goals::kinds(ctx, goal, span)
+        .iter()
+        .map(|k| format!("{}× {}: {}", k.count, k.known_words(), k.sample))
+        .collect();
+    if let (false, Some(o)) = (kinds.is_empty(), o.as_object_mut()) {
+        o.insert("line kinds".into(), json!(kinds.join("\n")));
+    }
     let journal = ctx.journal().state().recent(&goal.name, 10);
     let state = json!({
         "service": ctx.name,
@@ -551,13 +586,14 @@ async fn decide(ctx: &Ctx, goal: &Goal, cands: &[&Action], values: &Values) -> P
 }
 
 /// The steps: learned ones first, then RUN, ADD and DO in order; then the WITHIN wait.
-async fn run_action(ctx: &Ctx, goal: &Goal, a: &Action, rules_ok: &[String]) {
+async fn run_action(ctx: &Ctx, goal: &Goal, a: &Action, rules_ok: &[String], on: &[String]) {
     let within = a.within.unwrap_or(WITHIN);
     ctx.journal().add(Kind::Action(Act::Started {
         goal: Some(goal.name.clone()),
         action: a.name.clone(),
         text: None,
         within: Some(within.as_secs()),
+        on: on.to_vec(),
     }));
     let key = learned::steps_key(ctx, a);
     let slot = format!("{}/{}", a.name, goal.name);

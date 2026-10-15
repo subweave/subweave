@@ -10,6 +10,7 @@ mod dash;
 mod flow;
 pub(crate) mod inbox;
 mod key;
+pub(crate) mod known;
 mod learn;
 pub(crate) mod learned;
 pub(crate) mod log;
@@ -71,9 +72,13 @@ enum Command {
     Learned(learned::Args),
     /// Drop a learned fact command, or an action's learned steps
     Forget(learned::ForgetArgs),
+    /// Tell the box a kind of log line is normal or trouble for a goal
+    Known(known::Args),
+    /// Make the box forget what it knows of a kind of log line
+    ForgetKnown(known::ForgetArgs),
     /// A service's running Weavefile and ARGs; --change proposes a new Weavefile
     Weave(weavefile::Args),
-    /// Draft SKILL recipes from learned steps, for the weave's author
+    /// Draft SKILL recipes from learned steps and KNOWN lines from known kinds of line
     Learn(learn::Args),
     /// Pause a service
     Stop(control::Args),
@@ -118,6 +123,8 @@ impl Command {
             Command::Task(a) => (a.on.as_deref(), Some(&a.service)),
             Command::Learned(a) => (a.on.as_deref(), Some(&a.service)),
             Command::Forget(a) => (a.on.as_deref(), Some(&a.service)),
+            Command::Known(a) => (a.on.as_deref(), Some(&a.service)),
+            Command::ForgetKnown(a) => (a.on.as_deref(), Some(&a.service)),
             Command::Learn(a) => (a.on.as_deref(), Some(&a.service)),
             Command::Stop(a) | Command::Start(a) => (a.on.as_deref(), Some(&a.service)),
             Command::Rm(a) => (a.on.as_deref(), Some(&a.service)),
@@ -179,6 +186,8 @@ async fn local(command: Command) -> Result<ExitCode> {
         Command::Task(args) => task::run(args),
         Command::Learned(args) => learned::run(args),
         Command::Forget(args) => learned::forget(args),
+        Command::Known(args) => known::run(args),
+        Command::ForgetKnown(args) => known::forget(args),
         Command::Learn(args) => learn::run(args),
         Command::Stop(args) => control::stop(args),
         Command::Start(args) => control::start(args),

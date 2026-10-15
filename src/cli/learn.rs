@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 
+use crate::daemon::{journal, memory};
 use crate::service;
 
 #[derive(clap::Args)]
@@ -13,15 +14,12 @@ pub struct Args {
     pub on: Option<String>,
 }
 
-/// One draft SKILL per learned steps entry, for the weave's author to paste in.
+/// Drafts for the weave's author to paste in: one SKILL per learned steps entry, then a
+/// KNOWN line per kind of log line the box knows and the weave does not.
 pub fn run(args: Args) -> Result<ExitCode> {
     let w = super::service_weave(&args.service)?;
     let spec = service::spec(&args.service)?;
     let learned = service::learned(&args.service)?;
-    if learned.steps.is_empty() {
-        println!("{} learned no steps yet", args.service);
-        return Ok(ExitCode::SUCCESS);
-    }
     let args_said: Vec<String> = spec.args.iter().map(|(k, v)| format!("{k}={v}")).collect();
     let mut out = String::new();
     for (key, steps) in &learned.steps {
@@ -58,6 +56,38 @@ pub fn run(args: Args) -> Result<ExitCode> {
             }
         }
         out.push_str("  ```\nEOF\n");
+    }
+    let st = journal::read(&args.service);
+    let taught = memory::taught(&w);
+    let mut known = String::new();
+    for (goal, kinds) in &st.memory.goals {
+        let judged = w.goal(goal).is_some_and(|g| w.judged_lines(g).next().is_some());
+        let mine = taught.get(goal);
+        for (template, e) in kinds {
+            if !judged || e.sample.is_empty() || mine.is_some_and(|m| m.contains_key(template)) {
+                continue;
+            }
+            let Some((class, _)) = st.memory.class(&taught, goal, template) else {
+                continue;
+            };
+            let sample = e.sample.replace('\\', "\\\\").replace('"', "\\\"");
+            let _ = writeln!(known, "KNOWN {goal} {} \"{sample}\"", class.keyword());
+        }
+    }
+    if !known.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        let _ = writeln!(
+            out,
+            "# What {} knows of its log lines; take out names private to this box.",
+            args.service
+        );
+        out.push_str(&known);
+    }
+    if out.is_empty() {
+        println!("{} learned no steps and knows no kind of line yet", args.service);
+        return Ok(ExitCode::SUCCESS);
     }
     print!("{out}");
     Ok(ExitCode::SUCCESS)

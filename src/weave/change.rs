@@ -1,6 +1,6 @@
 //! What a new Weavefile changes, read from the parsed weaves, never the text. FACT, GOAL,
-//! ACTION and SKILL items an agent may change alone; every other item is a rule, and a
-//! change to one waits for the person's signed answer.
+//! ACTION, SKILL and KNOWN items an agent may change alone; every other item is a rule,
+//! and a change to one waits for the person's signed answer.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -32,7 +32,7 @@ impl Change {
     /// `GOAL running changed, FACT disk added`, or what says nothing of them changed.
     pub fn summary(&self) -> String {
         if self.free.is_empty() {
-            "no fact, goal, action or skill changed".into()
+            "no fact, goal, action, skill or KNOWN line changed".into()
         } else {
             self.free.join(", ")
         }
@@ -53,6 +53,7 @@ pub fn compare(old_text: &str, old: &Weave, new_text: &str, new: &Weave) -> Chan
         ("GOAL", named(&old.goals, |g| &g.name), named(&new.goals, |g| &g.name)),
         ("ACTION", named(&old.actions, |a| &a.name), named(&new.actions, |a| &a.name)),
         ("SKILL", named(&old.skills, |s| &s.name), named(&new.skills, |s| &s.name)),
+        ("KNOWN", known(old), known(new)),
     ] {
         for name in o.keys().chain(n.keys()).collect::<BTreeSet<_>>() {
             let how = match (o.get(name), n.get(name)) {
@@ -81,12 +82,12 @@ pub fn compare(old_text: &str, old: &Weave, new_text: &str, new: &Weave) -> Chan
     change
 }
 
-/// The weave without its facts, goals, actions and skills and without line numbers,
-/// each list in a fixed order: moving an item is no change.
+/// The weave without its facts, goals, actions, skills and KNOWN lines and without line
+/// numbers, each list in a fixed order: moving an item is no change.
 fn rest(w: &Weave) -> Value {
     let mut v = unlined(w);
     if let Value::Object(map) = &mut v {
-        for free in ["facts", "goals", "actions", "skills"] {
+        for free in ["facts", "goals", "actions", "skills", "known"] {
             map.remove(free);
         }
         for item in map.values_mut() {
@@ -103,6 +104,14 @@ fn named<T: Serialize>(items: &[T], name: impl Fn(&T) -> &String) -> BTreeMap<St
     items
         .iter()
         .map(|i| (name(i).clone(), unlined(i)))
+        .collect()
+}
+
+/// Each KNOWN line by its goal and sample: `quiet "<line>"`.
+fn known(w: &Weave) -> BTreeMap<String, Value> {
+    w.known
+        .iter()
+        .map(|k| (format!("{} {:?}", k.goal, k.sample), unlined(k)))
         .collect()
 }
 

@@ -20,6 +20,36 @@ pub fn check(w: &Weave, problems: &mut Vec<Problem>) {
     args(w, problems);
     expressions(w, problems);
     backticks(w, problems);
+    known(w, problems);
+}
+
+/// Each KNOWN names a quoted goal over a LINES fact, and one kind of line once per goal.
+fn known(w: &Weave, problems: &mut Vec<Problem>) {
+    let mut seen: BTreeMap<(&str, String), u32> = BTreeMap::new();
+    for k in &w.known {
+        let Some(g) = w.goal(&k.goal) else {
+            problems.push(Problem::new(k.line, format!("KNOWN {0}: no GOAL {0}", k.goal)));
+            continue;
+        };
+        if w.judged_lines(g).next().is_none() {
+            problems.push(Problem::new(
+                k.line,
+                format!(
+                    "KNOWN {}: the goal judges no lines; KNOWN takes a quoted GOAL that names a \
+                     LINES fact in backticks",
+                    k.goal
+                ),
+            ));
+            continue;
+        }
+        let kind = crate::daemon::memory::template(&k.sample);
+        if let Some(first) = seen.insert((k.goal.as_str(), kind), k.line) {
+            problems.push(Problem::new(
+                k.line,
+                format!("KNOWN {}: line {first} already says this kind of line", k.goal),
+            ));
+        }
+    }
 }
 
 /// Each name once across ARGs, slots, SECRETs, FACTs, GOALs, ACTIONs and SKILLs.

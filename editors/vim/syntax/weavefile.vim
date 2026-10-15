@@ -6,10 +6,10 @@ endif
 syn case match
 
 syn match   weaveComment     "^\s*#.*$"
-syn match   weaveInstruction "^\s*\zs\(ABOUT\|FROM\|NEEDS\|MODEL\|ARG\|SECRET\|FACT\|GOAL\|ACTION\|WHEN\|RUN\|DO\|ADD\|NEVER\|ASK\|SKILL\)\>"
+syn match   weaveInstruction "^\s*\zs\(ABOUT\|FROM\|NEEDS\|MODEL\|ARG\|SECRET\|FACT\|GOAL\|ACTION\|WHEN\|RUN\|DO\|ADD\|NEVER\|ASK\|SKILL\|KNOWN\)\>"
 syn match   weaveName        "\(^\s*\(ARG\|SECRET\|FACT\|GOAL\|ACTION\|SKILL\)\s\+\)\@<=[A-Za-z_][A-Za-z0-9_-]*"
 syn keyword weaveLevel       MUST SHOULD MAY
-syn keyword weaveKeyword     AFTER EVERY TRIES PER FOR WITHIN IF BEFORE BECAUSE FOLLOW THEN DECIDE CODE
+syn keyword weaveKeyword     AFTER EVERY TRIES PER FOR WITHIN IF BEFORE BECAUSE FOLLOW THEN DECIDE CODE NORMAL TROUBLE
 syn keyword weaveLogic       AND OR NOT
 syn keyword weaveUnit        CPU GPU GB TB RAM DISK
 syn match   weaveFunction    "\<\(SINCE\|PREV\)\ze("

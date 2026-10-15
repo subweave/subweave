@@ -45,7 +45,7 @@ pub(crate) async fn answer(
     Body(b): Body<Answer>,
 ) -> Accepted {
     spec(&s)?;
-    inbox::send_answer(Some(&s), b.n, &b.word, auth::by(&headers, peer), None)
+    inbox::send_answer(Some(&s), b.n, &b.word, auth::by(&headers, peer), None, None)
         .map_err(|e| ApiError::bad(format!("{e:#}")))?;
     Ok(StatusCode::ACCEPTED)
 }

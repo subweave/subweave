@@ -2,7 +2,7 @@
 
 What Subweave does badly, and what the design does about it.
 Sections 1 to 7 are measured: 126 calls to `typesafe/jev-1.13` (build `jev-1.13-20260917`) on 2026-10-13 and 2026-10-14. Each call, with its request and answer, is one line of [evidence/jev-1.13-2026-10-13.jsonl](evidence/jev-1.13-2026-10-13.jsonl); `#n` below is that line. They are examples, not a benchmark.
-Sections 8 to 12 follow from the design.
+Sections 8 to 13 follow from the design.
 
 ## 1. Numbers inside prose
 
@@ -196,3 +196,13 @@ Facts, log lines and coder transcripts go to OpenRouter, then to TypeSafe and De
 | fastest code check | `EVERY 1m` by default |
 
 Subweave repairs in minutes, not milliseconds. A service that needs sub-second failover needs a cluster, not a weave.
+
+## 13. A kind of line hides its numbers
+
+[Memory](WEAVEFILE.md#memory) judges a kind of line once: the line with every number, ID and quoted value masked. What the masked values mean is gone.
+
+- `peer count 3` and `peer count 0` are one kind. Known normal, the box drops both; the one that matters is never judged. A meaningful number belongs in a `NUMBER` fact and a code goal: `GOAL peers ... MIN(peers) > 2`.
+- A word without a digit stays: `slot 7 missed by validator-alpha` and `... by validator-beta` are two kinds.
+- Two lines that differ only in a value can mean opposite things: `exit status 0` and `exit status 1`. Teach the kind trouble and every exit fails the goal; teach it normal and a failure passes. Keep such lines out of a goal over log lines: write a fact that reads the status.
+- The model's 2 verdicts judge 2 samples of the kind. A kind whose meaning turns on its values may get 2 lucky samples.
+- A known kind stays known until someone forgets it or a weave changes its `KNOWN`; a new version of the program that gives an old kind of line a new meaning is not noticed.

@@ -22,6 +22,7 @@ use crate::weave::{self, Condition, Weave, expr, graph};
 use super::asks::{self, AskReq};
 use super::card;
 use super::goals::{self, Scope, Verdict};
+use super::memory::{self, Taught};
 use super::observe::{self, Observer, Values};
 use super::journal::Journal;
 use super::repair::{self, Forced, Job, Outcome, Repair, TaskJob};
@@ -103,6 +104,8 @@ pub(crate) struct Ctx {
     learned: Mutex<Learned>,
     /// The rings of the facts' reads and lines.
     pub observe: Observer,
+    /// The weave's KNOWN lines by goal and template.
+    pub taught: Taught,
     pub learning: tokio::sync::Mutex<()>,
     pub learn_wait: Mutex<BTreeMap<String, Instant>>,
     /// The person whose job runs now (`do`, a task, an answer's re-run): the asks it
@@ -197,6 +200,7 @@ impl Ctx {
             learned::save(name, &learned);
         }
         let observe = Observer::new(goals::keep(&w));
+        let taught = memory::taught(&w);
         // State lives in the journal: the rings start as its check events left them.
         observe.rebuild(&w, &super::journal::events(name));
         Ok(Ctx {
@@ -213,6 +217,7 @@ impl Ctx {
             journal,
             learned: Mutex::new(learned),
             observe,
+            taught,
             learning: tokio::sync::Mutex::new(()),
             learn_wait: Mutex::new(BTreeMap::new()),
             by: Mutex::new(None),

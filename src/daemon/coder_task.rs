@@ -920,7 +920,7 @@ async fn gate_and_run(
             continue;
         }
         let rule = rule_text(r);
-        let kept = ctx.journal().state().kept(&rule, work.action);
+        let kept = ctx.journal().state().kept(&rule);
         let gate = |ok: bool| Kind::Gate {
             goal: work.goal_name(),
             action: work.action.to_string(),

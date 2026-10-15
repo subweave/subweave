@@ -422,6 +422,20 @@ impl Observer {
         r.window(f, s)
     }
 
+    /// A LINES fact's lines in `s`, oldest first.
+    pub fn lines(&self, name: &str, s: Span) -> Vec<String> {
+        let Some(ring) = self.get(name) else {
+            return Vec::new();
+        };
+        let r = lock(&ring);
+        r.span(s)
+            .filter_map(|o| match &o.value {
+                Ok(Value::Text(l)) if r.ty == FactType::Lines => Some(l.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The fact has something to show over `s`: a follower runs (no line is a value too),
     /// or its newest read is not broken.
     pub fn known(&self, name: &str, s: Span) -> bool {

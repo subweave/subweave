@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::paths;
+use crate::weave::Class;
 
 /// The `action` of every journal line of a person's task; no ACTION may take the name.
 pub const TASK: &str = "task";
@@ -82,13 +83,16 @@ pub enum Command {
         by: String,
     },
     /// `word`: `yes`, `no`, `always`, `never` or an action name. `note`: the answerer's
-    /// words, journaled as a note by `by` after the answer line.
+    /// words, journaled as a note by `by` after the answer line. `known`: what the
+    /// escalation's lines are, taught to the box with the answer.
     Answer {
         n: u64,
         word: String,
         by: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        known: Option<Class>,
     },
     Stop {
         service: String,
@@ -110,6 +114,17 @@ pub enum Command {
         service: String,
         name: String,
         #[serde(default)]
+        by: String,
+    },
+    /// Lines like `line` are `class` for `goal`; none: the box forgets what it knew of
+    /// them.
+    Known {
+        service: String,
+        goal: String,
+        line: String,
+        class: Option<Class>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why: Option<String>,
         by: String,
     },
     /// A new Weavefile an agent proposed, checked by `weave --change` and bundled as `run`

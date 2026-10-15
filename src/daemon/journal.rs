@@ -317,6 +317,9 @@ pub(crate) struct Ask {
     /// Only the person's signed answer on a Steery card settles it.
     pub signed: bool,
     pub t: String,
+    /// Lines of the kinds its goal's window held that nobody knows normal: an answer
+    /// with `known` says what they are.
+    pub lines: Vec<String>,
 }
 
 /// A service's open escalations, oldest first.
@@ -338,6 +341,7 @@ pub(crate) fn asks(service: &str, st: &ServiceState) -> Vec<Ask> {
             labels: e.card.labels.clone(),
             signed: e.signed,
             t: e.raised.clone(),
+            lines: e.lines.clone(),
         })
         .collect()
 }
