@@ -26,7 +26,10 @@ pub async fn run() -> Result<ExitCode> {
     let out = Arc::new(Mutex::new(tokio::io::stdout()));
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut by = client_by(None);
+    // Calls in flight: at the end of stdin each still gets its reply.
+    let mut calls = tokio::task::JoinSet::new();
     while let Some(line) = lines.next_line().await.context("read stdin")? {
+        while calls.try_join_next().is_some() {}
         if line.trim().is_empty() {
             continue;
         }
@@ -71,7 +74,7 @@ pub async fn run() -> Result<ExitCode> {
                 };
                 let (out, by) = (out.clone(), by.clone());
                 // `wait_ask` blocks; other requests are answered meanwhile.
-                tokio::spawn(async move {
+                calls.spawn(async move {
                     let reply = tool_result(call(&name, args, &by).await);
                     send(&out, result(id, reply)).await;
                 });
@@ -79,6 +82,7 @@ pub async fn run() -> Result<ExitCode> {
             _ => send(&out, error(id, -32601, &format!("no method {method}"))).await,
         }
     }
+    while calls.join_next().await.is_some() {}
     Ok(ExitCode::SUCCESS)
 }
 
