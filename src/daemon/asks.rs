@@ -52,9 +52,10 @@ pub(crate) fn forget_sent(shared: &Shared, n: u64) -> Option<SentAsk> {
     gone
 }
 
-/// An ask nobody needs to answer now: no channel polls for it, and each channel that
-/// showed buttons takes them away.
+/// An ask nobody needs to answer now: its agent process, if any, is killed, no channel
+/// polls for it, and each channel that showed buttons takes them away.
 pub(crate) fn withdraw(shared: &Shared, n: u64) {
+    super::agent::kill(shared, n);
     let Some(gone) = forget_sent(shared, n) else {
         return;
     };
@@ -199,6 +200,10 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
         }
         for ch in channels {
             if signed && ch.kind() != channel::ChannelKind::Steery {
+                continue;
+            }
+            if ch.kind() == channel::ChannelKind::Agent {
+                super::agent::start(shared.clone(), &ch, &msg, secrets.clone());
                 continue;
             }
             match channel::send(&ch, &msg).await {

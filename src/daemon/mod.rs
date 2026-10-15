@@ -1,6 +1,7 @@
 //! `subweave daemon`: consumes the inbox, keeps one loop task per service and polls the
 //! answering channels for open asks. `WEAVEFILE.md` "The loop" says what a loop does.
 
+mod agent;
 mod asks;
 mod card;
 mod coder_task;
@@ -32,13 +33,18 @@ use service::{Ctl, Tasks};
 
 pub(crate) use service::command_env;
 
-/// What every service task shares: the ask counter and where each ask was sent.
+/// What every service task shares: the ask counter, where each ask was sent and the
+/// agent channels' processes.
 pub(crate) struct Shared {
     pub host: String,
     ask_lock: Mutex<()>,
     sent: Mutex<BTreeMap<u64, asks::SentAsk>>,
     /// Asks settled in this run, so a second answer is ignored.
     answered: Mutex<BTreeSet<u64>>,
+    /// The agent process working on each escalation, by ask: a withdrawn ask kills it.
+    agents: Mutex<BTreeMap<u64, u32>>,
+    /// Per service, held while its agent runs: one agent at a time.
+    agent_turns: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 struct Task {
@@ -77,6 +83,8 @@ pub async fn run() -> Result<()> {
         ask_lock: Mutex::new(()),
         sent: Mutex::new(asks::load_sent()),
         answered: Mutex::new(BTreeSet::new()),
+        agents: Mutex::new(BTreeMap::new()),
+        agent_turns: Mutex::new(BTreeMap::new()),
     });
     let (answers_tx, mut answers_rx) = mpsc::unbounded_channel();
     tokio::spawn(asks::poll_loop(shared.clone(), answers_tx));

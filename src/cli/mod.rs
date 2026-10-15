@@ -266,9 +266,13 @@ pub(crate) fn service_weave(service: &str) -> Result<weave::Weave> {
     parsed(service, &text).with_context(|| format!("{} does not parse", file.display()))
 }
 
-/// `cli:<user>`: who acted, on the Commands this terminal sends.
+/// Who acted, on the Commands this terminal sends: the agent channel that runs it
+/// (`SUBWEAVE_BY`, which the daemon sets), else `cli:<user>`.
 pub(crate) fn by() -> String {
-    format!("cli:{}", user())
+    match std::env::var("SUBWEAVE_BY") {
+        Ok(by) if !by.is_empty() => by,
+        _ => format!("cli:{}", user()),
+    }
 }
 
 /// Who answers at this terminal.

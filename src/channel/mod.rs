@@ -116,6 +116,7 @@ pub enum ChannelKind {
     Email,
     Webhook,
     Heartbeat,
+    Agent,
 }
 
 impl ChannelKind {
@@ -127,13 +128,17 @@ impl ChannelKind {
             ChannelKind::Email => "email",
             ChannelKind::Webhook => "webhook",
             ChannelKind::Heartbeat => "heartbeat",
+            ChannelKind::Agent => "agent",
         }
     }
 
     /// Whether the channel is an escalation target: it settles asks, by `poll` or
-    /// through the inbox.
+    /// through the inbox (an agent runs `subweave answer`).
     pub fn answers(self) -> bool {
-        matches!(self, ChannelKind::Steery | ChannelKind::Telegram)
+        matches!(
+            self,
+            ChannelKind::Steery | ChannelKind::Telegram | ChannelKind::Agent
+        )
     }
 }
 
@@ -153,8 +158,9 @@ impl FromStr for ChannelKind {
             "email" => Ok(ChannelKind::Email),
             "webhook" => Ok(ChannelKind::Webhook),
             "heartbeat" => Ok(ChannelKind::Heartbeat),
+            "agent" => Ok(ChannelKind::Agent),
             _ => bail!(
-                "channel kind is steery, telegram, slack, email, webhook or heartbeat, not {s:?}"
+                "channel kind is steery, telegram, slack, email, webhook, heartbeat or agent, not {s:?}"
             ),
         }
     }
@@ -211,6 +217,8 @@ pub enum Via {
     Email,
     Webhook,
     Heartbeat,
+    /// A command on this box, run once per escalation (`target`).
+    Agent,
 }
 
 impl Via {
@@ -222,6 +230,7 @@ impl Via {
             Via::Email => ChannelKind::Email,
             Via::Webhook => ChannelKind::Webhook,
             Via::Heartbeat => ChannelKind::Heartbeat,
+            Via::Agent => ChannelKind::Agent,
         }
     }
 }
@@ -309,6 +318,8 @@ async fn deliver(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
         ChannelKind::Email => email::send(ch, msg).await.map(|()| None),
         ChannelKind::Webhook => webhook::send(ch, msg).await.map(|()| None),
         ChannelKind::Heartbeat => heartbeat::send(ch).await.map(|()| None),
+        // The daemon runs an agent's command on an escalation; the rest is not for it.
+        ChannelKind::Agent => Ok(None),
     };
     sent.with_context(|| format!("channel {}", ch.name))
 }
@@ -436,9 +447,13 @@ pub async fn add(
             };
             (via, target)
         }
+        ChannelKind::Agent => {
+            need_target("the command to run, in quotes")?;
+            (Via::Agent, target)
+        }
     };
     let level = level.unwrap_or(match kind {
-        ChannelKind::Steery => Kind::Ask,
+        ChannelKind::Steery | ChannelKind::Agent => Kind::Ask,
         _ => Kind::Warning,
     });
     let mut channels = ls()?;
@@ -497,6 +512,9 @@ pub async fn test(name: &str) -> Result<()> {
         .into_iter()
         .find(|c| c.name == name)
         .ok_or_else(|| anyhow!("no channel named {name}"))?;
+    if ch.kind() == ChannelKind::Agent {
+        bail!("an agent channel hears escalations only: its command runs once per escalation");
+    }
     let msg = Message {
         kind: Kind::Info,
         host: hostname(),

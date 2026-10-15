@@ -136,7 +136,8 @@ pub struct Line {
     pub p: Option<BTreeMap<String, f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
-    /// `ask`, `answer` and the `note` of an ask's card summary: the ask's number.
+    /// `ask`, `answer`, and the `note` of an ask's card summary or of its agent's run:
+    /// the ask's number.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n: Option<u64>,
     /// `ask`: the words that answer it.

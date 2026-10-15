@@ -20,9 +20,9 @@ pub struct Args {
 enum Cmd {
     /// Add a channel; its key or URL, when it has one, comes from stdin
     Add {
-        /// steery, telegram, slack, email, webhook or heartbeat
+        /// steery, telegram, slack, email, webhook, heartbeat or agent
         kind: ChannelKind,
-        /// telegram: the chat id; slack: the channel id, for a bot token; email: the address; webhook, heartbeat: the URL
+        /// telegram: the chat id; slack: the channel id, for a bot token; email: the address; webhook, heartbeat: the URL; agent: the command, run with sh -c once per escalation
         target: Option<String>,
         /// The lowest message it gets: ask, warning or info
         #[arg(long)]
@@ -130,7 +130,7 @@ fn read_secret(kind: ChannelKind) -> Result<Option<String>> {
             }
             "the bearer token"
         }
-        ChannelKind::Heartbeat => return Ok(None),
+        ChannelKind::Heartbeat | ChannelKind::Agent => return Ok(None),
     };
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
