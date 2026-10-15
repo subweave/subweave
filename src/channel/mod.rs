@@ -343,6 +343,12 @@ pub async fn poll(ch: &Channel, open: &[(u64, Sent)]) -> Result<Polled> {
     Ok(polled)
 }
 
+/// Whether a channel keeps watching `sent` after its ask is settled: a Steery connect
+/// throw, watched until the person's Go stores the service's conversation.
+pub fn outlives_ask(sent: &Sent) -> bool {
+    steery::is_connect(sent)
+}
+
 /// An ask is closed before anyone answered it: a channel that showed buttons takes
 /// them away. Steery withdraws a request its raiser stops polling; the rest never had
 /// buttons.

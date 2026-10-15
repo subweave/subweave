@@ -211,6 +211,15 @@ enum Open {
     Card(Raised),
 }
 
+/// Whether `sent` is a connect throw: watched on after its ask is settled, since the
+/// conversation it connects is the service's, not the ask's.
+pub(super) fn is_connect(sent: &Sent) -> bool {
+    matches!(
+        serde_json::from_value::<Open>(sent.0.clone()),
+        Ok(Open::Connect(_))
+    )
+}
+
 /// The stored session takes the throw at once. With none, or one Steery no longer
 /// takes, a connect throw and a request let the person pick the conversation; when
 /// nobody's machine is online to take it, the ask goes as a card, so the person still
@@ -238,13 +247,11 @@ async fn session(ch: &Channel, msg: &Message, reach: &str) -> Result<Option<Sent
     }
     let id = Uuid::now_v7().to_string();
     let throw = json!({"id": id, "body": escalation::body(msg, Some(reach), true)});
-    let thrown = create_throw(key, workspace, &throw)
-        .await?
-        .ok_or_else(|| anyhow!("steery throw: refused a throw that names no session"))?;
-    let aimed = thrown["status"] == "held"
-        && thrown["aims"].as_array().is_some_and(|a| !a.is_empty());
-    if !aimed {
-        return card(ch, msg).await;
+    // Bounced: nobody's machine can take it now. 404 or 409: Steery cannot hold it.
+    // Either way the ask goes as a card, so the person still hears.
+    match create_throw(key, workspace, &throw).await? {
+        Some(t) if t["status"] != "bounced" => {}
+        _ => return card(ch, msg).await,
     }
     let request = Uuid::now_v7().to_string();
     let _: Value = http_json(
@@ -258,7 +265,6 @@ async fn session(ch: &Channel, msg: &Message, reach: &str) -> Result<Option<Sent
                 "title": msg.title,
                 "body": connect_body(msg),
                 "throw": id,
-                "unjudged": true,
             })),
     )
     .await?;
@@ -311,7 +317,8 @@ fn connect_body(msg: &Message) -> String {
 }
 
 /// Reads a connect throw: `true` once it needs no more watching, because its newest aim
-/// delivered it and its session is now the service's, or because the person declined.
+/// delivered it and its session is now the service's, or because the person declined
+/// (Steery withdraws a proposal's throw on any answer but Go) or the request is gone.
 async fn watch(key: &str, c: &Connect) -> Result<bool> {
     let throw: Value = http_json(
         "steery throw",
@@ -346,11 +353,7 @@ async fn watch(key: &str, c: &Connect) -> Result<bool> {
             .header("Steery-Workspace", &c.workspace),
     )
     .await?;
-    Ok(match request["status"].as_str() {
-        Some("responded") => request["response"]["answer"]["values"]["go"] != "go",
-        Some("withdrawn") => request["reason"] != "session_did_not_poll",
-        _ => false,
-    })
+    Ok(request["status"] == "withdrawn" && request["reason"] != "session_did_not_poll")
 }
 
 /// A request with the answers as buttons; an info message gets one `seen` button.

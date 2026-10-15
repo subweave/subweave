@@ -24,6 +24,10 @@ pub(crate) struct SentAsk {
     pub service: String,
     /// Channel name → what it needs to find the answer.
     pub sent: BTreeMap<String, Sent>,
+    /// The ask is answered or withdrawn: what is left is watched for its own sake (a
+    /// Steery connect), never for an answer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub settled: bool,
 }
 
 fn sent_file() -> std::path::PathBuf {
@@ -43,18 +47,34 @@ fn save_sent(sent: &BTreeMap<u64, SentAsk>) {
     }
 }
 
+/// The ask is settled: every channel stops watching it, except a watch that outlives
+/// its ask (`channel::outlives_ask`). What stopped, for its buttons to be taken away.
 pub(crate) fn forget_sent(shared: &Shared, n: u64) -> Option<SentAsk> {
     let mut sent = shared.sent.lock().unwrap_or_else(|e| e.into_inner());
-    let gone = sent.remove(&n);
-    if gone.is_some() {
-        save_sent(&sent);
+    let entry = sent.get_mut(&n)?;
+    let (keep, gone): (BTreeMap<_, _>, BTreeMap<_, _>) = std::mem::take(&mut entry.sent)
+        .into_iter()
+        .partition(|(_, s)| channel::outlives_ask(s));
+    let gone = SentAsk {
+        service: entry.service.clone(),
+        sent: gone,
+        settled: true,
+    };
+    if keep.is_empty() {
+        sent.remove(&n);
+    } else {
+        entry.sent = keep;
+        entry.settled = true;
     }
-    gone
+    save_sent(&sent);
+    Some(gone)
 }
 
-/// An ask nobody needs to answer now: its agent process, if any, is killed, no channel
-/// polls for it, and each channel that showed buttons takes them away.
+/// An ask nobody needs to answer now: it counts as settled, so a send still to come
+/// skips it and a later answer is ignored; its agent process, if any, is killed, no
+/// channel polls for it, and each channel that showed buttons takes them away.
 pub(crate) fn withdraw(shared: &Shared, n: u64) {
+    shared.answered.lock().unwrap_or_else(|e| e.into_inner()).insert(n);
     super::agent::kill(shared, n);
     let Some(gone) = forget_sent(shared, n) else {
         return;
@@ -185,7 +205,9 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
         if channels.is_empty() {
             return;
         }
-        if let Some(coder) = coder {
+        // A signed card shows only the daemon's words: a model's summary of it could
+        // carry what an agent wrote into what the person signs.
+        if let Some(coder) = coder.filter(|_| !signed) {
             let line = summarize(&coder, &msg, about.as_deref()).await;
             let mut j = journal.lock().unwrap_or_else(|e| e.into_inner());
             if let Ok(lines) = &line.lines {
@@ -198,7 +220,13 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
                 ..line.line
             });
         }
+        let settled = || shared.answered.lock().unwrap_or_else(|e| e.into_inner()).contains(&n);
         for ch in channels {
+            // Answered or withdrawn during the summary or an earlier send: nobody needs
+            // to hear of it now.
+            if settled() {
+                break;
+            }
             if signed && ch.kind() != channel::ChannelKind::Steery {
                 continue;
             }
@@ -208,8 +236,10 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
             }
             match channel::send(&ch, &msg).await {
                 Ok(Some(s)) => {
-                    // Settled while it was being sent: nothing to poll, no buttons.
-                    if shared.answered.lock().unwrap_or_else(|e| e.into_inner()).contains(&n) {
+                    // Settled while it was being sent: nothing to poll, no buttons; a
+                    // watch that outlives its ask goes on.
+                    let settled = settled();
+                    if settled && !channel::outlives_ask(&s) {
                         if let Err(e) = channel::close(&ch, &s).await {
                             tracing::warn!(ask = n, channel = %ch.name, error = %format!("{e:#}"), "closing an ask failed");
                         }
@@ -218,6 +248,7 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> u64 {
                     let mut sent = shared.sent.lock().unwrap_or_else(|e| e.into_inner());
                     let entry = sent.entry(n).or_default();
                     entry.service = service.clone();
+                    entry.settled |= settled;
                     entry.sent.insert(ch.name.clone(), s);
                     save_sent(&sent);
                 }
@@ -312,7 +343,7 @@ pub(crate) async fn poll_loop(
             for ch in channels {
                 let open: Vec<(u64, Sent)> = sent
                     .iter()
-                    .filter(|(n, _)| !answered.contains(n))
+                    .filter(|(n, s)| s.settled || !answered.contains(n))
                     .filter_map(|(n, s)| s.sent.get(&ch.name).map(|s| (*n, s.clone())))
                     .collect();
                 if open.is_empty() {
