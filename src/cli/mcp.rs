@@ -1,6 +1,6 @@
-//! `subweave mcp`: an MCP server on stdin and stdout, for an agent that answers this box's
-//! asks for its owner. One JSON-RPC message per line; stdout carries nothing else. Each
-//! tool goes through the code path of its CLI command, `by` = `mcp:<client name>`.
+//! `subweave mcp`: an MCP server on stdin and stdout, for an agent that settles this box's
+//! escalations. One JSON-RPC message per line; stdout carries nothing else. Each tool
+//! goes through the code path of its CLI command, `by` = `mcp:<client name>`.
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use super::{act, inbox, ps, task, weavefile};
 use crate::{paths, service};
 
 const PROTOCOL: &str = "2025-06-18";
-const INSTRUCTIONS: &str = "You answer this box's asks for its owner: read `inbox`, and call `wait_ask` to block until a new ask comes. Answer an ask only with one of its `answers`, and leave an ask you are unsure about open for the owner.";
+const INSTRUCTIONS: &str = "This box escalates to you what its ladder (code, the decider, the coder) could not settle. Read the `skill` tool first: it says how to settle an escalation, how to fix the weave with `weave_change`, and what never to do. Then read `inbox`, and call `wait_ask` to block until a new escalation comes. Answer only with one of its `answers`; a signed escalation is the person's alone.";
 /// How often `wait_ask` reads the asks.
 const POLL: Duration = Duration::from_secs(2);
 
@@ -112,8 +112,10 @@ fn error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
+/// A text result goes as it is (the skill's Markdown); the rest as pretty JSON.
 fn tool_result(r: Result<Value>) -> Value {
     match r {
+        Ok(Value::String(text)) => json!({"content": [{"type": "text", "text": text}]}),
         Ok(v) => {
             let text = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
             json!({"content": [{"type": "text", "text": text}]})
@@ -234,6 +236,11 @@ fn tools() -> Vec<Value> {
                 "additionalProperties": false,
             },
         }),
+        json!({
+            "name": "skill",
+            "description": "The escalation skill, as `subweave skill` prints it: how to settle an escalation, fix the weave and upstream generic fixes. Read it before you act.",
+            "inputSchema": none,
+        }),
     ]
 }
 
@@ -263,6 +270,7 @@ async fn call(name: &str, args: Value, by: &str) -> Result<Value> {
             let proposed = weavefile::propose(&a.service, &a.weavefile, &a.why, by.to_string());
             serde_json::to_value(proposed.await?)?
         }
+        "skill" => Value::String(crate::channel::escalation::SKILL.to_owned()),
         _ => bail!("no tool {name:?}"),
     })
 }

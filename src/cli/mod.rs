@@ -85,8 +85,10 @@ enum Command {
     Channel(channel::Args),
     /// Every box's asks and warnings, as notifications on this computer
     Watch,
-    /// An MCP server on stdin and stdout, for an agent that answers asks
+    /// An MCP server on stdin and stdout, for an agent that settles escalations
     Mcp,
+    /// The escalation skill: how an agent settles an escalation and fixes the weave
+    Skill,
     /// Store a provider's key, read from stdin
     Key(key::Args),
     /// Add, remove or list model providers
@@ -129,6 +131,7 @@ impl Command {
             | Command::Daemon(_)
             | Command::Watch
             | Command::Mcp
+            | Command::Skill
             | Command::Version => (None, None),
         }
     }
@@ -184,6 +187,10 @@ async fn local(command: Command) -> Result<ExitCode> {
         Command::Channel(args) => channel::run(args).await,
         Command::Watch => watch::run().await,
         Command::Mcp => mcp::run().await,
+        Command::Skill => {
+            print!("{}", crate::channel::escalation::SKILL);
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Key(args) => key::run(args),
         Command::Provider(args) => provider::run(args),
         Command::Review(args) => review::run(args).await,
