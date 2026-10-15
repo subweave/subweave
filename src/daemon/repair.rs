@@ -247,7 +247,13 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                         goal: Some(goal.name.clone()),
                         action: None,
                         rule: None,
-                        card: card::no_fit(ctx, goal, &refusals, &shown),
+                        card: card::no_fit(
+                            ctx,
+                            goal,
+                            &refusals,
+                            &off_here(ctx, goal, &values),
+                            &shown,
+                        ),
                         facts: shown,
                     });
                     return Outcome::Asked;
@@ -309,6 +315,21 @@ fn candidates<'a>(
         .filter(|a| a.for_goals.is_empty() || a.for_goals.contains(&goal.name))
         .filter(|a| a.when_if.as_ref().is_none_or(|e| expr::holds(e, &scope)))
         .filter(|a| !out.contains(&a.name))
+        .collect()
+}
+
+/// The actions written for this goal (`FOR` names it) that their `IF` keeps off now.
+fn off_here<'a>(ctx: &'a Ctx, goal: &Goal, values: &Values) -> Vec<&'a Action> {
+    let scope = Scope {
+        ctx,
+        facts: values,
+        prev: None,
+    };
+    ctx.w
+        .actions
+        .iter()
+        .filter(|a| a.for_goals.contains(&goal.name))
+        .filter(|a| a.when_if.as_ref().is_some_and(|e| !expr::holds(e, &scope)))
         .collect()
 }
 

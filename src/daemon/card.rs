@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use crate::model::coder::{Coder, Msg, Reply, Tool};
 use crate::weave::{self, Action, Condition, Goal, Rule, Step, show_duration};
 
-use super::service::{Ctx, NO_PARK};
+use super::service::{Ctx, no_park};
 use super::{cap, goals};
 
 const SUMMARY_SYSTEM: &str = "You write the two lines at the top of a card on a person's \
@@ -110,9 +110,9 @@ fn buttons(b: &[(&str, &str)]) -> Vec<(String, String)> {
     b.iter().map(|(w, l)| ((*w).to_string(), (*l).to_string())).collect()
 }
 
-/// `no` parks the goal for `NO_PARK`.
-fn later() -> String {
-    format!("Leave it for {}", show_duration(Duration::from_secs(NO_PARK as u64)))
+/// `no` parks the goal, or the box, for `no_park`.
+fn later(g: Option<&Goal>) -> String {
+    format!("Leave it for {}", show_duration(no_park(g)))
 }
 
 /// At most `n` characters, `…` where it was cut.
@@ -195,34 +195,41 @@ pub(crate) fn tries(
     Card {
         title: format!("Try again to make this true: {}?", short(&subject(ctx, g), SUBJECT)),
         lines,
-        buttons: buttons(&[("yes", "Try again"), ("no", &later())]),
+        buttons: buttons(&[("yes", "Try again"), ("no", &later(Some(g)))]),
     }
 }
 
-/// No action fits the goal, or a rule refuses each one that does.
+/// No action fits the goal: a rule refuses each one that does, or the `IF` of each one
+/// written for it keeps it off on this box.
 pub(crate) fn no_fit(
     ctx: &Ctx,
     g: &Goal,
     refused: &[(&Action, &Rule, bool)],
+    off: &[&Action],
     now: &BTreeMap<String, String>,
 ) -> Card {
     let mut lines = goal_lines(ctx, g, now);
-    if refused.is_empty() {
-        lines.push("No action in the weave can fix this, so it needs you.".into());
-    } else {
-        for (a, r, kept) in refused {
-            lines.push(if *kept {
-                format!("{} is off: you answered Never run it for it before.", label(ctx, a))
-            } else {
-                format!("{} is refused: {}.", label(ctx, a), why(ctx, r))
-            });
-        }
-        lines.push("No other action can fix this, so it needs you.".into());
+    for (a, r, kept) in refused {
+        lines.push(if *kept {
+            format!("{} is off: you answered Never run it for it before.", label(ctx, a))
+        } else {
+            format!("{} is refused: {}.", label(ctx, a), why(ctx, r))
+        });
     }
+    for a in off {
+        if let Some(e) = &a.when_if {
+            lines.push(format!("{} does not run on this box: `IF {e}`.", label(ctx, a)));
+        }
+    }
+    lines.push(if refused.is_empty() && off.is_empty() {
+        "No action in the weave can fix this, so it needs you.".into()
+    } else {
+        "No other action can fix this, so it needs you.".into()
+    });
     Card {
         title: format!("Can you make this true: {}?", short(&subject(ctx, g), SUBJECT)),
         lines,
-        buttons: buttons(&[("yes", "Fixed it, check again"), ("no", &later())]),
+        buttons: buttons(&[("yes", "Fixed it, check again"), ("no", &later(Some(g)))]),
     }
 }
 
@@ -247,7 +254,7 @@ pub(crate) fn which(
     }
     let mut b: Vec<(String, String)> =
         cands.iter().map(|a| (a.name.clone(), label(ctx, a))).collect();
-    b.push(("no".into(), later()));
+    b.push(("no".into(), later(Some(g))));
     Card {
         title: format!("Which fix for: {}?", short(&subject(ctx, g), SUBJECT)),
         lines,
@@ -286,7 +293,7 @@ pub(crate) fn gate(
         lines,
         buttons: buttons(&[
             ("yes", "Run it"),
-            ("no", &later()),
+            ("no", &later(Some(g))),
             ("always", "Always run it"),
             ("never", "Never run it"),
         ]),
@@ -320,10 +327,10 @@ fn action_name(ctx: &Ctx, action: &str) -> String {
     }
 }
 
-/// `no` leaves a goal for an hour and ends a task.
+/// `no` leaves a goal alone for a while and ends a task.
 fn no_label(goal: Option<&Goal>) -> String {
     match goal {
-        Some(_) => later(),
+        Some(_) => later(goal),
         None => "End the task".into(),
     }
 }
@@ -409,6 +416,6 @@ pub(crate) fn misfit(ctx: &Ctx) -> Card {
             .iter()
             .map(|m| format!("{}.", m.trim_end_matches('.')))
             .collect(),
-        buttons: buttons(&[("yes", "Run it anyway"), ("no", &later())]),
+        buttons: buttons(&[("yes", "Run it anyway"), ("no", &later(None))]),
     }
 }

@@ -33,8 +33,8 @@ use super::{Shared, learned, now, save_json};
 const LINE_EVERY: Duration = Duration::from_secs(3600);
 /// A goal failing again this soon after it held sends no new warning.
 const QUIET: Duration = Duration::from_secs(600);
-/// After `no`, a goal waits this long before the loop acts on it again.
-pub(crate) const NO_PARK: i64 = 3600;
+/// After `no`, a goal waits at least this long before the loop acts on it again.
+const NO_PARK: Duration = Duration::from_secs(3600);
 const CODE_EVERY: Duration = Duration::from_secs(60);
 const QUOTED_EVERY: Duration = Duration::from_secs(300);
 /// After a first failed check, the goal is checked again this soon, at most its EVERY.
@@ -45,6 +45,12 @@ fn every(g: &weave::Goal) -> Duration {
         Condition::Code(_) => CODE_EVERY,
         Condition::Quoted(_) => QUOTED_EVERY,
     })
+}
+
+/// How long a `no` leaves a goal alone: until its next check, at least `NO_PARK`; the
+/// box's own asks, `NO_PARK`.
+pub(crate) fn no_park(g: Option<&weave::Goal>) -> Duration {
+    g.map_or(NO_PARK, |g| every(g).max(NO_PARK))
 }
 
 /// How soon a goal's first failed check is checked again: a goal that reads `PREV()`
@@ -639,7 +645,7 @@ impl Loop {
         }
     }
 
-    /// Goals the loop leaves alone now: an open ask, a `no` within the hour, a `wait`.
+    /// Goals the loop leaves alone now: an open ask, a recent `no` (`no_park`), a `wait`.
     fn parked(&self) -> (BTreeSet<String>, bool) {
         let j = self.ctx.journal();
         let nowe = super::epoch();
@@ -648,7 +654,10 @@ impl Loop {
         for (goal, (_, answer)) in j.latest_asks() {
             let park = match &answer {
                 None => true,
-                Some((word, at)) => word == "no" && nowe - at < NO_PARK,
+                Some((word, at)) => {
+                    let g = goal.as_deref().and_then(|g| self.ctx.w.goal(g));
+                    word == "no" && nowe - at < no_park(g).as_secs() as i64
+                }
             };
             if park {
                 match goal {

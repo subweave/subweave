@@ -591,7 +591,7 @@ Each ask is a card, written in code from the weave's plain words:
 2. A short summary, two lines from the coder's first model: what happened, and what it means for the person. The card waits at most 20 seconds for it, then goes without. Without a coder the card has none.
 3. The lines in code: what does not hold, how the goal is checked, what the facts say now, what Subweave did or wants to do, and the rule's `BECAUSE` or the person's earlier `never`.
 4. The facts the goal reads.
-5. Buttons that name the move: `Run it`, `Fixed it, check again`, `Leave it for an hour`. The answer is still a word (`yes`, `no`, an action's name): `subweave answer`, MCP and the journal use the words.
+5. Buttons that name the move: `Run it`, `Fixed it, check again`, `Leave it for 1h`. `no` leaves the goal alone until its next check, at least an hour: `Leave it for 1d` on a goal checked `EVERY 1d`. The answer is still a word (`yes`, `no`, an action's name): `subweave answer`, MCP and the journal use the words.
 
 The summary's model call is journaled with its cost. The journal's `ask` line keeps the title and the lines in code, without the summary. On `steery`, the daemon accepts an answer only when the title, body, lines, facts and button labels the person signed are the ones it sent.
 
