@@ -28,7 +28,7 @@ pub struct AnswerArgs {
 pub fn run() -> Result<ExitCode> {
     let asks = service::all_asks()?;
     if asks.is_empty() {
-        println!("no open asks");
+        println!("no open escalations");
         return Ok(ExitCode::SUCCESS);
     }
     let sw = asks.iter().map(|a| a.service.len()).max().unwrap_or(0);
@@ -62,7 +62,7 @@ pub fn run() -> Result<ExitCode> {
 /// The open ask `n`, when `word` answers it and an answer from here may settle it.
 pub(crate) fn check_answer(n: u64, word: &str) -> Result<Ask> {
     let Some(ask) = service::all_asks()?.into_iter().find(|a| a.n == n) else {
-        bail!("no open ask #{n}: subweave inbox lists them");
+        bail!("no open escalation #{n}: subweave inbox lists them");
     };
     if ask.signed {
         bail!("#{n}: only a signed answer on Steery settles this");

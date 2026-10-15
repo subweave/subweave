@@ -1445,7 +1445,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
     assert_eq!(answer.len(), 1);
     assert_eq!(answer[0]["action"], "restart");
     let out = b.ok(&["inbox"]).await;
-    assert!(out.contains("no open asks"), "{out}");
+    assert!(out.contains("no open escalations"), "{out}");
 
     // 3 (again). Still one learn line and one learner request for `served`.
     assert_eq!(
@@ -1488,7 +1488,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
     assert_eq!(withdrawn["text"], "withdrawn", "{withdrawn}");
     assert_eq!(withdrawn["by"], "daemon: running holds again", "{withdrawn}");
     let out = b.ok(&["inbox"]).await;
-    assert!(out.contains("no open asks"), "{out}");
+    assert!(out.contains("no open escalations"), "{out}");
     b.until("the webhook to hear the withdrawal", 10, || {
         mock.hooks()
             .into_iter()

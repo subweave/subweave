@@ -192,7 +192,7 @@ GOAL quiet       AFTER running    EVERY 10m \
 - `AFTER`: the daemon checks this goal only while those goals hold. The goals make a graph; `subweave plan <weave>` draws it.
 - `IF`: off while the expression is false. A goal after an off goal is off too: with no bucket, `archiving`, `backed` and `drilled` are all off.
 - `EVERY`: `1m` by default for code, `5m` for quoted conditions.
-- `TRIES`: `3 PER 1h` by default. Past it, the daemon asks the person. Code counts this, not the model. A `wait` is not a try: a first sync that waits for hours asks nobody.
+- `TRIES`: `3 PER 1h` by default. Past it, the daemon escalates. Code counts this, not the model. A `wait` is not a try: a first sync that waits for hours escalates nothing.
 - A goal that never held fails its first check: `SINCE(drill)` has no value until the first drill, so a new box drills right after its first backup.
 - A goal fails only when two checks in a row fail. After the first failed check the daemon checks again within 30 seconds, or after its `EVERY` when it reads `PREV()`; a goal that holds then sends no warning, runs no action and asks nobody.
 
@@ -281,17 +281,17 @@ ASK   IF blocks < 10064 BECAUSE "the chain is too short to be mainnet"
 |---|---|---|
 | `NEVER "<text>"` | the request, each coder command | refused |
 | `NEVER IF <expr> [BECAUSE "<why>"]` | the ARGs at `plan`, `run` and `tell`, and every action, in code | refused |
-| `ASK "<text>"` | the request, each coder command | the person answers first |
-| `ASK BEFORE <action> [IF <expr>] [BECAUSE "<why>"]` | every run of that action, in code | the person answers first |
-| `ASK IF <expr> [BECAUSE "<why>"]` | the ARGs at `plan`, `run` and `tell`, and every action, in code | the person answers first |
+| `ASK "<text>"` | the request, each coder command | escalated first |
+| `ASK BEFORE <action> [IF <expr>] [BECAUSE "<why>"]` | every run of that action, in code | escalated first |
+| `ASK IF <expr> [BECAUSE "<why>"]` | the ARGs at `plan`, `run` and `tell`, and every action, in code | escalated first |
 
 - A quoted rule checks what the person asked and what the coder writes. The author's own text passes the code rules only: an action the decider picks, a `RUN` step, a recipe, a learned step.
 - A rule that turns on a number is code: `NEVER IF version < 14`, not `NEVER "versions before 14"`.
 - Every box also has the daemon's own rule, `NEVER "cut off SSH access to this box, or risk it: a firewall change that does not allow SSH in the same command, stopping sshd, or taking the network down"`. The person and `--on` reach the box over SSH.
 - Name the service in a rule about the network: `"let PostgreSQL accept connections from the internet"`. SSH is also a connection from the internet, so the wider rule refuses the command that keeps SSH open ([LIMITS.md](LIMITS.md#5-gating-shell-commands-depends-on-their-stated-purpose)).
-- After a refusal, the loop picks again or asks the person.
+- After a refusal, the loop picks again or escalates.
 - `BECAUSE "<why>"`: why a code rule asks or refuses, in plain words for the person's card. A quoted rule is its own reason.
-- The person answers `yes`, `no`, `always` or `never`. The daemon keeps `always` and `never` in the journal for that rule and action, and does not ask again. A changed `BECAUSE` keeps them.
+- The answer is `yes`, `no`, `always` or `never`. The daemon keeps `always` and `never` in the journal for that rule and action, and does not ask again. A changed `BECAUSE` keeps them.
 
 ## SKILL
 
@@ -327,9 +327,9 @@ Each tick, the daemon:
 1. Reads the facts that due goals need.
 2. Checks the due goals in graph order: code conditions in code, quoted ones in one decider request.
 3. Takes the first goal that fails.
-   - It has no action: the daemon asks the person, with the facts.
+   - It has no action: the daemon escalates, with the facts.
    - It has one action that runs on this box, and no other: the daemon runs it. No model.
-   - Otherwise the decider picks one of them, `wait` or `ask`, counting the actions this box's ARGs keep off. Such an action goes to the person as the fix to make by hand.
+   - Otherwise the decider picks one of them, `wait` or `ask`, counting the actions this box's ARGs keep off. Such an action is escalated as the fix to make by hand.
 4. Gates the action with the rules.
 5. Runs the action: the learned steps, else a recipe, else its `RUN`, `DO` and `ADD` steps.
 6. Checks the goal until it holds or `WITHIN` ends, and writes the outcome to the journal.
@@ -338,11 +338,11 @@ Each tick, the daemon:
 a goal fails
      │
      ▼
-the decider picks ──── under 0.5, or steered ───► ask the person
+the decider picks ──── under 0.5, or steered ───► escalate
      │
      ▼
 the rules gate ──── NEVER ──► pick again
-     │         └─── ASK ────► ask the person
+     │         └─── ASK ────► escalate
      ▼
 the steps run
      │
@@ -353,10 +353,10 @@ holds WITHIN? ──── yes ──► learn the steps, tell
 TRIES left? ──── yes ──► pick again
      │ no
      ▼
-ask the person
+escalate
 ```
 
-- The person is asked through the [channels](#channels).
+- An escalation goes to the [escalation targets](#escalation).
 - With no answer from the decider (network, provider down), a quoted goal stays unknown, and a choice counts as confidence 0.
 - When a goal fails, the decider request carries every fact of the weave, read fresh, so it can tell full logs from full data.
 
@@ -393,7 +393,7 @@ The decider's request, for a failing goal:
 }
 ```
 
-`steered` at 0.5 or more makes the daemon ask the person and run nothing. See [LIMITS.md](LIMITS.md#3-text-on-the-box-can-steer-the-decider).
+`steered` at 0.5 or more makes the daemon escalate and run nothing. See [LIMITS.md](LIMITS.md#3-text-on-the-box-can-steer-the-decider).
 
 `journal` holds only this goal's past action outcomes. With failed checks and earlier asks beside them, Jev picked `ask` over a plain restart (confidence 0.13 to 0.35); with outcomes alone, `restart` scored 0.83. Repeat failures are `TRIES`, counted in code.
 
@@ -431,7 +431,7 @@ A `DO` task, when no learned steps or recipe made the goal hold:
 
 The coder reads at most 8 KB of a command's output: the head and the tail. The whole output, with SECRETs redacted, is kept in `/var/lib/subweave/services/<service>/output/<episode>-<n>.txt`, mode 600, the newest 200 files per service. A cut output names its file, so the coder can read the rest with `sed -n` or `tail`. When a conversation's messages pass 48 KB, every command result but the newest 4 becomes its first line (`exit 0`) and its file name.
 
-A person's task, from `subweave task <service> "<what to do>"` or the dashboard, is a `DO` task with no goal. It waits for the repair slot: one repair or task at a time. The coder gets the person's words as the task, with the ARGs, the rules, the facts and the skills. The same gates hold: every `NEVER` and `ASK`, and the box's own rule never to cut off SSH. `done` ends it, with the coder's summary. An `ask`, from a rule or from the coder, waits for the person; `yes` runs the task again with that rule passed, `no` ends it.
+A person's task, from `subweave task <service> "<what to do>"` or the dashboard, is a `DO` task with no goal. It waits for the repair slot: one repair or task at a time. The coder gets the person's words as the task, with the ARGs, the rules, the facts and the skills. The same gates hold: every `NEVER` and `ASK`, and the box's own rule never to cut off SSH. `done` ends it, with the coder's summary. An `ask`, from a rule or from the coder, is escalated; `yes` runs the task again with that rule passed, `no` ends it.
 
 ## Models
 
@@ -550,46 +550,48 @@ The daemon sends two kinds of message:
 
 | Message | Sent when | Answers |
 |---|---|---|
-| ask | the loop waits for the person: a rule, a decision under 0.5, `steered`, `TRIES` used up, a goal no action fits | `yes`, `no`, `always`, `never`, or an action's name |
+| escalation (an ask) | the loop cannot settle alone: a rule, a decision under 0.5, `steered`, `TRIES` used up, a goal no action fits | `yes`, `no`, `always`, `never`, or an action's name |
 | warning | a goal starts failing, and the loop acts | — |
-| info | a goal holds again; an ask is withdrawn; `run` or `tell` finished; a command was learned | — |
+| info | a goal holds again; an escalation is withdrawn; `run` or `tell` finished; a command was learned | — |
 
-A goal that fails again within 10 minutes of holding sends nothing new. An ask the loop raised on its own for a goal is withdrawn when the goal holds again: the journal gets an `answer` line with `text: "withdrawn"`, and the goal is no longer parked. An ask a person caused (a `do`, a task, an answer that runs an action) carries their `by` and waits for a person's answer.
+A goal that fails again within 10 minutes of holding sends nothing new. An escalation the loop raised on its own for a goal is withdrawn when the goal holds again: the journal gets an `answer` line with `text: "withdrawn"`, and the goal is no longer parked. An escalation a person caused (a `do`, a task, an answer that runs an action) carries their `by` and waits for its answer.
 
 A channel is where messages go. Channels belong to the daemon, not to the weave: every service on the box uses them.
 
 ```
-subweave channel add steery                        # a Steery key, read from stdin
+subweave channel add steery --reach ubuntu@box     # a Steery key, read from stdin; see Escalation
 subweave channel add telegram 123456789            # the chat id; the bot token from stdin
 subweave channel add slack C0123ABCD               # the channel id; a bot token (xoxb-…) from stdin
 subweave channel add slack                         # or an incoming-webhook URL, from stdin
 subweave channel add email ops@acme.dev            # an SMTP URL, from stdin
 subweave channel add webhook https://ops.acme.dev/subweave
 subweave channel add heartbeat https://hc-ping.com/<uuid>
+subweave channel add agent "claude -p --permission-mode acceptEdits"   # a command; see Escalation
 subweave channel test steery
 ```
 
 | Channel | Gets | Answers |
 |---|---|---|
-| `steery` | asks as cards on the person's phone, [steery.dev](https://steery.dev) | yes, signed by the person's device |
+| `steery` | escalations, into an agent conversation or as cards on the person's phone, [steery.dev](https://steery.dev) | yes: the agent, or the person's signed card |
 | `telegram` | every message, from the person's own bot | yes, with buttons |
+| `agent` | escalations, as a command on this box | yes, with `subweave answer` |
 | `slack` | every message, from a bot with `chat:write` or an incoming webhook | no |
 | `email` | every message | no |
 | `webhook` | every message, as JSON | no |
 | `heartbeat` | a GET after every tick | — |
 
-- `--level ask|warning|info` sets the lowest message a channel gets. The default is `warning`; for `steery`, `ask`.
-- An ask goes to every channel that answers, and as a message to the rest, with the command that answers it: `subweave answer 3 yes`.
-- The first answer settles the ask. The other channels show who answered.
-- A withdrawn ask loses its buttons in `telegram`. Steery has no withdraw call: a request the daemon stops polling is withdrawn by Steery after 15 minutes.
-- `steery`: the daemon raises each ask as a request with its own key, and reads the answer with a long poll, so the box needs no open port. The summary leads the card; its lines and facts sit under it. The answer is a signature from the person's device, which the daemon checks before it acts.
+- `--level ask|warning|info` sets the lowest message a channel gets. The default is `warning`; for `steery` and `agent`, `ask`.
+- An escalation goes to every channel that answers, and as a message to the rest, with the command that answers it: `subweave answer 3 yes`.
+- The first answer settles the escalation. The other channels show who answered.
+- A withdrawn escalation loses its buttons in `telegram`. Steery has no withdraw call: a request the daemon stops polling is withdrawn by Steery after 15 minutes.
+- `steery` cards: the daemon raises each card as a request with its own key, and reads the answer with a long poll, so the box needs no open port. The summary leads the card; its lines and facts sit under it. The answer is a signature from the person's device, which the daemon checks before it acts.
 - `heartbeat`: a service such as healthchecks.io alerts when the pings stop. That is the only alert when the whole box is down: see [LIMITS.md](LIMITS.md#9-one-box-no-failover).
 - On the person's computer, `subweave watch` shows every box's messages as system notifications.
 - Channel keys stay on the box in `/etc/subweave/channels.json`, mode 600. They never go to a model.
 
 ### Cards
 
-Each ask is a card, written in code from the weave's plain words:
+Each escalation on `telegram` or a `steery` card is a card, written in code from the weave's plain words:
 
 1. The title is the question: `Make JSON-RPC local only?`, `Can you make this true: reth runs its newest release?`.
 2. A short summary, two lines from the coder's first model: what happened, and what it means for the person. The card waits at most 20 seconds for it, then goes without. Without a coder the card has none.
@@ -599,18 +601,76 @@ Each ask is a card, written in code from the weave's plain words:
 
 The summary's model call is journaled with its cost. The journal's `ask` line keeps the title and the lines in code, without the summary. On `steery`, the daemon accepts an answer only when the title, body, lines, facts and button labels the person signed are the ones it sent.
 
+## Escalation
+
+The ladder settles a failing goal in order: code (learned steps, `RUN`), the decider, the coder. What it cannot settle, it escalates: the ask goes to every escalation target, the channels that answer. The target decides whether to bring in a person.
+
+| Target | Add | Arrives as | Settled by |
+|---|---|---|---|
+| `steery`, session (the default) | `channel add steery --reach USER@HOST` | words in the service's agent conversation in Steery | the agent, with `subweave answer` or MCP |
+| `steery`, card | `channel add steery --escalate card` | a card on the person's phone | the person's signed answer |
+| `agent` | `channel add agent "<command>"` | the command's stdin, on this box | the command, with `subweave answer` |
+| `telegram` | `channel add telegram <chat id>` | a message with buttons | the person |
+| MCP | `subweave mcp`, on the agent's side | `inbox` and `wait_ask` | the agent, with `answer` ([Agents](#agents)) |
+
+### Steery sessions
+
+`--reach USER@HOST` says how an agent elsewhere runs `subweave` on this box: `ssh USER@HOST sudo -n subweave …`. Session mode needs it.
+
+1. The first escalation of a service goes to Steery as words with no conversation, and a request that points at them.
+2. In the app, the person picks the conversation: steer one, fork one, or a new one. Then Go.
+3. The daemon keeps that conversation in `services/<service>/escalation.json`. Later escalations go straight there.
+4. The person can move one escalation to another conversation in Steery. The kept conversation does not change.
+5. When the kept conversation is gone, the next escalation connects again from step 1.
+6. When none of the person's machines is online, the escalation goes as a card.
+
+The words hold the escalation as a card shows it, the box and the service, the commands through `--reach` (`inbox`, `answer`, `log`, `weave`, `mcp`) and the [skill](#the-skill). The skill goes whole when a conversation connects and in its first escalation; later ones point at `subweave skill`.
+
+### Agent channels
+
+`subweave channel add agent "<command>"` runs the command with `sh -c` on this box, once per escalation.
+
+- stdin: the escalation, the commands and the skill whole. The commands are plain `subweave …`.
+- Env: `SUBWEAVE_SERVICE`, `SUBWEAVE_ASK` (its `n`) and `SUBWEAVE_BY`, the channel's name. A `subweave` command the agent runs acts as that name.
+- It runs in the service's directory. Its output, secrets redacted, goes to `services/<service>/escalations/<n>.log`; a journal note says how it ended.
+- One agent per service at a time: a later escalation waits until the earlier one exits. After 30 minutes it is killed. A withdrawn escalation kills it.
+
+### Signed escalations
+
+A signed escalation is settled only by the person's signed answer on a Steery card. It goes to no other target, in either Steery mode. `subweave answer`, MCP and the dashboard refuse it: `only a signed answer on Steery settles this`. A change that needs one is refused at once on a box with no Steery channel.
+
+### Weave changes
+
+An agent changes a service's weave only through the daemon, never in place.
+
+- `subweave weave <service>` (MCP `weave`): the running Weavefile, its ARGs and where it came from.
+- `subweave weave <service> --change <file|-> --why "<why>"` (MCP `weave_change`) proposes a new Weavefile.
+
+1. It must parse, pass the checks, and pass the request check with the service's ARGs and no request. Else it is refused with the findings.
+2. Only `FACT`, `GOAL`, `ACTION` and `SKILL` differ: it applies at once.
+3. Anything else differs (`NEVER`, `ASK`, `ARG`, `SECRET`, `MODEL`, `NEEDS`, `FROM`, `ABOUT`): a signed escalation, `Change the rules of <service>?`, with what differs and why. `yes` applies it; `no` drops it.
+4. It applies as a new `run` of the weave: ARGs, SECRETs and models stay. The journal gets a note, `weave changed by <by>: <why>`, with what changed.
+
+### The skill
+
+[skills/escalation/SKILL.md](skills/escalation/SKILL.md) tells an agent how to settle an escalation, fix the weave so the next case does not escalate, upstream a generic fix to [github.com/subweave/library](https://github.com/subweave/library) redacted, and what never to do. `subweave skill` prints it; the MCP tool `skill`, Steery words and an agent's stdin carry it.
+
+`subweave stats <service>` counts, per week for the last 4 weeks, the repairs that code, the decider and the coder settled, the escalations by who settled them, and the weave changes.
+
 ### Agents
 
-`subweave mcp` is an [MCP](https://modelcontextprotocol.io) server on stdin and stdout: an agent answers the box's asks for the person. It acts as `mcp:<client name>`.
+`subweave mcp` is an [MCP](https://modelcontextprotocol.io) server on stdin and stdout: an agent settles the box's escalations. It acts as `mcp:<client name>`.
 
 | Tool | Does |
 |---|---|
-| `inbox` | every open ask: service, `n`, goal, action, title, body, facts, answers, when raised |
-| `wait_ask` | blocks until an ask not in `seen` is open, then gives every open ask; `[]` after `timeout_secs` (default 600) |
-| `answer` | answers ask `n` of a service with one of its answers; `note` goes in the journal after the answer |
+| `inbox` | every open escalation: service, `n`, goal, action, title, body, facts, answers, `signed`, when raised |
+| `wait_ask` | blocks until an escalation not in `seen` is open, then gives every open one; `[]` after `timeout_secs` (default 600) |
+| `answer` | answers escalation `n` of a service with one of its answers; `note` goes in the journal after the answer |
 | `status` | what `ps` shows, as JSON |
 | `log` | a service's newest journal lines, at most 200 |
 | `task`, `do` | `subweave task`, `subweave do` |
+| `weave`, `weave_change` | `subweave weave`, `subweave weave --change` |
+| `skill` | the escalation skill |
 
 ```json
 {"mcpServers": {"subweave": {"command": "ssh", "args": ["-o", "BatchMode=yes", "ubuntu@box", "sudo", "-n", "subweave", "mcp"]}}}
@@ -629,7 +689,8 @@ The summary's model call is journaled with its cost. The journal's `ask` line ke
 - A `check` line holds the facts the goal read.
 - A `command` line holds `output`: stdout and stderr, secrets redacted, the last 4 KB.
 - An `ask` line holds `text`, its title, and `body`, what the channels got with it.
-- `by` says who acted, on lines a person causes: `answer`, a task, `do`, `tell`, `stop`, `start`, `forget`, and the `ask` and `gate` lines of a job a person asked for. `cli:<user>` at a terminal, `dash@<ip>` from the dashboard, `mcp:<client name>` from an [agent](#agents), the channel's answerer for an answer from a channel.
+- `by` says who acted, on lines a person causes: `answer`, a task, `do`, `tell`, `stop`, `start`, `forget`, and the `ask` and `gate` lines of a job a person asked for. `cli:<user>` at a terminal, `dash@<ip>` from the dashboard, `mcp:<client name>` from an [agent](#agents), an agent channel's name from its command, the channel's answerer for an answer from a channel.
+- An `ask` line of a signed escalation has `signed: true`. A weave change's `ask` and `answer` lines have `action: "weave"`.
 - An answer's note follows it as a `note` line with the same `by`.
 - Every line of a person's task has `action: "task"`. It starts with `{"kind":"action","action":"task","text":"<the task>","by":"…"}`, with no `ok`, when the task starts, and ends with an `action` line whose `ok` says whether it was done and whose `text` is the coder's summary, or why it failed: `ended: the service stopped` when a stop or new settings cut it off.
 - A task that asks waits for the answer; other tasks wait behind it. `yes` runs it again with every rule passed so far and what its earlier runs did.
@@ -652,15 +713,17 @@ cargo install --locked --git https://github.com/subweave/subweave   # macOS: CLI
 | `tell <service> "<request>"` | change ARGs by sentence, with the same check |
 | `ps` | services, failing goals, models, spend this month |
 | `log [-f] [--json] [--all] [<service>]` | the journal; `--all` interleaves every service |
-| `stats <service>` | metrics from numeric facts |
-| `inbox`, `answer <n> <word>` | open asks from every service |
+| `stats <service>` | metrics from numeric facts; the ladder per week |
+| `inbox`, `answer <n> <word> [--note "<why>"]` | open escalations from every service |
 | `watch` | messages from every box, as system notifications on this computer |
 | `mcp` | an MCP server on stdin and stdout, for an [agent](#agents) |
+| `weave <service> [--change <file\|-> --why "<why>"]` | the running weave; propose a new one ([Weave changes](#weave-changes)) |
+| `skill` | the [escalation skill](#the-skill) |
 | `do <service> <action>` | run one action now |
 | `task <service> "<what to do>"` | give the coder a task in words, through the same rules |
 | `learned <service>`, `forget <service> <name>` | the commands this box learned; drop one |
 | `learn <service>` | draft skill recipes from learned steps |
-| `channel add <kind> [<target>]`, `channel ls`, `channel rm <name>`, `channel test <name>` | where messages go |
+| `channel add <kind> [<target>] [--level <l>] [--escalate session\|card] [--reach USER@HOST]`, `channel ls`, `channel rm <name>`, `channel test <name>` | where messages and escalations go |
 | `stop`, `start`, `rm <service>` | pause, resume, remove (asks) |
 | `key <provider>` | store a provider's key, read from stdin |
 | `provider add <name> <endpoint> [--protocol openai\|anthropic]`, `provider rm <name>` | add or remove a provider |
@@ -689,7 +752,7 @@ Files, as root on Linux. Elsewhere, `~/.config/subweave` and `~/.local/state/sub
 | `/etc/subweave/providers.json` | added providers |
 | `/etc/subweave/channels.json` | channels, mode 600 |
 | `/var/lib/subweave/inbox/` | commands from the CLI; the daemon applies and deletes them |
-| `/var/lib/subweave/services/<service>/` | `Weavefile`, `README.md`, `service.json`, `secrets.json` (mode 600), `journal.jsonl`, `learned.json`, `status.json` |
+| `/var/lib/subweave/services/<service>/` | `Weavefile`, `README.md`, `service.json`, `secrets.json` (mode 600), `journal.jsonl`, `learned.json`, `status.json`, `escalation.json` (the Steery conversation), `escalations/<n>.log`, `changes/<n>.json` (a weave change waiting for its signed answer) |
 | `/etc/subweave/dash.json` | the dashboard's address, port and password hash, mode 600 |
 | `/var/lib/subweave/dash/vitals.jsonl` | the box's vitals, one line a minute, 30 days |
 | `/var/lib/subweave/daemon.json` | the running daemon's pid and start time |

@@ -1,6 +1,6 @@
 # Subweave
 
-A Weavefile says what must stay true on a Linux box. The Subweave daemon keeps it true: it installs, watches, repairs, backs up and upgrades one service, and asks a person when it should not decide alone.
+A Weavefile says what must stay true on a Linux box. The Subweave daemon keeps it true: it installs, watches, repairs, backs up and upgrades one service, and escalates to an agent or a person what it should not decide alone.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/hero-dark.svg">
@@ -13,13 +13,14 @@ subweave run postgres "postgres 18 for our app, private network, backups to s3:/
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/loop-dark.svg">
-  <img alt="The loop: check the goals, a goal fails, the decider picks an action, the rules gate it, the steps run, the goal must hold within its time, else ask the person" src="docs/img/loop-light.svg">
+  <img alt="The loop: check the goals, a goal fails, the decider picks an action, the rules gate it, the steps run, the goal must hold within its time, else escalate" src="docs/img/loop-light.svg">
 </picture>
 
 - **Code** checks numbers, runs learned commands and enforces named rules.
 - **The decider** (default [Jev](https://docs.typesafe.ai), a System One model) checks the request against the weave's `ARG`s, picks the next action and judges text. Each decision is one short call to a small, low-cost model.
 - **The coder** (default DeepSeek) writes each box's commands once, and does the open-ended tasks, one gated shell command at a time.
-- **Channels** take the daemon's asks and messages to the person: [Steery](https://steery.dev) (signed answers), Telegram, Slack, email, webhooks. An agent answers them over MCP, `subweave mcp` ([Agents](WEAVEFILE.md#agents)).
+- **Escalation** takes what code, the decider and the coder cannot settle to its targets: an agent conversation in [Steery](https://steery.dev), an agent command on the box, Telegram, or an agent over MCP, `subweave mcp`. The target decides whether to bring in a person. An agent may fix the weave; a rule change waits for the person's signed answer ([Escalation](WEAVEFILE.md#escalation)).
+- **Channels** take the daemon's messages: Steery, Telegram, Slack, email, webhooks.
 
 The run picks both models; a Weavefile only hints. One [OpenRouter](https://openrouter.ai) key runs every weave here ([Models](WEAVEFILE.md#models)).
 
@@ -63,7 +64,7 @@ Each weave's README says what it cannot do. [LIMITS.md](LIMITS.md) says what Sub
 
 ## Dashboard
 
-`subweave dash` serves a web dashboard for a box: goals, live activity, metrics, logs, learned commands and the weave. From it you answer asks, run an action, give the coder a task in words (`subweave task` on the CLI) and change settings in words. It always needs a password: set one with `subweave dash --password`. It listens on 127.0.0.1:7400; `--bind 0.0.0.0` opens it to the network, and `subweave dash --install` makes it a systemd unit. See [Dashboard](WEAVEFILE.md#dashboard).
+`subweave dash` serves a web dashboard for a box: goals, live activity, metrics, logs, learned commands and the weave. From it you answer escalations, run an action, give the coder a task in words (`subweave task` on the CLI) and change settings in words. It always needs a password: set one with `subweave dash --password`. It listens on 127.0.0.1:7400; `--bind 0.0.0.0` opens it to the network, and `subweave dash --install` makes it a systemd unit. See [Dashboard](WEAVEFILE.md#dashboard).
 
 ## Metrics, logs, traces
 
@@ -87,8 +88,8 @@ scrape_configs:
 | `subweave_step_duration_seconds` | summary | service, kind | commands, checks, decisions, learns, coder conversations, tasks |
 | `subweave_episodes_total` | counter | service, kind, outcome | repairs, tasks, learns ended: ok, failed, asked, wait, learned |
 | `subweave_goal_recovery_seconds` | histogram | service, goal | first failing check to the check that holds again |
-| `subweave_asks_open` | gauge | service | asks waiting for an answer |
-| `subweave_asks_total` | counter | service | asks raised |
+| `subweave_asks_open` | gauge | service | escalations waiting for an answer |
+| `subweave_asks_total` | counter | service | escalations raised |
 | `subweave_answers_total` | counter | service, by_kind | person, withdrawn (goal held again), always (a kept answer passed a rule) |
 | `subweave_model_cost_usd_total` | counter | service, model, role | spend; role decider or coder |
 | `subweave_model_tokens_total` | counter | service, model, type | input, cached, output, reasoning; the decider's rule and quoted-goal checks count in cost only |

@@ -130,12 +130,12 @@ fn tools() -> Vec<Value> {
     vec![
         json!({
             "name": "inbox",
-            "description": "Every open ask on this box: service, n, goal, action, rule, title, text (its body), facts, answers (the only words that answer it), labels (each answer's button on the person's card) and t (when it was raised).",
+            "description": "Every open escalation on this box: service, n, goal, action, rule, title, text (its body), facts, answers (the only words that answer it), labels (each answer's button on a card), signed (only the person's signed answer on Steery settles it) and t (when it was raised).",
             "inputSchema": none,
         }),
         json!({
             "name": "wait_ask",
-            "description": "Blocks until an open ask not in `seen` exists, then gives every open ask, as `inbox` does; an empty list once `timeout_secs` pass first.",
+            "description": "Blocks until an open escalation not in `seen` exists, then gives every open one, as `inbox` does; an empty list once `timeout_secs` pass first.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -155,7 +155,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "answer",
-            "description": "Answers an open ask with one of its `answers`; the daemon acts on it. `note`, why, goes in the journal with the answer.",
+            "description": "Answers an open escalation with one of its `answers`; the daemon acts on it. `note`, why, goes in the journal with the answer. A signed escalation is refused.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -170,7 +170,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "status",
-            "description": "Each service as `subweave ps` shows it: goals held and total, failing goals, open asks, repair, models, this month's spend in USD.",
+            "description": "Each service as `subweave ps` shows it: goals held and total, failing goals, open escalations, repair, models, this month's spend in USD.",
             "inputSchema": none,
         }),
         json!({
@@ -343,7 +343,7 @@ struct AnswerArgs {
 fn answer(a: AnswerArgs, by: &str) -> Result<Value> {
     let open = service::all_asks()?;
     if !open.iter().any(|ask| ask.n == a.n && ask.service == a.service) {
-        bail!("{} has no open ask #{}: inbox lists them", a.service, a.n);
+        bail!("{} has no open escalation #{}: inbox lists them", a.service, a.n);
     }
     let note = a
         .note

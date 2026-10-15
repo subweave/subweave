@@ -170,7 +170,7 @@ The daemon runs on the box it keeps. When the box dies, nothing runs.
 
 ## 10. Data on the box leaves it
 
-Facts, log lines and coder transcripts go to OpenRouter, then to TypeSafe and DeepSeek. Messages go to the channels: Steery, Telegram, Slack, email.
+Facts, log lines and coder transcripts go to OpenRouter, then to TypeSafe and DeepSeek. Messages go to the channels: Steery, Telegram, Slack, email. An escalation goes to its targets, and an agent there reads the box with `subweave` as root.
 
 - A Postgres error line can hold the values of a failed query.
 - The daemon removes each secret's exact value. A secret transformed (base64, URL-encoded) is not caught.
@@ -181,7 +181,8 @@ Facts, log lines and coder transcripts go to OpenRouter, then to TypeSafe and De
 - `DO` tasks run as root, and the gates are probabilistic (section 5).
 - A task stops after 40 commands without passing its goal check.
 - Learned steps run again in code, through the code rules only: the quoted rules judged them once, when the coder wrote them.
-- Only `steery` answers are signed. A Telegram answer is as safe as the bot's chat.
+- Only Steery card answers are signed. A Telegram answer is as safe as the bot's chat.
+- An agent's answer is not signed: it is as safe as the agent, its model and the machine it runs on. An agent can run any action, give the coder a task, and change facts, goals, actions and skills. A rule change waits for the person's signed answer on a Steery card.
 - The shell can read the daemon's files, channel and provider keys among them. The daemon replaces every key's value in what goes to a model, a channel or the journal; a key the coder re-encodes (base64, split) gets past that.
 - On this Mac, one toy task: the coder installed a page in 3 calls ($0.00046) and fixed a stopped server in 7 calls and 9 commands ($0.0040). No `DO` task has run on a real box yet.
 
