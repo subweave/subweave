@@ -306,23 +306,27 @@ impl Parser {
             }
             "FROM" => {
                 let spec = c.word().unwrap_or_default();
-                let parsed = spec.split_once(':').filter(|(os, v)| {
-                    os.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
-                        && os
-                            .bytes()
-                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-                        && v.bytes().next().is_some_and(|b| b.is_ascii_digit())
+                let (os, version) = match spec.split_once(':') {
+                    Some((os, v)) => (os, Some(v)),
+                    None => (spec, None),
+                };
+                let os_ok = os.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
+                    && os.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+                let version_ok = version.is_none_or(|v| {
+                    v.bytes().next().is_some_and(|b| b.is_ascii_digit())
                         && v.bytes().all(|b| b.is_ascii_digit() || b == b'.')
                 });
-                let Some((os, version)) = parsed.filter(|_| c.at_end()) else {
-                    return Err("FROM takes <os>:<version>, like ubuntu:24.04".into());
-                };
+                if !(os_ok && version_ok && c.at_end()) {
+                    return Err(
+                        "FROM takes <os> or <os>:<version>, like ubuntu or ubuntu:24.04".into(),
+                    );
+                }
                 if self.w.from.is_some() {
                     return Err("a second FROM".into());
                 }
                 self.w.from = Some(super::ast::From {
                     os: os.into(),
-                    version: version.into(),
+                    version: version.map(str::to_string),
                     line: no,
                 });
             }

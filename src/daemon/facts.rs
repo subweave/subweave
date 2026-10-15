@@ -221,7 +221,7 @@ async fn read_with(ctx: &Ctx, names: &BTreeSet<String>, consume: bool, learn: bo
                 }
                 follow[name].read(consume)
             };
-            out.insert(name.clone(), FactValue { text, code: None });
+            out.insert(name.clone(), FactValue { text: plain(&text), code: None });
             continue;
         }
         let mut o = sh(&command, &ctx.env, FACT_LIMIT).await;
@@ -242,10 +242,42 @@ async fn read_with(ctx: &Ctx, names: &BTreeSet<String>, consume: bool, learn: bo
         out.insert(
             name.clone(),
             FactValue {
-                text: ctx.redact(o.stdout.trim()),
+                text: plain(&ctx.redact(o.stdout.trim())),
                 code: o.code,
             },
         );
+    }
+    out
+}
+
+/// Text without terminal escapes: colour codes in a program's logs are noise to people
+/// and tokens to models.
+fn plain(s: &str) -> String {
+    if !s.contains('\x1b') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        // CSI (`ESC [`) runs to a final byte in @..~; OSC (`ESC ]`) to BEL or `ESC \`;
+        // any other escape is two characters.
+        match chars.next() {
+            Some('[') => {
+                while chars.next().is_some_and(|c| !('@'..='~').contains(&c)) {}
+            }
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
     }
     out
 }

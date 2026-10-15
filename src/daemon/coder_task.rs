@@ -562,7 +562,7 @@ async fn session(
                         let text = match work.goal {
                             Some(goal) => format!(
                                 "{}\nThe coder says only you can fix this. Answer yes once it is fixed to run {} again.",
-                                goals::describe(ctx, goal),
+                                goals::failing(ctx, goal),
                                 work.action
                             ),
                             None => format!(
@@ -790,7 +790,7 @@ async fn judge(
             ),
             format!(
                 "{}\n{tried_text}\nAnswer yes once it is fixed to run {} again.",
-                goals::describe(ctx, goal),
+                goals::failing(ctx, goal),
                 work.action
             ),
         ),

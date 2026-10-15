@@ -63,7 +63,7 @@ a goal fails ──► the decider picks an action
 | Instruction | Says |
 |---|---|
 | `ABOUT "<text>"` | one line for people and models |
-| `FROM <os>:<version>` | the box's operating system |
+| `FROM <os>[:<version>]` | the box's operating system; without a version, any version of it |
 | `NEEDS <n> CPU, <n> GB RAM, <n> GB DISK` | the smallest box; also `TB` and `<n> GPU` |
 | `MODEL DECIDE <id>`, `MODEL CODE <id> [THEN <id>]` | a model hint; the run decides |
 | `ARG <name>[=<default>] MUST\|SHOULD\|MAY ["<what>"]` | a setting the request chooses |

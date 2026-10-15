@@ -922,11 +922,7 @@ pub fn elements(w: &Weave) -> IndexMap<&'static str, Vec<Element>> {
             );
         }
     }
-    let boxname = w
-        .from
-        .as_ref()
-        .map(|f| format!("{}:{}", f.os, f.version))
-        .unwrap_or_default();
+    let boxname = w.from.as_ref().map(ToString::to_string).unwrap_or_default();
     let jobs = jobs(w);
     for s in &w.skills {
         add(

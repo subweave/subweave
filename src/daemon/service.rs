@@ -699,13 +699,13 @@ impl Loop {
         let what = ctx
             .w
             .goal(goal)
-            .map(|g| goals::describe(&ctx, g))
+            .map(|g| goals::failing(&ctx, g))
             .unwrap_or_default();
         ctx.message(
             channel::Kind::Warning,
             Some(goal.to_string()),
-            format!("{goal} fails"),
-            format!("{what}\nThe loop acts on it."),
+            format!("{goal} fails; Subweave is on it"),
+            format!("{what}\nSubweave is fixing it, and asks you only if it needs you."),
             facts,
         );
     }

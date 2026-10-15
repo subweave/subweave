@@ -45,17 +45,19 @@ impl BoxInfo {
     }
 
     /// What this box lacks for the weave's FROM and NEEDS, one line each. FROM fits the
-    /// box's system at that version, or a version under it (`macos:26` fits 26.5).
+    /// box's system at that version or a version under it (`macos:26` fits 26.5), and at
+    /// any version when FROM names none.
     pub fn check(&self, w: &Weave) -> Vec<String> {
         let mut out = Vec::new();
         if let Some(from) = &w.from {
             let fits = from.os == self.os
-                && (self.version == from.version
-                    || self.version.starts_with(&format!("{}.", from.version)));
+                && from.version.as_ref().is_none_or(|v| {
+                    self.version == *v || self.version.starts_with(&format!("{v}."))
+                });
             if !fits {
                 out.push(format!(
-                    "this box runs {} {}; the weave needs {}:{}",
-                    self.os, self.version, from.os, from.version
+                    "this box runs {} {}; the weave needs {from}",
+                    self.os, self.version
                 ));
             }
         }

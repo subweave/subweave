@@ -67,10 +67,21 @@ pub(crate) fn needs(w: &Weave, g: &Goal) -> BTreeSet<String> {
 
 /// `running: up`, or the quoted text with `$name` replaced.
 pub(crate) fn describe(ctx: &Ctx, g: &Goal) -> String {
+    format!("{}: {}", g.name, meaning(ctx, g))
+}
+
+/// What a goal keeps true, without its name: `up`, or its quoted text with `$name` replaced.
+fn meaning(ctx: &Ctx, g: &Goal) -> String {
     match &g.cond {
-        Condition::Code(e) => format!("{}: {e}", g.name),
-        Condition::Quoted(t) => format!("{}: {}", g.name, weave::subst(t, &ctx.spec.args)),
+        Condition::Code(e) => e.to_string(),
+        Condition::Quoted(t) => weave::subst(t, &ctx.spec.args),
     }
+}
+
+/// A failing goal, for a person: its name and what it keeps true.
+pub(crate) fn failing(ctx: &Ctx, g: &Goal) -> String {
+    let m = meaning(ctx, g);
+    format!("Goal `{}` no longer holds. It keeps true: {}.", g.name, m.trim_end_matches('.'))
 }
 
 /// One decider request for every quoted goal given: goal name → holds, or `None` with

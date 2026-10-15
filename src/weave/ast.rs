@@ -23,8 +23,18 @@ pub struct Weave {
 #[derive(Debug, Clone, Serialize)]
 pub struct From {
     pub os: String,
-    pub version: String,
+    /// `None`: any version of `os`.
+    pub version: Option<String>,
     pub line: u32,
+}
+
+impl std::fmt::Display for From {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.version {
+            Some(v) => write!(f, "{}:{v}", self.os),
+            None => f.write_str(&self.os),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
