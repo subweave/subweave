@@ -216,7 +216,7 @@ function describe({ line: l, gate }: Step): { main: ReactNode; tags?: ReactNode;
       return {
         main: (
           <>
-            <span className="t-amber">Ask #{l.n}</span> {l.text}
+            <span className="t-amber">Escalation #{l.n}</span> {l.text}
           </>
         ),
         tags: rule && <span className="tag tag-amber">{rule.rule}</span>,
@@ -235,7 +235,7 @@ function describe({ line: l, gate }: Step): { main: ReactNode; tags?: ReactNode;
         return {
           main: (
             <>
-              Ask #{l.n} withdrawn
+              Escalation #{l.n} withdrawn
               {l.by && <span className="t-muted">: {l.by.replace(/^daemon:\s*/, "")}</span>}
             </>
           ),
@@ -244,7 +244,7 @@ function describe({ line: l, gate }: Step): { main: ReactNode; tags?: ReactNode;
       return {
         main: (
           <>
-            Ask #{l.n} answered <b className="w-6">{l.text}</b>
+            Escalation #{l.n} answered <b className="w-6">{l.text}</b>
             {l.by && <span className="t-muted"> by {l.by}</span>}
           </>
         ),

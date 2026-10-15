@@ -24,7 +24,7 @@ const LABEL: Record<Shown, string> = {
   off: "off",
   waiting: "waiting",
   running: "running now",
-  ask: "ask open",
+  ask: "escalation open",
 };
 
 export function Glyph({ state, title }: { state: Shown; title?: string }) {

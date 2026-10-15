@@ -184,7 +184,7 @@ export function Overview({ service, detail, status }: ServiceProps) {
       </div>
       <aside className="overview-side">
         {detail.asks.length > 0 && (
-          <Panel title={`Asks · ${detail.asks.length}`} className="panel-flat">
+          <Panel title={`Escalations · ${detail.asks.length}`} className="panel-flat">
             <div className="ask-list">
               {detail.asks.map((a) => (
                 <AskCard key={a.n} ask={a} />

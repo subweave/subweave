@@ -64,7 +64,9 @@ export function AskCard({ ask, showService = false, onAnswered }: { ask: Ask; sh
         </p>
       )}
       <AskFacts facts={ask.facts} />
-      {sent ? (
+      {ask.signed ? (
+        <p className="hint">Only a signed answer on Steery settles this.</p>
+      ) : sent ? (
         <p className="ask-sent">
           Answered <b>{ask.labels[sent] ?? sent}</b>. The daemon picks it up within seconds.
         </p>

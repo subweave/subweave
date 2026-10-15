@@ -98,6 +98,8 @@ export interface Ask {
   answers: string[];
   /** Answer word → its button label. */
   labels: Record<string, string>;
+  /** Only the person's signed answer on Steery settles it. */
+  signed: boolean;
   t: string;
 }
 

@@ -152,7 +152,7 @@ function ServiceCard({ s, now }: { s: ServiceSummary; now: number }) {
             Running now: {s.status.repair}
           </span>
         )}
-        {!!s.status?.asks.length && <span className="t-amber">{s.status.asks.length} open {s.status.asks.length === 1 ? "ask" : "asks"}</span>}
+        {!!s.status?.asks.length && <span className="t-amber">{s.status.asks.length} open {s.status.asks.length === 1 ? "escalation" : "escalations"}</span>}
         {s.status && <span className="t-muted num">{usd(s.status.spend_month_usd)} this month</span>}
         {s.status && !s.stopped && now - ms(s.status.t) > 120_000 && (
           <span className="t-amber">no status for {dur(now - ms(s.status.t))}</span>

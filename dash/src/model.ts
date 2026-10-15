@@ -65,7 +65,7 @@ export const KIND_CHIPS = [
   { label: "Actions", kinds: ["action"] },
   { label: "Commands", kinds: ["command"] },
   { label: "Learned", kinds: ["learn"] },
-  { label: "Asks", kinds: ["ask", "answer"] },
+  { label: "Escalations", kinds: ["ask", "answer"] },
   { label: "Messages", kinds: ["message"] },
   { label: "Notes", kinds: ["note"] },
 ] as const;

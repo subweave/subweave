@@ -129,11 +129,11 @@ function Frame({ onSignOut }: { onSignOut: () => void }) {
               href="/inbox"
               onClick={linkClick}
               className={`pill ${asks ? "pill-amber" : ""}`}
-              aria-label={`${asks} open asks`}
+              aria-label={`${asks} open escalations`}
             >
               {asks ? (
                 <>
-                  <Glyph state="ask" /> {asks} {asks === 1 ? "ask" : "asks"}
+                  <Glyph state="ask" /> {asks} {asks === 1 ? "escalation" : "escalations"}
                 </>
               ) : (
                 "Inbox"
