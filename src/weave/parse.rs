@@ -22,8 +22,11 @@ pub const KEYWORDS: &[&str] = &[
     "ABOUT", "FROM", "NEEDS", "MODEL", "ARG", "SECRET", "FACT", "GOAL", "ACTION", "WHEN", "RUN",
     "DO", "ADD", "NEVER", "ASK", "SKILL", "AFTER", "EVERY", "TRIES", "PER", "FOR", "WITHIN", "IF",
     "AND", "OR", "NOT", "SINCE", "PREV", "FOLLOW", "MUST", "SHOULD", "MAY", "BEFORE", "DECIDE",
-    "CODE", "THEN", "CPU", "GPU", "GB", "TB", "RAM", "DISK",
+    "CODE", "THEN", "CPU", "GPU", "GB", "TB", "RAM", "DISK", "BECAUSE",
 ];
+
+/// An ACTION's label is a button on a phone.
+const LABEL_MAX: usize = 40;
 
 pub fn is_keyword(w: &str) -> bool {
     KEYWORDS.contains(&w)
@@ -180,29 +183,49 @@ impl<'a> Cur<'a> {
 
 /// Splits a trailing `IF <expr>` outside quotes.
 fn split_if(s: &str) -> (&str, Option<&str>) {
+    split_kw(s, "IF")
+}
+
+/// Splits at the last `kw` word outside quotes: what comes before it and after it.
+fn split_kw<'s>(s: &'s str, kw: &str) -> (&'s str, Option<&'s str>) {
     let b = s.as_bytes();
+    let k = kw.as_bytes();
     let (mut dq, mut sq) = (false, false);
     let mut last = None;
-    for k in 0..b.len() {
-        match b[k] {
+    for i in 0..b.len() {
+        match b[i] {
             b'"' if !sq => dq = !dq,
             b'\'' if !dq => sq = !sq,
-            b'I' if !dq
+            _ if !dq
                 && !sq
-                && k > 0
-                && b[k - 1].is_ascii_whitespace()
-                && b.get(k + 1) == Some(&b'F')
-                && b.get(k + 2).is_none_or(|c| c.is_ascii_whitespace()) =>
+                && i > 0
+                && b[i - 1].is_ascii_whitespace()
+                && b[i..].starts_with(k)
+                && b.get(i + k.len()).is_none_or(|c| c.is_ascii_whitespace()) =>
             {
-                last = Some(k)
+                last = Some(i)
             }
             _ => {}
         }
     }
     match last {
-        Some(k) => (s[..k].trim_end(), Some(s[k + 2..].trim())),
+        Some(i) => (s[..i].trim_end(), Some(s[i + k.len()..].trim())),
         None => (s, None),
     }
+}
+
+/// A code rule's trailing `BECAUSE "<why>"`, split off.
+fn split_because(s: &str) -> Result<(&str, Option<String>), String> {
+    let (head, why) = split_kw(s, "BECAUSE");
+    let Some(why) = why else {
+        return Ok((head, None));
+    };
+    let mut c = Cur::new(why);
+    let text = c.quoted()?;
+    if !c.at_end() {
+        return Err("BECAUSE: text after the quoted reason".into());
+    }
+    Ok((head, Some(text)))
 }
 
 struct Parser {
@@ -384,8 +407,13 @@ impl Parser {
                     }
                     self.w.rules.push(Rule::Never { text, line: no });
                 } else if c.eat("IF") {
-                    if let Some(expr) = self.expr(no, c.rest()) {
-                        self.w.rules.push(Rule::NeverIf { expr, line: no });
+                    let (src, because) = split_because(c.rest())?;
+                    if let Some(expr) = self.expr(no, src) {
+                        self.w.rules.push(Rule::NeverIf {
+                            expr,
+                            because,
+                            line: no,
+                        });
                     }
                 } else {
                     return Err("NEVER takes quoted text or IF <expr>".into());
@@ -399,21 +427,31 @@ impl Parser {
                     }
                     self.w.rules.push(Rule::Ask { text, line: no });
                 } else if c.eat("BEFORE") {
-                    let (head, cond) = split_if(c.rest());
+                    let (rest, because) = split_because(c.rest())?;
+                    let (head, cond) = split_if(rest);
                     let mut h = Cur::new(head);
                     let action = name(h.word().unwrap_or_default(), is_item_name, ITEM_FORM)?;
                     if !h.at_end() {
-                        return Err(format!("ASK BEFORE {action}: `{}` is not IF", h.rest()));
+                        return Err(format!(
+                            "ASK BEFORE {action}: `{}` is not IF or BECAUSE",
+                            h.rest()
+                        ));
                     }
                     let cond = cond.and_then(|src| self.expr(no, src));
                     self.w.rules.push(Rule::AskBefore {
                         action,
                         cond,
+                        because,
                         line: no,
                     });
                 } else if c.eat("IF") {
-                    if let Some(expr) = self.expr(no, c.rest()) {
-                        self.w.rules.push(Rule::AskIf { expr, line: no });
+                    let (src, because) = split_because(c.rest())?;
+                    if let Some(expr) = self.expr(no, src) {
+                        self.w.rules.push(Rule::AskIf {
+                            expr,
+                            because,
+                            line: no,
+                        });
                     }
                 } else {
                     return Err("ASK takes quoted text, BEFORE <action> or IF <expr>".into());
@@ -580,12 +618,20 @@ impl Parser {
         let n = name(c.word().unwrap_or_default(), is_item_name, ITEM_FORM)?;
         let mut goal = Goal {
             name: n.clone(),
+            plain: None,
             after: Vec::new(),
             every: None,
             tries: None,
             cond: Condition::Quoted(String::new()),
             when: None,
             line: no,
+        };
+        // Quoted text right after the name is the plain sentence when a condition follows
+        // it, else the quoted condition itself.
+        let first = if c.starts_quoted() {
+            Some(c.quoted()?)
+        } else {
+            None
         };
         let res = (|| {
             if c.eat("AFTER") {
@@ -609,8 +655,19 @@ impl Parser {
             }
             Ok(())
         })();
-        let cond_src = c.rest();
-        if res.is_ok() {
+        let rest = c.rest();
+        let cond_src = match first {
+            Some(text) if rest.is_empty() => {
+                goal.cond = Condition::Quoted(text);
+                None
+            }
+            Some(text) => {
+                goal.plain = Some(text);
+                Some(rest)
+            }
+            None => Some(rest),
+        };
+        if let (Ok(()), Some(cond_src)) = (&res, cond_src) {
             if cond_src.is_empty() {
                 self.problems
                     .push(Problem::new(no, format!("GOAL {n} has no condition")));
@@ -642,8 +699,20 @@ impl Parser {
                 "ACTION {n}: the name belongs to a person's task (subweave task); pick another"
             ));
         }
+        let label = if c.starts_quoted() {
+            let l = c.quoted()?;
+            if l.trim().is_empty() || l.chars().count() > LABEL_MAX {
+                return Err(format!(
+                    "ACTION {n}: the label is a button: 1 to {LABEL_MAX} characters"
+                ));
+            }
+            Some(l)
+        } else {
+            None
+        };
         let mut action = Action {
             name: n.clone(),
+            label,
             for_goals: Vec::new(),
             within: None,
             when_if: None,

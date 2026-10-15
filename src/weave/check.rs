@@ -196,7 +196,9 @@ fn expressions(w: &Weave, problems: &mut Vec<Problem>) {
     }
     for r in &w.rules {
         match r {
-            Rule::NeverIf { expr, line } | Rule::AskIf { expr, line } => exprs.push((*line, expr)),
+            Rule::NeverIf { expr, line, .. } | Rule::AskIf { expr, line, .. } => {
+                exprs.push((*line, expr))
+            }
             Rule::AskBefore {
                 cond: Some(e),
                 line,

@@ -122,6 +122,8 @@ pub enum FactSource {
 #[derive(Debug, Clone, Serialize)]
 pub struct Goal {
     pub name: String,
+    /// What it keeps true, for a person: `GOAL current "reth runs its newest release" …`.
+    pub plain: Option<String>,
     pub after: Vec<String>,
     #[serde(serialize_with = "dur_opt")]
     pub every: Option<Duration>,
@@ -143,6 +145,8 @@ pub enum Condition {
 #[derive(Debug, Clone, Serialize)]
 pub struct Action {
     pub name: String,
+    /// The button that runs it: `ACTION fence "Make JSON-RPC local only" …`.
+    pub label: Option<String>,
     pub for_goals: Vec<String>,
     #[serde(serialize_with = "dur_opt")]
     pub within: Option<Duration>,
@@ -180,6 +184,7 @@ pub enum Rule {
     },
     NeverIf {
         expr: Expr,
+        because: Option<String>,
         line: u32,
     },
     Ask {
@@ -189,10 +194,12 @@ pub enum Rule {
     AskBefore {
         action: String,
         cond: Option<Expr>,
+        because: Option<String>,
         line: u32,
     },
     AskIf {
         expr: Expr,
+        because: Option<String>,
         line: u32,
     },
 }
@@ -205,6 +212,16 @@ impl Rule {
             | Rule::Ask { line, .. }
             | Rule::AskBefore { line, .. }
             | Rule::AskIf { line, .. } => *line,
+        }
+    }
+
+    /// A code rule's `BECAUSE`: why it asks or refuses, for a person.
+    pub fn because(&self) -> Option<&str> {
+        match self {
+            Rule::NeverIf { because, .. }
+            | Rule::AskBefore { because, .. }
+            | Rule::AskIf { because, .. } => because.as_deref(),
+            Rule::Never { .. } | Rule::Ask { .. } => None,
         }
     }
 }
