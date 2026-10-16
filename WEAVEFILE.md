@@ -709,7 +709,7 @@ A goal that fails again within 10 minutes of holding sends nothing new. An escal
 A channel is where messages go. Channels belong to the daemon, not to the weave: every service on the box uses them.
 
 ```
-subweave channel add steery --reach ubuntu@box     # a Steery key, read from stdin; see Escalation
+subweave channel add steery                        # a Steery key, read from stdin; see Escalation
 subweave channel add telegram 123456789            # the chat id; the bot token from stdin
 subweave channel add slack C0123ABCD               # the channel id; a bot token (xoxb-…) from stdin
 subweave channel add slack                         # or an incoming-webhook URL, from stdin
@@ -763,15 +763,13 @@ The ladder settles a failing goal in order: code (learned steps, `RUN`), the dec
 
 | Target | Add | Arrives as | Settled by |
 |---|---|---|---|
-| `steery`, session (the default) | `channel add steery --reach USER@HOST` | words in the service's agent conversation in Steery | the agent, with `subweave answer` or MCP |
+| `steery`, session (the default) | `channel add steery [--outpost <name>]` | words in the service's agent conversation in Steery | the agent, through the box's [outpost](#the-outpost) |
 | `steery`, card | `channel add steery --escalate card` | a card on the person's phone | the person's signed answer |
 | `agent` | `channel add agent "<command>"` | the command's stdin, on this box | the command, with `subweave answer` |
 | `telegram` | `channel add telegram <chat id>` | a message with buttons | the person |
 | MCP | `subweave mcp`, on the agent's side | `inbox` and `wait_ask` | the agent, with `answer` ([Agents](#agents)) |
 
 ### Steery sessions
-
-`--reach USER@HOST` says how an agent elsewhere runs `subweave` on this box: `ssh USER@HOST sudo -n subweave …`. Session mode needs it.
 
 1. The first escalation of a service goes to Steery as words with no conversation, and a request that points at them.
 2. In the app, the person picks the conversation: steer one, fork one, or a new one. Then Go.
@@ -780,7 +778,25 @@ The ladder settles a failing goal in order: code (learned steps, `RUN`), the dec
 5. When the kept conversation is gone, the next escalation connects again from step 1.
 6. When Steery bounces the words or cannot hold them (no machine of the person's is online), the escalation goes as a card.
 
-The words hold the escalation as a card shows it, the box and the service, the commands through `--reach` (`inbox`, `answer`, `log`, `weave`, `mcp`) and the [skill](#the-skill). The skill goes whole when a conversation connects and in its first escalation; later ones point at `subweave skill`.
+The words hold the escalation as a card shows it, the box and the service, the outpost's name and its tools (`inbox`, `answer`, `log`, `weave`), and the [skill](#the-skill). The skill goes whole when a conversation connects and in its first escalation; later ones point at the outpost's `skill` tool.
+
+### The outpost
+
+While a Steery channel exists, the daemon offers the box's MCP tools to the workspace's conversations as a Steery outpost. The box opens no port: the daemon holds one outbound event stream with the channel's key.
+
+- One outpost per box, from its first Steery channel: `--outpost <name>`, else the hostname (`[a-z0-9-]`, 2–40).
+- An agent reads the tools with `outposts_get` and calls one with `invocations_create`. The tools are `subweave mcp`'s, in its order; a call acts as `outpost:<caller's handle>`.
+- Each invocation runs at most once while the daemon lives, never within 5 seconds of its deadline. Its result is redacted as the journal is.
+
+| Tool | Runs |
+|---|---|
+| `inbox`, `wait_ask`, `status`, `log`, `weave`, `skill`, `answer`, `known`, `forget_known`, `known_release`, `do`, `drill` | at once, through the weave's own rules; a signed escalation still needs its signed card |
+| `task`, `weave_change` | after the person's Go on a signed card whose payload is the exact call, verified against the channel's pins; once |
+
+- A gated call through a channel that pins no signer is refused.
+- Another daemon that holds the same outpost stops this one; the journal says so.
+- A key Steery revoked stops the outpost until the channel changes, with a warning on every channel.
+- The daemon stopping reports each call in hand failed, `the daemon stopped`.
 
 ### Agent channels
 
@@ -832,9 +848,7 @@ An agent changes a service's weave only through the daemon, never in place.
 | `weave`, `weave_change` | `subweave weave`, `subweave weave --change` |
 | `skill` | the escalation skill |
 
-```json
-{"mcpServers": {"subweave": {"command": "ssh", "args": ["-o", "BatchMode=yes", "ubuntu@box", "sudo", "-n", "subweave", "mcp"]}}}
-```
+On the box: `{"mcpServers": {"subweave": {"command": "subweave", "args": ["mcp"]}}}`. From elsewhere, a Steery conversation calls the same tools through the [outpost](#the-outpost).
 
 ## Journal
 
@@ -896,7 +910,7 @@ cargo install --locked --git https://github.com/subweave/subweave   # macOS: CLI
 | `learned <service>`, `forget <service> <fact\|action\|action/goal>` | the commands this box learned; drop one |
 | `known <service> <goal> normal\|trouble "<line>" [--why "<why>"]`, `known <service> <part> security\|routine <version>`, `forget-known <service> <goal> "<line>"` | what a kind of log line is for a goal, or a release ([Memory](#memory)) |
 | `learn <service>` | draft skill recipes from learned steps, `KNOWN` lines from known kinds of line |
-| `channel add <kind> [<target>] [--level <l>] [--escalate session\|card] [--reach USER@HOST]`, `channel ls`, `channel rm <name>`, `channel test <name>` | where messages and escalations go |
+| `channel add <kind> [<target>] [--level <l>] [--escalate session\|card] [--outpost <name>]`, `channel ls`, `channel rm <name>`, `channel test <name>` | where messages and escalations go |
 | `stop`, `start`, `rm [--yes] <service>` | pause, resume, remove (asks without `--yes`) |
 | `key <provider>` | store a provider's key, read from stdin |
 | `provider add <name> <endpoint> [--protocol openai\|anthropic]`, `provider rm <name>`, `provider ls` | add, remove or list providers |

@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 
 use super::term;
-use crate::channel::{self, ChannelKind, Escalate, Kind, Mode, Via};
+use crate::channel::{self, ChannelKind, Escalate, Kind, Via};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -30,10 +30,10 @@ enum Cmd {
         level: Option<Kind>,
         /// steery: session (the default) escalates to an agent conversation; card asks the person on a signed card
         #[arg(long, value_name = "MODE")]
-        escalate: Option<Mode>,
-        /// steery session: how that agent runs subweave on this box, as ssh USER@HOST sudo -n subweave
-        #[arg(long, value_name = "USER@HOST")]
-        reach: Option<String>,
+        escalate: Option<Escalate>,
+        /// steery: the name this box's outpost offers its tools under in the workspace; the hostname when omitted
+        #[arg(long, value_name = "NAME")]
+        outpost: Option<String>,
     },
     /// List channels
     Ls,
@@ -50,17 +50,19 @@ pub async fn run(args: Args) -> Result<ExitCode> {
             target,
             level,
             escalate,
-            reach,
+            outpost,
         } => {
             let secret = read_secret(kind)?;
-            let ch = channel::add(kind, target, level, secret, escalate, reach).await?;
+            let ch = channel::add(kind, target, level, secret, escalate, outpost).await?;
             let target = ch
                 .target
                 .as_deref()
                 .map(|t| format!(" {t}"))
                 .unwrap_or_default();
             let how = match &ch.via {
-                Via::Steery { escalate, .. } => format!(", escalates {}", shown(escalate)),
+                Via::Steery { escalate, outpost, .. } => {
+                    format!(", escalates {}, {}", shown(*escalate), outpost_shown(outpost.as_deref()))
+                }
                 _ => String::new(),
             };
             println!(
@@ -89,8 +91,9 @@ pub async fn run(args: Args) -> Result<ExitCode> {
                     c.target.as_deref().unwrap_or("-"),
                     c.level
                 );
-                if let Via::Steery { escalate, pins } = &c.via {
-                    line.push_str(&format!("  escalates {}", shown(escalate)));
+                if let Via::Steery { escalate, pins, outpost } = &c.via {
+                    line.push_str(&format!("  escalates {}", shown(*escalate)));
+                    line.push_str(&format!("  {}", outpost_shown(outpost.as_deref())));
                     let pins: Vec<&str> = pins.iter().map(|p| p.name.as_str()).collect();
                     line.push_str(&format!("  signers: {}", pins.join(", ")));
                 }
@@ -109,12 +112,16 @@ pub async fn run(args: Args) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `session via root@box-1`, `card`.
-fn shown(e: &Escalate) -> String {
+fn shown(e: Escalate) -> &'static str {
     match e {
-        Escalate::Session { reach } => format!("session via {reach}"),
-        Escalate::Card => "card".into(),
+        Escalate::Session => "session",
+        Escalate::Card => "card",
     }
+}
+
+/// `outpost box-1`, the name the daemon offers the box's tools under.
+fn outpost_shown(outpost: Option<&str>) -> String {
+    format!("outpost {}", channel::steery::outpost::name_of(outpost))
 }
 
 /// The kind's key or URL: asked without echo at a terminal, else all of stdin. A webhook's

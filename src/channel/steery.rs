@@ -1,11 +1,14 @@
 //! Steery. An ask goes as the channel's `escalate` says: in `session` mode a throw to the
-//! service's agent conversation, connected once by the person; in `card` mode a request
-//! with one `buttons` control named `answer`, whose answer is accepted only with a valid
-//! signature from a pinned phone or mac signer.
+//! service's agent conversation, connected once by the person, which works on the box
+//! through its outpost ([`outpost`]); in `card` mode a request with one `buttons` control
+//! named `answer`, whose answer is accepted only with a valid signature from a pinned
+//! phone or mac signer.
 //!
 //! The signed message (`steery.response.v3`) binds the request content and the answer:
 //! `content_sha256` is taken over what the server returned, after checking that title,
 //! body, payload and buttons are what we sent.
+
+pub mod outpost;
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -136,11 +139,15 @@ pub(super) async fn send(ch: &Channel, msg: &Message, open: AskOpen<'_>) -> Resu
     match (&ch.via, &msg.ask) {
         (
             Via::Steery {
-                escalate: Escalate::Session { reach },
+                escalate: Escalate::Session,
+                outpost: named,
                 ..
             },
             Some(ask),
-        ) if !ask.signed => session(ch, msg, reach, open).await,
+        ) if !ask.signed => {
+            let outpost = outpost::config().map_or_else(|| outpost::name_of(named.as_deref()), |c| c.name);
+            session(ch, msg, &outpost, open).await
+        }
         _ => card(ch, msg).await,
     }
 }
@@ -206,8 +213,9 @@ pub(super) fn is_connect(sent: &Sent) -> bool {
 /// The stored session takes the throw at once. With none, or one Steery no longer
 /// takes, a connect throw and a request let the person pick the conversation; when
 /// nobody's machine is online to take it, the ask goes as a card, so the person still
-/// hears. `open` is read before each post: one settled meanwhile gets no more.
-async fn session(ch: &Channel, msg: &Message, reach: &str, open: AskOpen<'_>) -> Result<Option<Sent>> {
+/// hears. `open` is read before each post: one settled meanwhile gets no more. The words
+/// name `outpost`, the box's tools in the workspace.
+async fn session(ch: &Channel, msg: &Message, outpost: &str, open: AskOpen<'_>) -> Result<Option<Sent>> {
     let key = key(ch)?;
     let workspace = workspace(ch)?;
     if let Some(mut c) = connected(&msg.service) {
@@ -215,7 +223,7 @@ async fn session(ch: &Channel, msg: &Message, reach: &str, open: AskOpen<'_>) ->
             "id": Uuid::now_v7().to_string(),
             "session": c.steery_session,
             "act": "continue",
-            "body": escalation::body(msg, Some(reach), !c.skill_sent),
+            "body": escalation::body(msg, Some(outpost), !c.skill_sent),
         });
         match create_throw(key, workspace, &throw).await? {
             Some(_) => {
@@ -232,7 +240,7 @@ async fn session(ch: &Channel, msg: &Message, reach: &str, open: AskOpen<'_>) ->
         return Ok(None);
     }
     let id = Uuid::now_v7().to_string();
-    let throw = json!({"id": id, "body": escalation::body(msg, Some(reach), true)});
+    let throw = json!({"id": id, "body": escalation::body(msg, Some(outpost), true)});
     // Bounced: nobody's machine can take it now. 404 or 409: Steery cannot hold it.
     // Either way the ask goes as a card, so the person still hears.
     match create_throw(key, workspace, &throw).await? {
@@ -370,12 +378,8 @@ async fn card(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
             stance: stance(w).to_owned(),
         })
         .collect();
-    let options: Vec<Value> = buttons
-        .iter()
-        .map(|b| json!({"id": b.id, "label": b.label, "stance": b.stance}))
-        .collect();
     let raised = Raised {
-        id: id.clone(),
+        id,
         workspace: workspace.to_owned(),
         title: msg.card.title.clone(),
         body: body(msg),
@@ -383,10 +387,26 @@ async fn card(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
         view: view(msg),
         buttons,
     };
+    raise(key, &raised, None).await?;
+    if msg.ask.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(Sent(serde_json::to_value(raised)?)))
+}
+
+/// Raise `raised` as a request whose `answer` buttons are its buttons: the one path every
+/// signed card takes, an escalation's and a gated outpost call's. `assign` says who
+/// answers, when not anyone.
+pub(crate) async fn raise(key: &str, raised: &Raised, assign: Option<Value>) -> Result<()> {
+    let options: Vec<Value> = raised
+        .buttons
+        .iter()
+        .map(|b| json!({"id": b.id, "label": b.label, "stance": b.stance}))
+        .collect();
     // The daemon's code builds this form, not a model: Steery's card judge, which holds
     // an agent's words to its guidelines, does not apply to it.
-    let request = json!({
-        "id": id,
+    let mut request = json!({
+        "id": raised.id,
         "title": raised.title,
         "body": raised.body,
         "payload": raised.payload,
@@ -394,19 +414,19 @@ async fn card(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
         "input": [{"kind": "buttons", "name": CONTROL, "options": options}],
         "unjudged": true,
     });
+    if let Some(assign) = assign {
+        request["assign"] = assign;
+    }
     let _: Value = http_json(
         "steery raise",
         client()
             .post(format!("{}/v1/requests", base()))
             .bearer_auth(key)
-            .header("Steery-Workspace", workspace)
+            .header("Steery-Workspace", &raised.workspace)
             .json(&request),
     )
     .await?;
-    if msg.ask.is_none() {
-        return Ok(None);
-    }
-    Ok(Some(Sent(serde_json::to_value(raised)?)))
+    Ok(())
 }
 
 /// What one read of an open ask came to.
@@ -471,8 +491,30 @@ pub(super) async fn poll(ch: &Channel, open: &[(u64, Sent)]) -> Result<Polled> {
     Ok(polled)
 }
 
-/// `Some((word, by))` once the request holds a verified answer.
+/// What one read of a raised card came to.
+pub(crate) enum Reading {
+    Open,
+    /// The answer word and who signed it.
+    Verified(String, String),
+    /// A response that fails [`verify`]: why.
+    Unverified(anyhow::Error),
+    /// Withdrawn in Steery, and why.
+    Withdrawn(String),
+}
+
+/// One long poll of the card, `Verified` once it holds an answer [`verify`] accepts.
 async fn read(key: &str, raised: &Raised, pins: &[Pin]) -> Result<Option<(String, String)>> {
+    match reading(key, raised, pins).await? {
+        Reading::Open => Ok(None),
+        Reading::Verified(word, by) => Ok(Some((word, by))),
+        Reading::Unverified(e) => Err(e),
+        Reading::Withdrawn(reason) => bail!("withdrawn in Steery ({reason})"),
+    }
+}
+
+/// One long poll of the card `raised`: an HTTP failure is the error; what the request
+/// says is the [`Reading`].
+pub(crate) async fn reading(key: &str, raised: &Raised, pins: &[Pin]) -> Result<Reading> {
     let request: Value = http_json(
         "steery read",
         client()
@@ -485,16 +527,19 @@ async fn read(key: &str, raised: &Raised, pins: &[Pin]) -> Result<Option<(String
             .header("Steery-Workspace", &raised.workspace),
     )
     .await?;
-    match request["status"].as_str() {
-        Some("open") => Ok(None),
-        Some("responded") => verify(raised, &request, pins).map(Some),
+    Ok(match request["status"].as_str() {
+        Some("open") => Reading::Open,
+        Some("responded") => match verify(raised, &request, pins) {
+            Ok((word, by)) => Reading::Verified(word, by),
+            Err(e) => Reading::Unverified(e),
+        },
         Some("withdrawn") => match request["reason"].as_str() {
             // This read reopened it.
-            Some("session_did_not_poll") => Ok(None),
-            reason => bail!("withdrawn in Steery ({})", reason.unwrap_or("no reason")),
+            Some("session_did_not_poll") => Reading::Open,
+            reason => Reading::Withdrawn(reason.unwrap_or("no reason").to_owned()),
         },
         other => bail!("unknown request status {other:?}"),
-    }
+    })
 }
 
 /// Check a responded request against what we raised and the pinned signers; the

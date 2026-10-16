@@ -194,6 +194,9 @@ pub enum Via {
         escalate: Escalate,
         /// Signers whose signatures are accepted.
         pins: Vec<Pin>,
+        /// The outpost's name, when not the box's hostname (`steery::outpost`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outpost: Option<String>,
     },
     Telegram,
     Slack,
@@ -219,29 +222,22 @@ impl Via {
 }
 
 /// How a Steery channel escalates an ask.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Escalate {
-    /// A throw to the service's agent conversation, connected once by the person.
-    /// `reach`: how that agent runs `subweave` on this box, `ssh <reach> sudo -n subweave`.
-    Session { reach: String },
+    /// A throw to the service's agent conversation, connected once by the person; the
+    /// agent works through the box's outpost.
+    Session,
     /// A card with the answers as buttons, signed by the person.
     Card,
 }
 
-/// `--escalate`: the mode, before its `--reach` is joined to it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Session,
-    Card,
-}
-
-impl FromStr for Mode {
+impl FromStr for Escalate {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self> {
         match s {
-            "session" => Ok(Mode::Session),
-            "card" => Ok(Mode::Card),
+            "session" => Ok(Escalate::Session),
+            "card" => Ok(Escalate::Card),
             _ => bail!("--escalate is session or card, not {s:?}"),
         }
     }
@@ -357,15 +353,15 @@ pub async fn close(ch: &Channel, sent: &Sent) -> Result<()> {
 }
 
 /// Add a channel and save it. Steery reads the workspace and its signers with the key,
-/// prints them, and pins the phone and mac signers. `mode` and `reach` are Steery's:
-/// `session`, the default, needs `reach`.
+/// prints them, and pins the phone and mac signers. `escalate` (default `session`) and
+/// `outpost` are Steery's.
 pub async fn add(
     kind: ChannelKind,
     target: Option<String>,
     level: Option<Kind>,
     secret: Option<String>,
-    mode: Option<Mode>,
-    reach: Option<String>,
+    escalate: Option<Escalate>,
+    outpost: Option<String>,
 ) -> Result<Channel> {
     let target = target
         .map(|t| t.trim().to_owned())
@@ -373,11 +369,11 @@ pub async fn add(
     let secret = secret
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty());
-    let reach = reach
-        .map(|r| r.trim().to_owned())
-        .filter(|r| !r.is_empty());
-    if kind != ChannelKind::Steery && (mode.is_some() || reach.is_some()) {
-        bail!("--escalate and --reach are for steery channels");
+    let outpost = outpost
+        .map(|o| o.trim().to_owned())
+        .filter(|o| !o.is_empty());
+    if kind != ChannelKind::Steery && (escalate.is_some() || outpost.is_some()) {
+        bail!("--escalate and --outpost are for steery channels");
     }
     let need_target = |what: &str| -> Result<()> {
         if target.is_none() {
@@ -402,17 +398,17 @@ pub async fn add(
             if target.is_some() {
                 bail!("steery takes no target: the workspace comes from the key");
             }
-            let escalate = match (mode.unwrap_or(Mode::Session), reach) {
-                (Mode::Session, Some(reach)) => Escalate::Session { reach },
-                (Mode::Session, None) => bail!(
-                    "steery --escalate session needs --reach USER@HOST: how an agent elsewhere runs subweave on this box, as ssh USER@HOST sudo -n subweave"
-                ),
-                (Mode::Card, None) => Escalate::Card,
-                (Mode::Card, Some(_)) => bail!("--reach is for --escalate session"),
-            };
+            if let Some(name) = &outpost {
+                steery::outpost::check_name(name).map_err(|why| anyhow!("--outpost: {why}"))?;
+            }
             need_secret("a Steery key")?;
             let (workspace, pins) = steery::enroll(secret.as_deref().unwrap_or_default()).await?;
-            (Via::Steery { escalate, pins }, Some(workspace))
+            let via = Via::Steery {
+                escalate: escalate.unwrap_or(Escalate::Session),
+                pins,
+                outpost,
+            };
+            (via, Some(workspace))
         }
         ChannelKind::Telegram => {
             need_target("the chat id")?;
@@ -560,7 +556,7 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::rename(&tmp, path).with_context(|| format!("write {}", path.display()))
 }
 
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     std::fs::read_to_string("/etc/hostname")
         .ok()
         .or_else(|| {

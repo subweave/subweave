@@ -1,6 +1,9 @@
 //! `subweave mcp`: an MCP server on stdin and stdout, for an agent that settles this box's
 //! escalations. One JSON-RPC message per line; stdout carries nothing else. Each tool
 //! goes through the code path of its CLI command, `by` = `mcp:<client name>`.
+//!
+//! The tool list, its handlers and each tool's [`Policy`] are the one implementation the
+//! box's Steery outpost offers too (`daemon::outpost`).
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -15,6 +18,7 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 use super::{act, drill, inbox, known, ps, task, weavefile};
+use crate::channel::steery::outpost::Policy;
 use crate::daemon::journal::{self, Ask};
 use crate::paths;
 use crate::weave::Class;
@@ -77,7 +81,7 @@ pub async fn run() -> Result<ExitCode> {
                 let (out, by) = (out.clone(), by.clone());
                 // `wait_ask` blocks; other requests are answered meanwhile.
                 calls.spawn(async move {
-                    let reply = tool_result(call(&name, args, &by).await);
+                    let reply = call_tool(name, args, by).await;
                     send(&out, result(id, reply)).await;
                 });
             }
@@ -126,7 +130,25 @@ fn tool_result(r: Result<Value>) -> Value {
     }
 }
 
-fn tools() -> Vec<Value> {
+/// Calls tool `name` as `by`: its MCP `CallToolResult`.
+pub(crate) async fn call_tool(name: String, args: Value, by: String) -> Value {
+    tool_result(call(&name, args, &by).await)
+}
+
+/// What a tool needs before the outpost runs it. Free tools go through the weave's own
+/// rules (a signed escalation still needs its signed card); `task` and `weave_change`
+/// can put new commands or coder instructions on the box, so the person's Go comes first.
+pub(crate) fn policy(tool: &str) -> Option<Policy> {
+    match tool {
+        "inbox" | "wait_ask" | "status" | "log" | "weave" | "skill" | "answer" | "known"
+        | "forget_known" | "known_release" | "do" | "drill" => Some(Policy::Free),
+        "task" | "weave_change" => Some(Policy::Gated),
+        _ => None,
+    }
+}
+
+/// Every tool, in the order `tools/list` and the outpost give them.
+pub(crate) fn tools() -> Vec<Value> {
     let none = json!({"type": "object", "properties": {}, "additionalProperties": false});
     let service = json!({"type": "string", "description": "The service's name"});
     let goal = json!({"type": "string", "description": "A quoted goal over a LINES fact"});

@@ -1,5 +1,5 @@
-//! What an escalation target reads: the ask as its card shows it, the commands that act
-//! on it from where the target runs, and the escalation skill.
+//! What an escalation target reads: the ask as its card shows it, how to act on it from
+//! where the target runs, and the escalation skill.
 
 use std::fmt::Write as _;
 
@@ -11,14 +11,10 @@ pub const SKILL: &str = include_str!("../../skills/escalation/SKILL.md");
 /// Steery's limit on a throw's body.
 const MAX: usize = 64 * 1024;
 
-/// The escalation of `msg` as Markdown. `reach`: how a target elsewhere runs `subweave`
-/// on this box (`ssh <reach> sudo -n subweave …`); `None` on the box itself. `skill`:
-/// the skill whole, else one line that points at `subweave skill`.
-pub(crate) fn body(msg: &Message, reach: Option<&str>, skill: bool) -> String {
-    let sw = match reach {
-        Some(r) => format!("ssh {r} sudo -n subweave"),
-        None => "subweave".to_owned(),
-    };
+/// The escalation of `msg` as Markdown. `outpost`: the Steery outpost a target elsewhere
+/// calls this box's tools through; `None` on the box itself, where `subweave` runs.
+/// `skill`: the skill whole, else one line that points at it.
+pub(crate) fn body(msg: &Message, outpost: Option<&str>, skill: bool) -> String {
     let n = msg.ask.as_ref().map_or(0, |a| a.n);
     let mut out = format!(
         "# Escalation #{n}: {}\n\n**{}** on **{}** escalates: code, the decider and the coder did not settle it.\n\n",
@@ -34,14 +30,26 @@ pub(crate) fn body(msg: &Message, reach: Option<&str>, skill: bool) -> String {
         }
     }
     let service = &msg.service;
-    let _ = write!(
-        out,
-        "\n\nCommands:\n- `{sw} inbox`: the open escalations\n- `{sw} answer {n} <word> --note \"…\"`: settle this one\n- `{sw} log {service}`: what the ladder tried\n- `{sw} weave {service}`: the running weave and its ARGs\n- MCP: `{sw} mcp`\n\n"
-    );
+    match outpost {
+        None => {
+            let _ = write!(
+                out,
+                "\n\nCommands:\n- `subweave inbox`: the open escalations\n- `subweave answer {n} <word> --note \"…\"`: settle this one\n- `subweave log {service}`: what the ladder tried\n- `subweave weave {service}`: the running weave and its ARGs\n- MCP: `subweave mcp`\n\n"
+            );
+        }
+        Some(o) => {
+            let _ = write!(
+                out,
+                "\n\nTools: this box is the Steery outpost `{o}`. Read its tools' schemas with `outposts_get` (`name: \"{o}\"`), then call each with `invocations_create` (`outpost: \"{o}\"`, `tool`, `arguments`):\n- `inbox`: the open escalations\n- `answer` (`service: \"{service}\"`, `n: {n}`, `word`, `note`): settle this one\n- `log` (`service: \"{service}\"`): what the ladder tried\n- `weave` (`service: \"{service}\"`): the running weave and its ARGs\n- `task` and `weave_change` run only after the person's Go on Steery: the invocation waits for it.\n\n"
+            );
+        }
+    }
     if skill {
         out.push_str(SKILL);
+    } else if outpost.is_some() {
+        out.push_str("Read the escalation skill first: the outpost's `skill` tool.\n");
     } else {
-        let _ = writeln!(out, "Read the escalation skill first: `{sw} skill`.");
+        out.push_str("Read the escalation skill first: `subweave skill`.\n");
     }
     if out.len() > MAX {
         let mut end = MAX - 16;

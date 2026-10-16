@@ -14,6 +14,7 @@ pub(crate) mod journal;
 mod learned;
 pub(crate) mod memory;
 mod observe;
+mod outpost;
 mod parts;
 mod repair;
 mod registry;
@@ -135,6 +136,8 @@ pub async fn run() -> Result<()> {
     });
     let (answers_tx, mut answers_rx) = mpsc::unbounded_channel();
     tokio::spawn(asks::poll_loop(shared.clone(), answers_tx));
+    let (stop_outpost, outpost_stop) = tokio::sync::watch::channel(None);
+    let outpost = tokio::spawn(outpost::keep(shared.clone(), outpost_stop));
     let mut d = Daemon {
         shared,
         tasks: BTreeMap::new(),
@@ -172,6 +175,9 @@ pub async fn run() -> Result<()> {
         d.keep();
         heartbeat();
     }
+    // Each call the outpost has in hand is reported failed before the daemon goes.
+    stop_outpost.send_replace(Some("the daemon stopped"));
+    let _ = tokio::time::timeout(Duration::from_secs(10), outpost).await;
     for (_, t) in std::mem::take(&mut d.tasks) {
         t.handle.abort();
         let _ = t.handle.await;

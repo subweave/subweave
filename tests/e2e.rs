@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use axum::Router;
 use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Map, Value, json};
@@ -37,8 +37,13 @@ const TG_PERSON: &str = "e2e_person";
 const SLACK_TOKEN: &str = "xoxb-e2e-4d1f";
 const SLACK_CHANNEL: &str = "C0E2E0001";
 const MAIL_TO: &str = "ops@e2e.test";
-/// How an agent elsewhere runs subweave on the toy's box.
-const REACH: &str = "root@box-e2e";
+/// The name the box's Steery outpost offers its tools under.
+const OUTPOST: &str = "box-e2e";
+/// The Steery key that invokes the outpost's tools, and its person's handle.
+const CALLER_KEY: &str = "0199f3a0-5a6b-7c8d-9e0f-1a2b3c4d5e6f";
+const CALLER: &str = "e2e";
+/// Why a weave change through the outpost.
+const OUTPOST_WHY: &str = "rotate twice as rarely";
 /// Lines of the toy's event log: a kind the weave knows normal, a routine kind the model
 /// learns, a kind a person says is trouble, and one the model calls trouble that the
 /// person's answer says is normal.
@@ -88,6 +93,14 @@ struct Steery {
     requests: std::collections::BTreeMap<String, Value>,
     /// Sessions that answer 404 to the next throw naming them.
     gone: Vec<String>,
+    /// Each `PUT /v1/outposts` body.
+    outposts: Vec<Value>,
+    /// The event stream's frames, oldest first: (seq of a log entry, the frame).
+    frames: Vec<(Option<i64>, String)>,
+    /// Each `POST /v1/invocations/{id}/report`: (id, body).
+    reports: Vec<(String, Value)>,
+    /// Event streams open now.
+    streams: usize,
 }
 
 #[derive(Clone)]
@@ -164,6 +177,16 @@ impl Mock {
 
     /// The person presses `word` on card `id`, signed by the pinned phone.
     fn respond(&self, id: &str, word: &str) {
+        self.sign(id, word, &signing_key());
+    }
+
+    /// `word` on card `id`, signed by a key nobody pinned, claiming the pinned signer.
+    fn forge(&self, id: &str, word: &str) {
+        let other = p256::ecdsa::SigningKey::from_slice(&[0x07; 32]).expect("a P-256 scalar");
+        self.sign(id, word, &other);
+    }
+
+    fn sign(&self, id: &str, word: &str, key: &p256::ecdsa::SigningKey) {
         use p256::ecdsa::signature::Signer as _;
         use subweave::channel::steery;
         let mut s = self.steery();
@@ -180,7 +203,7 @@ impl Mock {
             "neutral",
             at,
         );
-        let signature: p256::ecdsa::Signature = signing_key().sign(message.as_bytes());
+        let signature: p256::ecdsa::Signature = key.sign(message.as_bytes());
         r["status"] = json!("responded");
         r["response"] = json!({
             "answer": answer,
@@ -189,6 +212,50 @@ impl Mock {
             "at": at,
             "signature": URL_SAFE_NO_PAD.encode(signature.to_der().as_bytes()),
         });
+    }
+
+    /// An `invocation.sent` on the event stream: `tool` of outpost `outpost` with
+    /// `arguments`, for `holder`, due in 120 s.
+    fn invoke(&self, id: &str, outpost: &str, holder: &str, tool: &str, arguments: &Value) {
+        let deadline = jiff::Timestamp::from_second(jiff::Timestamp::now().as_second() + 120).unwrap();
+        let detail = json!({
+            "id": id,
+            "outpost": outpost,
+            "holder": holder,
+            "tool": tool,
+            "arguments": arguments,
+            "deadline": deadline.to_string(),
+            "caller": {"person": SIGNER, "handle": CALLER, "key": CALLER_KEY},
+        });
+        let mut s = self.steery();
+        let seq = s.frames.iter().filter_map(|(seq, _)| *seq).max().unwrap_or(0) + 1;
+        let event = json!({
+            "seq": seq,
+            "at": jiff::Timestamp::now().to_string(),
+            "kind": "invocation.sent",
+            "workspace": WORKSPACE,
+            "subject_id": id,
+            "subject": {"kind": "invocation", "name": format!("{tool} on {outpost}")},
+            "by": CALLER_KEY,
+            "detail": detail,
+        });
+        s.frames.push((Some(seq), format!("id: {seq}\nevent: invocation.sent\ndata: {event}\n\n")));
+    }
+
+    /// `end` on the event stream: the stream closes, and says whether to come back.
+    fn end(&self, reconnect: bool, reason: &str) {
+        let data = json!({"reconnect": reconnect, "reason": reason});
+        self.steery().frames.push((None, format!("event: end\ndata: {data}\n\n")));
+    }
+
+    /// The reports on invocation `id`, oldest first.
+    fn reports(&self, id: &str) -> Vec<Value> {
+        self.steery()
+            .reports
+            .iter()
+            .filter(|(i, _)| i == id)
+            .map(|(_, r)| r.clone())
+            .collect()
     }
 
     /// The bodies of Telegram `method` calls.
@@ -285,7 +352,7 @@ async fn steery_me(headers: HeaderMap) -> (StatusCode, axum::Json<Value>) {
     if !steery_ok(&headers) {
         return (StatusCode::UNAUTHORIZED, axum::Json(json!({})));
     }
-    let me = json!({"workspace": {"id": WORKSPACE, "name": "e2e"}});
+    let me = json!({"workspace": {"id": WORKSPACE, "name": "e2e", "head": 0}});
     (StatusCode::OK, axum::Json(me))
 }
 
@@ -371,6 +438,113 @@ async fn request_get(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// `PUT /v1/outposts`: kept, and answered as the outpost, put now.
+async fn outpost_put(State(m): State<Mock>, headers: HeaderMap, body: String) -> (StatusCode, axum::Json<Value>) {
+    if !steery_ok(&headers) {
+        return (StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+    }
+    let p: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    m.steery().outposts.push(p.clone());
+    let now = jiff::Timestamp::now().to_string();
+    let outpost = json!({
+        "id": "0199f3a0-6b7c-7d8e-9f0a-1b2c3d4e5f60",
+        "name": p["name"],
+        "key": CALLER_KEY,
+        "person": SIGNER,
+        "online": true,
+        "tools": p["tools"],
+        "created_at": now,
+        "updated_at": now,
+    });
+    (StatusCode::OK, axum::Json(outpost))
+}
+
+/// `POST /v1/invocations/{id}/report`: kept, and answered as the invocation; a waiting
+/// one lives 24 h.
+async fn invocation_report(
+    State(m): State<Mock>,
+    UrlPath(id): UrlPath<String>,
+    headers: HeaderMap,
+    body: String,
+) -> (StatusCode, axum::Json<Value>) {
+    if !steery_ok(&headers) {
+        return (StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+    }
+    let r: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    m.steery().reports.push((id.clone(), r.clone()));
+    let state = match (r.get("waiting"), r.get("result")) {
+        (Some(_), _) => "waiting",
+        (_, Some(_)) => "done",
+        _ => "failed",
+    };
+    let deadline = jiff::Timestamp::from_second(jiff::Timestamp::now().as_second() + 86_400).unwrap();
+    let row = json!({"id": id, "state": state, "request": r["waiting"], "deadline": deadline.to_string()});
+    (StatusCode::OK, axum::Json(row))
+}
+
+/// `GET /v1/events` as a stream: the log entries after `Last-Event-ID`, then each frame
+/// as it comes; a comment after 5 s of nothing. An `end` frame closes it.
+async fn events(State(m): State<Mock>, headers: HeaderMap) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if !steery_ok(&headers) {
+        return (StatusCode::UNAUTHORIZED, axum::Json(json!({}))).into_response();
+    }
+    let after: i64 = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    /// Counts the stream open until the server drops it.
+    struct Open(Mock);
+    impl Drop for Open {
+        fn drop(&mut self) {
+            self.0.steery().streams -= 1;
+        }
+    }
+    let (queue, seen) = {
+        let mut s = m.steery();
+        s.streams += 1;
+        let queue: std::collections::VecDeque<String> = s
+            .frames
+            .iter()
+            .filter(|(seq, _)| seq.is_some_and(|q| q > after))
+            .map(|(_, f)| f.clone())
+            .collect();
+        (queue, s.frames.len())
+    };
+    let stream = futures_util::stream::unfold(
+        (Open(m), queue, seen, false),
+        |(open, mut queue, mut seen, ended)| async move {
+            if ended {
+                return None;
+            }
+            let mut quiet = 0;
+            loop {
+                if let Some(frame) = queue.pop_front() {
+                    let end = frame.starts_with("event: end");
+                    return Some((Ok::<_, std::convert::Infallible>(frame), (open, queue, seen, end)));
+                }
+                {
+                    let s = open.0.steery();
+                    queue.extend(s.frames[seen..].iter().map(|(_, f)| f.clone()));
+                    seen = s.frames.len();
+                }
+                if queue.is_empty() {
+                    quiet += 1;
+                    if quiet == 50 {
+                        return Some((Ok(": steery\n\n".to_string()), (open, queue, seen, false)));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        },
+    );
+    axum::response::Response::builder()
+        .header("content-type", "text/event-stream")
+        .body(axum::body::Body::from_stream(stream))
+        .unwrap()
 }
 
 fn offers_tool(body: &str, name: &str) -> bool {
@@ -1695,7 +1869,9 @@ fn both(o: &Output) -> String {
 /// Escalation targets: an agent channel settles an escalation; Steery session mode
 /// connects once, sends straight to the stored session, and connects again when it is
 /// gone; an agent changes the weave, a goal at once and a rule on the person's signed
-/// answer only; `stats` counts who settled what.
+/// answer only; `stats` counts who settled what; the box's Steery outpost runs free
+/// calls once and gated ones on a verified signed Go, and stops for another holder and
+/// a revoked key.
 async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
     let dir = &b.dir;
     let d = dir.display();
@@ -1791,27 +1967,29 @@ async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
     // 9c. Steery session mode: the first escalation connects a conversation, the next
     // goes straight to it, and a gone session connects again.
     eprintln!("9c steery session");
-    let o = b.sw_stdin(&["channel", "add", "steery"], STEERY_KEY).await;
+    let o = b
+        .sw_stdin(&["channel", "add", "steery", "--outpost", "Bad_Name"], STEERY_KEY)
+        .await;
     assert!(
-        !o.status.success() && both(&o).contains("needs --reach USER@HOST"),
+        !o.status.success() && both(&o).contains("--outpost: an outpost's name is 2–40"),
         "{}",
         both(&o)
     );
     let o = b
-        .sw_stdin(&["channel", "add", "steery", "--reach", REACH], STEERY_KEY)
+        .sw_stdin(&["channel", "add", "steery", "--outpost", OUTPOST], STEERY_KEY)
         .await;
     let out = both(&o);
     assert!(o.status.success(), "{out}");
     assert!(
         out.contains(&format!(
-            "added steery: steery {WORKSPACE}, level ask, escalates session via {REACH}"
+            "added steery: steery {WORKSPACE}, level ask, escalates session, outpost {OUTPOST}"
         )),
         "{out}"
     );
     assert!(out.lines().any(|l| l.starts_with("phone") && l.ends_with(&format!("{SIGNER_NAME}  pinned"))), "{out}");
     let out = b.ok(&["channel", "ls"]).await;
     assert!(
-        out.contains(&format!("escalates session via {REACH}  signers: {SIGNER_NAME}")),
+        out.contains(&format!("escalates session  outpost {OUTPOST}  signers: {SIGNER_NAME}")),
         "{out}"
     );
     let connected = || -> Option<Value> {
@@ -1828,9 +2006,10 @@ async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
     assert!(throw.get("session").is_none() && throw.get("act").is_none(), "{throw}");
     let text = throw["body"].as_str().unwrap_or_default();
     for want in [
-        format!("`ssh {REACH} sudo -n subweave answer {n1} <word> --note"),
-        format!("`ssh {REACH} sudo -n subweave log toy`"),
-        format!("`ssh {REACH} sudo -n subweave mcp`"),
+        format!("this box is the Steery outpost `{OUTPOST}`"),
+        format!("`outposts_get` (`name: \"{OUTPOST}\"`)"),
+        format!("`answer` (`service: \"toy\"`, `n: {n1}`, `word`, `note`)"),
+        "`task` and `weave_change` run only after the person's Go on Steery".to_string(),
         "# Subweave escalation".to_string(),
     ] {
         assert!(text.contains(&want), "the throw lacks {want:?}:\n{text}");
@@ -2036,7 +2215,7 @@ async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
     let text = t5["body"].as_str().unwrap_or_default();
     assert!(
         t5["session"] == s2
-            && text.contains(&format!("Read the escalation skill first: `ssh {REACH} sudo -n subweave skill`."))
+            && text.contains("Read the escalation skill first: the outpost's `skill` tool.")
             && !text.contains("# Subweave escalation"),
         "{t5}"
     );
@@ -2119,6 +2298,158 @@ async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
     for want in ["agent 2", "mcp 1", "steery 1", "withdrawn "] {
         assert!(row.contains(want), "stats lacks {want:?}:\n{out}");
     }
+
+    // 9f. The outpost: the daemon offers `subweave mcp`'s tools through Steery; a free
+    // call runs once; a gated one only on a verified signed Go; another holder, then a
+    // revoked key, stops it.
+    eprintln!("9f outpost");
+    let put = b
+        .until("the outpost put", 20, || {
+            mock.steery().outposts.iter().find(|p| p["name"] == OUTPOST).cloned()
+        })
+        .await;
+    let holder = put["holder"].as_str().unwrap_or_default().to_string();
+    assert!(uuid::Uuid::parse_str(&holder).is_ok(), "{put}");
+    let mut mcp = Mcp::start(b);
+    mcp.request(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "e2e-agent", "version": "1"}}),
+    )
+    .await;
+    let listed = mcp.request("tools/list", json!({})).await;
+    drop(mcp);
+    assert_eq!(put["tools"], listed["result"]["tools"], "the outpost offers subweave mcp's tools, in order");
+    b.until("the outpost's stream", 20, || (mock.steery().streams > 0).then_some(()))
+        .await;
+
+    // Free: `status`, reported with its result.
+    let status = "0199f3a0-7a01-7c00-8000-000000000001";
+    mock.invoke(status, OUTPOST, &holder, "status", &json!({}));
+    let r = b
+        .until("the status report", 20, || mock.reports(status).into_iter().next())
+        .await;
+    let text = r["result"]["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.contains("\"service\": \"toy\"") && r["result"]["isError"].is_null(), "{r}");
+
+    // Free: `answer` on an open escalation; the journal has it, by the caller. The same
+    // event again runs nothing.
+    let n = b.rotate_ask().await;
+    let answer = "0199f3a0-7a01-7c00-8000-000000000002";
+    let args = json!({"service": "toy", "n": n, "word": "yes", "note": "the outpost answers"});
+    mock.invoke(answer, OUTPOST, &holder, "answer", &args);
+    let line = b.answered(n, 20).await;
+    assert!(line["text"] == "yes" && line["by"] == format!("outpost:{CALLER}"), "{line}");
+    b.until("the answer report", 20, || mock.reports(answer).into_iter().next())
+        .await;
+    mock.invoke(answer, OUTPOST, &holder, "answer", &args);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(mock.reports(answer).len(), 1, "the re-sent invocation was reported again");
+    assert_eq!(b.lines("answer", |l| l["n"] == n).len(), 1, "the re-sent invocation ran again");
+    b.holds(&["installed", "running", "rotated"], 30).await;
+
+    // Gated: `weave_change` raises a signed card whose payload is the exact call.
+    let before = std::fs::read_to_string(svc_dir.join("Weavefile")).unwrap();
+    let next = before.replace("SINCE(rotate) < 2h", "SINCE(rotate) < 3h");
+    assert_ne!(next, before);
+    let change = json!({"service": "toy", "weavefile": next, "why": OUTPOST_WHY});
+    let raised = |id: &'static str| {
+        mock.invoke(id, OUTPOST, &holder, "weave_change", &change);
+        b.until("the gated card", 20, move || {
+            mock.posts("/v1/requests").into_iter().find(|r| r["payload"]["id"] == id)
+        })
+    };
+    let forged = "0199f3a0-7a01-7c00-8000-000000000003";
+    let card = raised(forged).await;
+    assert_eq!(
+        card["payload"],
+        json!({"id": forged, "outpost": OUTPOST, "tool": "weave_change", "arguments": change}),
+        "{card}"
+    );
+    assert_eq!(card["assign"]["kind"], "mine", "{card}");
+    assert_eq!(card["title"], format!("Run «weave_change» on «{OUTPOST}»?"), "{card}");
+    assert_eq!(
+        card["input"][0]["options"],
+        json!([
+            {"id": "go", "label": "Go", "stance": "neutral"},
+            {"id": "no", "label": "Decline", "stance": "rejection"},
+        ]),
+        "{card}"
+    );
+    let waiting = b
+        .until("the waiting report", 20, || mock.reports(forged).into_iter().next())
+        .await;
+    assert_eq!(waiting["waiting"], card["id"], "{waiting}");
+    // A Go signed by no pinned key is refused, and changes nothing.
+    mock.forge(card["id"].as_str().unwrap(), "go");
+    let failed = b
+        .until("the forged Go's report", 20, || mock.reports(forged).get(1).cloned())
+        .await;
+    assert!(
+        failed["failed"].as_str().is_some_and(|w| w.starts_with("the answer did not verify")),
+        "{failed}"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(std::fs::read_to_string(svc_dir.join("Weavefile")).unwrap(), before);
+    let applied_head = format!("weave changed by outpost:{CALLER}: {OUTPOST_WHY}");
+    assert!(b.lines("note", |l| l["text"].as_str().is_some_and(|t| t.starts_with(&applied_head))).is_empty());
+    // The pinned phone's Go applies it once, re-sent or not.
+    let signed = "0199f3a0-7a01-7c00-8000-000000000004";
+    let card = raised(signed).await;
+    b.until("the waiting report", 20, || mock.reports(signed).into_iter().next())
+        .await;
+    mock.respond(card["id"].as_str().unwrap(), "go");
+    let applied = b.note(&applied_head, 30).await;
+    assert_eq!(applied["text"], format!("{applied_head}; GOAL rotated changed"));
+    let done = b
+        .until("the signed Go's report", 20, || mock.reports(signed).get(1).cloned())
+        .await;
+    assert!(done["result"]["content"].is_array() && done["result"]["isError"].is_null(), "{done}");
+    assert_eq!(std::fs::read_to_string(svc_dir.join("Weavefile")).unwrap(), next);
+    mock.invoke(signed, OUTPOST, &holder, "weave_change", &change);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(mock.reports(signed).len(), 2, "the re-sent gated invocation was reported again");
+    let notes = b.lines("note", |l| l["text"].as_str().is_some_and(|t| t.starts_with(&applied_head)));
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    b.holds(&["installed", "running", "rotated"], 30).await;
+
+    // An invocation for another holder: another daemon holds the outpost; this one stops.
+    mock.invoke("0199f3a0-7a01-7c00-8000-000000000005", OUTPOST, "0199f3a0-7a01-7c00-8000-0000000000ff", "status", &json!({}));
+    b.note(&format!("outpost {OUTPOST} stopped: another daemon holds it"), 20).await;
+    b.until("the outpost's stream closed", 20, || (mock.steery().streams == 0).then_some(()))
+        .await;
+    let late = "0199f3a0-7a01-7c00-8000-000000000006";
+    mock.invoke(late, OUTPOST, &holder, "status", &json!({}));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(mock.reports(late).is_empty(), "a stopped outpost ran an invocation");
+
+    // A changed channel holds it again, with the same holder; `end {reconnect: false}`
+    // stops it and every channel hears why.
+    b.ok(&["channel", "rm", "steery"]).await;
+    let o = b
+        .sw_stdin(&["channel", "add", "steery", "--outpost", "e2e-two"], STEERY_KEY)
+        .await;
+    assert!(o.status.success(), "{}", both(&o));
+    let again = b
+        .until("the outpost put again", 20, || {
+            mock.steery().outposts.iter().find(|p| p["name"] == "e2e-two").cloned()
+        })
+        .await;
+    assert_eq!(again["holder"], holder.as_str(), "one holder per daemon start");
+    b.until("the outpost's stream again", 20, || (mock.steery().streams > 0).then_some(()))
+        .await;
+    mock.end(false, "this key was revoked");
+    b.until("the revoked warning", 20, || {
+        mock.hooks()
+            .into_iter()
+            .find(|h| h["kind"] == "warning" && h["card"]["title"] == "Steery revoked this box's key")
+    })
+    .await;
+    b.until("the outpost's stream closed for good", 20, || (mock.steery().streams == 0).then_some(()))
+        .await;
+    for t in mock.posts("/v1/throws") {
+        let body = t["body"].as_str().unwrap_or_default();
+        assert!(!body.contains("ssh ") && !body.contains("sudo -n"), "a throw says SSH: {body}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2169,6 +2500,9 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .route("/v1/throws/{id}", get(throw_get))
         .route("/v1/requests", post(request_create))
         .route("/v1/requests/{id}", get(request_get))
+        .route("/v1/outposts", put(outpost_put))
+        .route("/v1/events", get(events))
+        .route("/v1/invocations/{id}/report", post(invocation_report))
         .route("/repos/{org}/{repo}/releases", get(releases))
         .route("/telegram/{bot}/{method}", post(telegram))
         .route("/slack/chat.postMessage", post(slack_post))

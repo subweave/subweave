@@ -170,7 +170,7 @@ The daemon runs on the box it keeps. When the box dies, nothing runs.
 
 ## 10. Data on the box leaves it
 
-Facts, log lines and coder transcripts go to OpenRouter, then to TypeSafe and DeepSeek. Messages go to the channels: Steery, Telegram, Slack, email. An escalation goes to its targets, and an agent there reads the box with `subweave` as root.
+Facts, log lines and coder transcripts go to OpenRouter, then to TypeSafe and DeepSeek. Messages go to the channels: Steery, Telegram, Slack, email. An escalation goes to its targets; a Steery conversation reads the box through its outpost's tools, which run as root.
 
 - A Postgres error line can hold the values of a failed query.
 - The daemon removes each secret's exact value. A secret transformed (base64, URL-encoded) is not caught.
@@ -182,7 +182,7 @@ Facts, log lines and coder transcripts go to OpenRouter, then to TypeSafe and De
 - A task stops after 40 commands without passing its goal check.
 - Learned steps run again in code, through the code rules only: the quoted rules judged them once, when the coder wrote them.
 - Only Steery card answers are signed. A Telegram answer is as safe as the bot's chat.
-- An agent's answer is not signed: it is as safe as the agent, its model and the machine it runs on. An agent can run any action, give the coder a task, and change facts, parts, goals, actions, skills and `KNOWN` lines. A rule change waits for the person's signed answer on a Steery card.
+- An agent's answer is not signed: it is as safe as the agent, its model and the machine it runs on. An agent can run any action, give the coder a task, and change facts, parts, goals, actions, skills and `KNOWN` lines. A rule change waits for the person's signed answer on a Steery card. Through the outpost, a task or a weave change also waits for the person's signed Go.
 - The shell can read the daemon's files, channel and provider keys among them. The daemon replaces every key's value in what goes to a model, a channel or the journal; a key the coder re-encodes (base64, split) gets past that.
 - On this Mac, one toy task: the coder installed a page in 3 calls ($0.00046) and fixed a stopped server in 7 calls and 9 commands ($0.0040). No `DO` task has run on a real box.
 
@@ -223,3 +223,13 @@ A `<service>:<fact>` reference reads that fact's newest read on its own service 
 - The read is as old as that service's goal that reads it: `box:disk` under a goal `EVERY 5m` may be 5 minutes old.
 - One failed check of a goal there makes a goal here wait at once; a goal AFTER a goal of its own weave waits only once that goal fails.
 - References stay on one box: no service on another box is read.
+
+## 16. The outpost trusts Steery for free tools
+
+Any member of the Steery workspace, and Steery itself, can run the outpost's free tools ([The outpost](WEAVEFILE.md#the-outpost)): answer an escalation, run an action, teach a kind of line. Only `task` and `weave_change` wait for a signed Go, verified on the box.
+
+- The box compares Steery's deadline with its own clock. A clock behind may start a call Steery then expires.
+- The ids it ran live in memory: a daemon restarted does not know what the last one ran. Steery sends a call only to the `holder` that put the outpost last.
+- A gated call still open when the daemon stops waits on a card nobody reads; Steery withdraws it after 15 minutes.
+- `wait_ask` and every other call end at the invocation's deadline, 120 seconds unless the caller sets one.
+- Not run against a real Steery server: the e2e plays Steery from its spec.

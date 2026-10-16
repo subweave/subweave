@@ -15,7 +15,7 @@ pub(crate) mod known;
 mod learn;
 pub(crate) mod learned;
 pub(crate) mod log;
-mod mcp;
+pub(crate) mod mcp;
 mod plan;
 mod provider;
 mod ps;
