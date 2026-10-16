@@ -733,22 +733,27 @@ subweave channel test steery
 - An escalation goes to every channel that answers, and as a message to the rest, with the command that answers it: `subweave answer 3 yes`.
 - The first answer settles the escalation. The other channels show who answered.
 - A withdrawn escalation loses its buttons in `telegram`. Steery has no withdraw call: a request the daemon stops polling is withdrawn by Steery after 15 minutes.
-- `steery` cards: the daemon raises each card as a request with its own key, and reads the answer with a long poll, so the box needs no open port. The summary leads the card; its lines and facts sit under it. The answer is a signature from the person's device, which the daemon checks before it acts.
+- `steery` cards: the daemon raises each card as a request with its own key, and reads the answer with a long poll, so the box needs no open port. The summary leads the card; the card's lines sit under it. The answer is a signature from the person's device, which the daemon checks before it acts.
 - `heartbeat`: a service such as healthchecks.io alerts when the pings stop. That is the only alert when the whole box is down: see [LIMITS.md](LIMITS.md#9-one-box-no-failover).
 - On the person's computer, `subweave watch` shows every box's messages as system notifications.
 - Channel keys stay on the box in `/etc/subweave/channels.json`, mode 600. They never go to a model.
 
 ### Cards
 
-Each escalation on `telegram` or a `steery` card is a card, written in code from the weave's plain words:
+The daemon builds one card per escalation, in code, from the weave and the service's journal. Every channel renders that card: Steery cards and session words, Telegram, Slack, email, webhook (as JSON, under `card`), `subweave inbox`, MCP `inbox` and the dashboard. A card shows what the verdict read, never every fact:
 
 1. The title is the question: `Make JSON-RPC local only?`, `Can you make this true: reth runs its newest release?`.
-2. A short summary, two lines from the coder's first model: what happened, and what it means for the person. The card waits at most 20 seconds for it, then goes without. Without a coder the card has none.
-3. The lines in code: what does not hold, how the goal is checked, what the facts say now, what Subweave did or wants to do, and the rule's `BECAUSE` or the person's earlier `never`.
-4. The facts the goal reads.
-5. Buttons that name the move: `Run it`, `Fixed it, check again`, `Leave it for 1h`. `no` leaves the goal alone until its next check, at least an hour: `Leave it for 1d` on a goal checked `EVERY 1d`. The answer is still a word (`yes`, `no`, an action's name): `subweave answer`, MCP and the journal use the words.
+2. The goal that does not hold: its sentence, and its check (the expression, or the quoted question) with its window.
+3. The read set: each fact the condition reads, with its value and unit. A goal over a window shows the window, and the reads of each fact a window function takes. One that reads `LINES` shows the window's lines by kind (lines that differ only in numbers, ids and quoted values), each with its count, its newest line and what the box knows of it: `normal` or `trouble`, and who said so (the weave's `KNOWN`, the model, a person).
+4. The action picked or held: its button, what it does, its effects (`CHANGES`), and the rule that holds it with its `BECAUSE`, or the person's earlier `never`.
+5. A version change: each part read, running, newest and whether a security release waits, and the first lines of the newer releases' notes.
+6. An `UNDO`: the action it undoes. A drill: that it is a drill, and which.
+7. A short summary: at most 2 lines from the coder's first model that explain the verdict as given. It never decides whether the goal holds. The card waits at most 20 seconds for it; when it fails, is too long, or the model has none, the card goes without it. Without a coder, and on a signed escalation, the card has none.
+8. Buttons that name the move: `Run it`, `Fixed it, check again`, `Leave it for 1h`. `no` leaves the goal alone until its next check, at least an hour: `Leave it for 1d` on a goal checked `EVERY 1d`. The answer is still a word (`yes`, `no`, an action's name): `subweave answer`, MCP and the journal use the words.
 
-The summary's model call is journaled with its cost. The journal's `ask` line keeps the title and the lines in code, without the summary. On `steery`, the daemon accepts an answer only when the title, body, lines, facts and button labels the person signed are the ones it sent.
+A goal that waits on another (`AFTER`) does not escalate: it has no card.
+
+The summary's model call is journaled as a `summary` line, with its cost. The journal's `ask` line keeps the card without the summary. On `steery`, the daemon accepts an answer only when the title, body, lines and button labels the person signed are the ones it sent.
 
 ## Escalation
 
@@ -847,7 +852,7 @@ The journal is the service's state. The daemon folds each line into that state a
 - A `check` line of a goal that reads another service holds that service's facts too, as `<service>:<fact>`.
 - A `check` line holds the facts the goal read. A goal fails at its second failed check in a row; after one it is `suspect`.
 - A `command` line holds `output`: stdout and stderr, secrets redacted, the last 4 KB.
-- An `ask` line holds `text`, its title, `body`, what the channels got with it, `answers`, and `rule`, the rule that holds its action. The `gate` line before it names the rule and the escalation, `n`. `lines` are the window's lines of kinds not known normal: an answer with `known` teaches them.
+- An `ask` line holds `card`, the card everyone reads, without its summary, and `rule`, the rule that holds its action. The `gate` line before it names the rule and the escalation, `n`. `lines` are the window's lines of kinds not known normal: an answer with `known` teaches them. A `summary` line holds the summary's lines for escalation `n`, or in `text` why the card went without one.
 - `answer` settles escalation `n` with the word in `text`; `withdraw` closes it with no answer, `text` saying why. `sent` says which channel it went to and what that channel reads the answer by; `watch`, a Steery connect the daemon reads whatever becomes of the escalation; `unwatch`, that a channel has nothing more to read for it.
 - A `refused` line keeps an event the state did not allow under `refused`, and why in `text`: an answer to an escalation answered or withdrawn already, an unsigned answer to a signed one, a `wait` for a goal that holds (a hold ends a wait).
 - An action's run starts with an `action` line with no `ok`, `within` the seconds its goal has to hold and `on` the known trouble lines its goal failed on, and ends with one whose `ok` says whether the goal held within them. A run its loop's stop cut off ends with `stopped`, saying why, instead: it counts toward no `TRIES`. The start of an action with an `UNDO` names it in `undo`; the start of an undo's run names the action it undoes in `undoes`.

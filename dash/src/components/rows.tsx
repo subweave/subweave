@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import type { Kind, Line, Usage } from "../api";
+import { CardBody } from "./act";
 import { ago, clock, day, ms, modelName, time, tokens, usd, utc } from "../format";
 import type { Episode, Outcome, Step } from "../model";
 import { FactsTable, Glyph, type Shown } from "./ui";
@@ -23,6 +24,7 @@ const ICON: Record<Kind, ReactNode> = {
   refused: <path d="M6 1.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9ZM2.8 9.2l6.4-6.4" fill="none" />,
   message: <path d="M1.5 3h9v6h-9ZM1.5 3 6 6.5 10.5 3" fill="none" />,
   note: <circle cx="6" cy="6" r="1.8" />,
+  summary: <circle cx="6" cy="6" r="1.8" />,
 };
 
 /** Lines a model decided or did: violet (the Weavefile's "quoted means model"). */
@@ -251,15 +253,14 @@ function describe({ line: l }: Step): { main: ReactNode; tags?: ReactNode; more?
       return {
         main: (
           <>
-            <span className="t-amber">Escalation #{l.n}</span> {l.text}
+            <span className="t-amber">Escalation #{l.n}</span> {l.card?.title}
           </>
         ),
         tags: rule && <span className="tag tag-amber">{rule.rule}</span>,
         more: (
           <>
-            {l.body && <p className="row-sub">{l.body}</p>}
+            {l.card && <CardBody card={l.card} />}
             {rule?.command && <pre className="output">{rule.command}</pre>}
-            <Facts facts={l.facts} />
           </>
         ),
       };

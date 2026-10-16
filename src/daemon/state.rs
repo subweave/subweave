@@ -184,8 +184,8 @@ pub enum Kind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
     },
-    /// An escalation raised: `text` its title, `body` the rest of its card, `answers` the
-    /// words that settle it, `rule` the rule that holds its action, as written.
+    /// An escalation raised with the card everyone reads; `rule` the rule that holds its
+    /// action, as written.
     Ask {
         n: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -194,13 +194,7 @@ pub enum Kind {
         action: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rule: Option<String>,
-        text: String,
-        body: String,
-        facts: BTreeMap<String, String>,
-        answers: Vec<String>,
-        /// Answer word → its button label.
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        labels: BTreeMap<String, String>,
+        card: channel::Card,
         /// Only the person's signed answer on a Steery card settles it.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         signed: bool,
@@ -210,6 +204,16 @@ pub enum Kind {
         /// The drill that failed, on a drill's escalation: a yes runs it again.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         drill: Option<String>,
+    },
+    /// The summary model's lines for escalation `n`'s card; none when the card goes
+    /// without them, and `text` says why.
+    Summary {
+        n: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        lines: Vec<String>,
+        text: String,
     },
     /// Escalation `n` answered with the word `text`; `action` the action the word names,
     /// or `task` and `weave` for those escalations. `signed`: a signature from a pinned
@@ -407,6 +411,7 @@ impl Kind {
             Kind::Command { .. } => "command",
             Kind::Learn { .. } => "learn",
             Kind::Ask { .. } => "ask",
+            Kind::Summary { .. } => "summary",
             Kind::Answer { .. } => "answer",
             Kind::Withdraw { .. } => "withdraw",
             Kind::Sent { .. } => "sent",
@@ -434,6 +439,7 @@ impl Kind {
             | Kind::Command { goal, .. }
             | Kind::Learn { goal, .. }
             | Kind::Ask { goal, .. }
+            | Kind::Summary { goal, .. }
             | Kind::Answer { goal, .. }
             | Kind::Withdraw { goal, .. }
             | Kind::Message { goal, .. }
@@ -466,6 +472,7 @@ impl Kind {
             | Kind::Message { action, .. }
             | Kind::Note { action, .. } => action.as_deref(),
             Kind::Refused { refused, .. } => refused.action(),
+            Kind::Summary { .. } => None,
             Kind::Goals { .. }
             | Kind::Check { .. }
             | Kind::Verdict { .. }
@@ -489,7 +496,7 @@ impl Kind {
             | Kind::Gate { text, .. }
             | Kind::Command { text, .. }
             | Kind::Learn { text, .. }
-            | Kind::Ask { text, .. }
+            | Kind::Summary { text, .. }
             | Kind::Answer { text, .. }
             | Kind::Message { text, .. }
             | Kind::Note { text, .. }
@@ -505,6 +512,7 @@ impl Kind {
             | Kind::Watch { channel: text, .. }
             | Kind::Unwatch { channel: text, .. }
             | Kind::Action(Act::Stopped { stopped: text, .. }) => Some(text),
+            Kind::Ask { card, .. } => Some(&card.title),
             Kind::Action(Act::Ended { text, .. } | Act::Started { text, .. })
             | Kind::Drill { text, .. } => text.as_deref(),
             Kind::Goals { .. } | Kind::Check { .. } => None,
@@ -528,6 +536,7 @@ impl Kind {
     pub fn n(&self) -> Option<u64> {
         match self {
             Kind::Ask { n, .. }
+            | Kind::Summary { n, .. }
             | Kind::Answer { n, .. }
             | Kind::Withdraw { n, .. }
             | Kind::Sent { n, .. }
@@ -539,10 +548,10 @@ impl Kind {
         }
     }
 
-    /// `check`: the facts the goal read. `ask`: the facts shown to the person.
+    /// `check`: the facts the goal read.
     pub fn facts(&self) -> Option<&BTreeMap<String, String>> {
         match self {
-            Kind::Check { facts, .. } | Kind::Ask { facts, .. } => Some(facts),
+            Kind::Check { facts, .. } => Some(facts),
             _ => None,
         }
     }
@@ -568,17 +577,13 @@ impl Kind {
                     .flatten()
                     .for_each(|l| each(&mut l.text));
             }
-            Kind::Ask {
-                text,
-                body,
-                facts,
-                lines,
-                ..
-            } => {
-                each(text);
-                each(body);
-                facts.values_mut().for_each(&mut each);
+            Kind::Ask { card, lines, .. } => {
+                card.redact(f);
                 lines.iter_mut().for_each(&mut each);
+            }
+            Kind::Summary { lines, text, .. } => {
+                lines.iter_mut().for_each(&mut each);
+                each(text);
             }
             Kind::Verdict { text, .. } => each(text),
             Kind::Known { text, why, .. } => {
@@ -866,7 +871,7 @@ pub struct Escalation {
     pub action: Option<String>,
     /// The rule that holds the action, as written: the key of its `always` and `never`.
     pub rule: Option<String>,
-    pub card: Card,
+    pub card: channel::Card,
     pub signed: bool,
     /// The person whose job raised it: only a person answers it, and it is never
     /// withdrawn.
@@ -882,16 +887,6 @@ pub struct Escalation {
     /// The drill that failed, on a drill's escalation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drill: Option<String>,
-}
-
-/// What the person reads.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Card {
-    pub title: String,
-    pub body: String,
-    pub facts: BTreeMap<String, String>,
-    pub answers: Vec<String>,
-    pub labels: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1311,11 +1306,7 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
             goal,
             action,
             rule,
-            text,
-            body,
-            facts,
-            answers,
-            labels,
+            card,
             signed,
             lines,
             drill,
@@ -1330,13 +1321,7 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
                     goal: goal.clone(),
                     action: action.clone(),
                     rule: rule.clone(),
-                    card: Card {
-                        title: text.clone(),
-                        body: body.clone(),
-                        facts: facts.clone(),
-                        answers: answers.clone(),
-                        labels: labels.clone(),
-                    },
+                    card: card.clone(),
                     signed: *signed,
                     by: e.by.clone(),
                     ep: e.ep.clone(),
@@ -1363,11 +1348,9 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
             if esc.signed && !signed {
                 return Err(format!("#{n}: only a signed answer on Steery settles this"));
             }
-            if !esc.card.answers.contains(text) {
-                return Err(format!(
-                    "#{n} takes {}, not {text:?}",
-                    esc.card.answers.join(", ")
-                ));
+            let words = esc.card.words();
+            if !words.contains(text) {
+                return Err(format!("#{n} takes {}, not {text:?}", words.join(", ")));
             }
             esc.state = EscalationState::Answered {
                 word: text.clone(),
@@ -1381,6 +1364,14 @@ pub fn apply(s: &mut ServiceState, e: &Event) -> Result<(), String> {
             if let (Some(rule), Some(task)) = (rule, ep.and_then(|ep| s.tasks.get_mut(&ep))) {
                 task.approved.push(rule);
             }
+        }
+        // Whatever became of the escalation meanwhile: the card it went with.
+        Kind::Summary { n, lines, .. } => {
+            s.escalations
+                .get_mut(n)
+                .ok_or_else(|| format!("no escalation #{n}"))?
+                .card
+                .summary = lines.clone();
         }
         Kind::Withdraw { n, why, .. } => {
             open_mut(s, *n)?.state = EscalationState::Withdrawn {

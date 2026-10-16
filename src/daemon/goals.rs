@@ -133,8 +133,19 @@ impl LineKind {
 /// The kinds of line in the window of a goal that judges lines, in order of first
 /// appearance, with what the box knows of each.
 pub(crate) fn kinds(ctx: &Ctx, g: &Goal, s: Span) -> Vec<LineKind> {
+    kinds_of(ctx, g, ctx.w.judged_lines(g), s)
+}
+
+/// The kinds of line of the LINES `facts` in window `s`, with what the box knows of each
+/// for `g`.
+pub(crate) fn kinds_of<'a>(
+    ctx: &Ctx,
+    g: &Goal,
+    facts: impl Iterator<Item = &'a str>,
+    s: Span,
+) -> Vec<LineKind> {
     let mut by: IndexMap<String, LineKind> = IndexMap::new();
-    for f in ctx.w.judged_lines(g) {
+    for f in facts {
         for line in ctx.observe.lines(f, s) {
             let template = memory::template(&line);
             let k = by.entry(template.clone()).or_insert_with(|| LineKind {

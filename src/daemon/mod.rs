@@ -701,10 +701,10 @@ impl Daemon {
             host: self.shared.host.clone(),
             service: service.clone(),
             goal: esc.goal.clone(),
-            title: format!("#{n} answered {word} by {by}"),
-            text: format!("Ask #{n} is settled: {word}, by {by}."),
-            summary: Vec::new(),
-            facts: BTreeMap::new(),
+            card: channel::Card::note(
+                format!("#{n} answered {word} by {by}"),
+                vec![format!("Ask #{n} is settled: {word}, by {by}.")],
+            ),
             ask: None,
         };
         notify(msg, from);
@@ -821,7 +821,7 @@ pub(crate) fn notify(msg: Message, except: Option<String>) {
             if except.as_deref() == Some(ch.name.as_str()) {
                 continue;
             }
-            if let Err(e) = channel::send(&ch, &msg).await {
+            if let Err(e) = channel::send(&ch, &msg, &channel::always).await {
                 tracing::warn!(service = %msg.service, goal = msg.goal.as_deref(), channel = %ch.name, error = %format!("{e:#}"), "sending a message failed");
             }
         }
@@ -842,13 +842,10 @@ fn heartbeat() {
                 host: host.clone(),
                 service: "subweave".into(),
                 goal: None,
-                title: "tick".into(),
-                text: String::new(),
-                summary: Vec::new(),
-                facts: BTreeMap::new(),
+                card: channel::Card::note("tick", Vec::new()),
                 ask: None,
             };
-            if let Err(e) = channel::send(ch, &msg).await {
+            if let Err(e) = channel::send(ch, &msg, &channel::always).await {
                 tracing::warn!(channel = %ch.name, error = %format!("{e:#}"), "heartbeat failed");
             }
         }

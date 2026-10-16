@@ -109,8 +109,8 @@ pub async fn follow(service: &str, mut tail: Tail) -> Result<()> {
                 Kind::Check { goal, .. } => {
                     checked.insert(goal.clone());
                 }
-                Kind::Ask { n, answers, .. } => {
-                    let words = answers.join("|");
+                Kind::Ask { n, card, .. } => {
+                    let words = card.words().join("|");
                     println!(
                         "\n{service} waits for an answer: subweave answer {n} <{}>",
                         if words.is_empty() { "yes|no" } else { &words }

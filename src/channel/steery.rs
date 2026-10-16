@@ -26,6 +26,7 @@ use super::{
     Answer, Channel, Escalate, Kind, Message, Pin, Polled, Sent, Via, client, escalation,
     http_json, write_private,
 };
+use super::Open as AskOpen;
 use crate::paths;
 
 /// Read requests this long, so `poll` returns within about a minute.
@@ -33,8 +34,6 @@ const WAIT_SECS: u64 = 50;
 /// A round that reads only connect throws, which return at once, takes this long.
 const WATCH_SECS: u64 = 5;
 const CONTROL: &str = "answer";
-/// The longest fact value a field shows.
-const FACT_VALUE: usize = 500;
 
 /// What we raised, kept to check the server's copy against: everything the person reads
 /// before signing.
@@ -84,10 +83,10 @@ fn stance(word: &str) -> &'static str {
     }
 }
 
-/// A button word's label when the message carries none: info's `seen`, and older asks.
+/// A button word's label when the card carries none: info's `seen`.
 fn label(msg: &Message, word: &str) -> String {
-    if let Some(l) = msg.ask.as_ref().and_then(|a| a.labels.get(word)) {
-        return l.clone();
+    if let Some(b) = msg.card.buttons.iter().find(|b| b.word == word) {
+        return b.label.clone();
     }
     let mut c = word.chars();
     c.next()
@@ -104,7 +103,7 @@ fn one_line(s: &str) -> String {
 /// most 20 words. The summary's lines, then one that names the service and the box.
 fn body(msg: &Message) -> String {
     let mut out = String::new();
-    for s in &msg.summary {
+    for s in &msg.card.summary {
         out.push_str(&format!("- {}\n", one_line(s)));
     }
     let what = match msg.kind {
@@ -116,40 +115,24 @@ fn body(msg: &Message) -> String {
     out
 }
 
-/// Under the body: the card's lines, then the facts as fields.
+/// Under the body: the card's sentences.
 fn view(msg: &Message) -> Value {
-    let mut view = Vec::new();
     let lines: String = msg
-        .text
-        .lines()
+        .card
+        .sentences()
+        .iter()
         .filter(|l| !l.trim().is_empty())
         .map(|l| format!("- {}\n", one_line(l)))
         .collect();
-    if !lines.is_empty() {
-        view.push(json!({"kind": "markdown", "text": lines.trim_end()}));
+    if lines.is_empty() {
+        return json!([]);
     }
-    if !msg.facts.is_empty() {
-        let fields: Vec<Value> = msg
-            .facts
-            .iter()
-            .map(|(k, v)| {
-                // Steery refuses an empty field value; an empty fact is news too.
-                let v = match v.char_indices().nth(FACT_VALUE) {
-                    _ if v.trim().is_empty() => "empty".to_owned(),
-                    Some((i, _)) => format!("{}…", &v[..i]),
-                    None => v.clone(),
-                };
-                json!({"label": k, "value": v})
-            })
-            .collect();
-        view.push(json!({"kind": "fields", "fields": fields}));
-    }
-    Value::Array(view)
+    json!([{"kind": "markdown", "text": lines.trim_end()}])
 }
 
 /// An ask in session mode goes to the service's agent conversation; everything else,
 /// every ask in card mode and every signed ask, goes as a card.
-pub(super) async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
+pub(super) async fn send(ch: &Channel, msg: &Message, open: AskOpen<'_>) -> Result<Option<Sent>> {
     match (&ch.via, &msg.ask) {
         (
             Via::Steery {
@@ -157,7 +140,7 @@ pub(super) async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
                 ..
             },
             Some(ask),
-        ) if !ask.signed => session(ch, msg, reach).await,
+        ) if !ask.signed => session(ch, msg, reach, open).await,
         _ => card(ch, msg).await,
     }
 }
@@ -223,8 +206,8 @@ pub(super) fn is_connect(sent: &Sent) -> bool {
 /// The stored session takes the throw at once. With none, or one Steery no longer
 /// takes, a connect throw and a request let the person pick the conversation; when
 /// nobody's machine is online to take it, the ask goes as a card, so the person still
-/// hears.
-async fn session(ch: &Channel, msg: &Message, reach: &str) -> Result<Option<Sent>> {
+/// hears. `open` is read before each post: one settled meanwhile gets no more.
+async fn session(ch: &Channel, msg: &Message, reach: &str, open: AskOpen<'_>) -> Result<Option<Sent>> {
     let key = key(ch)?;
     let workspace = workspace(ch)?;
     if let Some(mut c) = connected(&msg.service) {
@@ -245,12 +228,16 @@ async fn session(ch: &Channel, msg: &Message, reach: &str) -> Result<Option<Sent
             None => forget_connected(&msg.service)?,
         }
     }
+    if !open() {
+        return Ok(None);
+    }
     let id = Uuid::now_v7().to_string();
     let throw = json!({"id": id, "body": escalation::body(msg, Some(reach), true)});
     // Bounced: nobody's machine can take it now. 404 or 409: Steery cannot hold it.
     // Either way the ask goes as a card, so the person still hears.
     match create_throw(key, workspace, &throw).await? {
         Some(t) if t["status"] != "bounced" => {}
+        _ if !open() => return Ok(None),
         _ => return card(ch, msg).await,
     }
     let request = Uuid::now_v7().to_string();
@@ -262,7 +249,7 @@ async fn session(ch: &Channel, msg: &Message, reach: &str) -> Result<Option<Sent
             .header("Steery-Workspace", workspace)
             .json(&json!({
                 "id": request,
-                "title": msg.title,
+                "title": msg.card.title,
                 "body": connect_body(msg),
                 "throw": id,
             })),
@@ -306,7 +293,7 @@ async fn create_throw(key: &str, workspace: &str, throw: &Value) -> Result<Optio
 /// The connect request's body: the summary's lines, then what the person does.
 fn connect_body(msg: &Message) -> String {
     let mut out = String::new();
-    for s in &msg.summary {
+    for s in &msg.card.summary {
         out.push_str(&format!("- {}\n", one_line(s)));
     }
     out.push_str(&format!(
@@ -364,7 +351,6 @@ async fn card(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
     let mut payload = json!({
         "service": msg.service,
         "host": msg.host,
-        "facts": msg.facts,
     });
     if let Some(goal) = &msg.goal {
         payload["goal"] = json!(goal);
@@ -373,7 +359,7 @@ async fn card(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
         payload["n"] = json!(ask.n);
     }
     let words: Vec<&str> = match &msg.ask {
-        Some(ask) => ask.answers.iter().map(String::as_str).collect(),
+        Some(_) => msg.card.buttons.iter().map(|b| b.word.as_str()).collect(),
         None => vec!["seen"],
     };
     let buttons: Vec<Button> = words
@@ -391,7 +377,7 @@ async fn card(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
     let raised = Raised {
         id: id.clone(),
         workspace: workspace.to_owned(),
-        title: msg.title.clone(),
+        title: msg.card.title.clone(),
         body: body(msg),
         payload,
         view: view(msg),

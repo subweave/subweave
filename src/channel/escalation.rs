@@ -22,15 +22,15 @@ pub(crate) fn body(msg: &Message, reach: Option<&str>, skill: bool) -> String {
     let n = msg.ask.as_ref().map_or(0, |a| a.n);
     let mut out = format!(
         "# Escalation #{n}: {}\n\n**{}** on **{}** escalates: code, the decider and the coder did not settle it.\n\n",
-        msg.title.trim(),
+        msg.card.title.trim(),
         msg.service,
         msg.host
     );
     out.push_str(&super::details(msg, true));
-    if let Some(ask) = &msg.ask {
+    if msg.ask.is_some() {
         out.push_str("\n\nAnswers:");
-        for w in &ask.answers {
-            let _ = write!(out, "\n- `{w}`: {}", ask.label(w));
+        for b in &msg.card.buttons {
+            let _ = write!(out, "\n- `{}`: {}", b.word, b.label);
         }
     }
     let service = &msg.service;

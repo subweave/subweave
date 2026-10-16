@@ -42,12 +42,14 @@ pub(crate) fn start(
         let _turn = turn.lock().await;
         let journal = shared.journal(&service);
         // Settled or withdrawn while it waited for its turn.
-        let open = lock(&journal)
-            .state()
-            .escalations
-            .get(&n)
-            .is_some_and(|e| e.is_open());
-        if !open {
+        let open = || {
+            lock(&journal)
+                .state()
+                .escalations
+                .get(&n)
+                .is_some_and(|e| e.is_open())
+        };
+        if !open() {
             return;
         }
         let dir = paths::service(&service);
@@ -86,6 +88,10 @@ pub(crate) fn start(
         let pid = child.id();
         if let Some(pid) = pid {
             lock(&shared.agents).insert(n, pid);
+            // Withdrawn while it started: the withdraw found no process to kill.
+            if !open() {
+                kill_group(pid);
+            }
         }
         let (out, out_task) = drain(child.stdout.take());
         let (err, err_task) = drain(child.stderr.take());

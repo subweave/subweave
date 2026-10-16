@@ -99,29 +99,30 @@ pub(super) async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
         "link_preview_options": {"is_disabled": true},
     });
     if let Some(ask) = &msg.ask {
-        let buttons = ask
-            .answers
+        let buttons = msg
+            .card
+            .buttons
             .iter()
-            .map(|word| {
-                let data = format!("{}:{word}", ask.n);
+            .map(|b| {
+                let data = format!("{}:{}", ask.n, b.word);
                 // Telegram's limit on callback data.
                 if data.len() > 64 {
-                    bail!("answer {word:?} is too long for a Telegram button");
+                    bail!("answer {:?} is too long for a Telegram button", b.word);
                 }
-                Ok(json!([{"text": ask.label(word), "callback_data": data}]))
+                Ok(json!([{"text": b.label, "callback_data": data}]))
             })
             .collect::<Result<Vec<_>>>()?;
         // One button per row: labels are short sentences.
         body["reply_markup"] = json!({"inline_keyboard": buttons});
     }
     let posted: Posted = call(token, "sendMessage", &body).await?;
-    let Some(ask) = &msg.ask else {
+    if msg.ask.is_none() {
         return Ok(None);
-    };
+    }
     let asked = Asked {
         chat: posted.chat.id,
         message: posted.message_id,
-        answers: ask.answers.clone(),
+        answers: msg.card.words(),
     };
     Ok(Some(Sent(serde_json::to_value(asked)?)))
 }
@@ -144,7 +145,8 @@ pub(super) async fn close(ch: &Channel, sent: &Sent) -> Result<()> {
 }
 
 /// One `getUpdates` long poll. A button press on an open ask's own message becomes an
-/// answer; every press is acknowledged so the button stops spinning.
+/// answer; a press for an ask that is no longer open is an answer too, which the daemon
+/// journals as refused. Every press is acknowledged so the button stops spinning.
 pub(super) async fn poll(ch: &Channel, open: &[(u64, Sent)]) -> Result<Vec<Answer>> {
     let token = token(ch)?;
     let asked: Vec<(u64, Asked)> = open
@@ -171,23 +173,26 @@ pub(super) async fn poll(ch: &Channel, open: &[(u64, Sent)]) -> Result<Vec<Answe
 
     let mut answers = Vec::new();
     for callback in updates.into_iter().filter_map(|u| u.callback_query) {
+        // (n, word, whether the ask is open on this message).
         let found = callback.data.as_deref().and_then(|data| {
             let (n, word) = data.split_once(':')?;
             let n: u64 = n.parse().ok()?;
             let posted = callback.message.as_ref()?;
-            asked
-                .iter()
-                .find(|(open_n, a)| {
-                    *open_n == n
-                        && a.chat == posted.chat.id
+            let mine = asked.iter().filter(|(open_n, _)| *open_n == n).collect::<Vec<_>>();
+            if mine.is_empty() {
+                return Some((n, word.to_owned(), false));
+            }
+            mine.iter()
+                .find(|(_, a)| {
+                    a.chat == posted.chat.id
                         && a.message == posted.message_id
                         && a.answers.iter().any(|w| w == word)
                 })
-                .map(|_| (n, word.to_owned()))
+                .map(|_| (n, word.to_owned(), true))
         });
         let note = match &found {
-            Some((_, word)) => format!("Answered {word}"),
-            None => "This ask is closed".to_owned(),
+            Some((_, word, true)) => format!("Answered {word}"),
+            _ => "This ask is closed".to_owned(),
         };
         // The offset is saved: a failed acknowledgement must not lose the answer.
         let _ = call::<Value>(
@@ -196,7 +201,7 @@ pub(super) async fn poll(ch: &Channel, open: &[(u64, Sent)]) -> Result<Vec<Answe
             &json!({"callback_query_id": callback.id, "text": note}),
         )
         .await;
-        if let Some((n, word)) = found {
+        if let Some((n, word, _)) = found {
             let by = match callback.from.username {
                 Some(username) => format!("@{username}"),
                 None => callback.from.first_name,

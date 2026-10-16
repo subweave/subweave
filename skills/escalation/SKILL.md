@@ -15,9 +15,17 @@ same tools.
   daemon climbs a ladder: code (learned steps, `RUN`), then the decider (a cheap
   model), then the coder (a cheap model).
 - An escalation is the last step: the ladder did not settle the case, so it comes to
-  you. Its number is `n`; it takes one of its answer words.
+  you. Its number is `n`; it takes one of its card's button words.
+- Its card shows what the verdict read, never every fact: the goal that does not hold
+  and its check; each fact the check reads, with its value; for a window, the window's
+  values, or its lines by kind with what the box knows of each and who said so; the
+  action picked or held, what it changes, and the rule that holds it with its
+  `BECAUSE`; for a version, the part's running, newest and security, and the start of
+  the notes; an UNDO's undone action; a drill's name. Its summary (at most 2 lines)
+  only explains the verdict; the card's facts win over it.
 - Read what the ladder already tried before you act: `subweave log <service>`. Read
-  the running weave and its ARGs: `subweave weave <service>`.
+  the running weave and its ARGs: `subweave weave <service>`. A fact the card does not
+  show, read it there.
 
 ## 2. Settle it
 

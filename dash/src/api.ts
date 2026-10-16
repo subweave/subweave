@@ -59,7 +59,8 @@ export type Kind =
   | "unwatch"
   | "refused"
   | "message"
-  | "note";
+  | "note"
+  | "summary";
 
 /** One journal event. For `off`, `withdraw` and `refused`, `text` says why. */
 export interface Line {
@@ -74,11 +75,10 @@ export interface Line {
   p?: Record<string, number>;
   cost_usd?: number;
   n?: number;
-  answers?: string[];
   by?: string;
   output?: string;
-  /** `ask`: the ask's explanation. */
-  body?: string;
+  /** `ask`: the card everyone reads. */
+  card?: Card;
   /** `ask`: the rule that holds its action, as written. */
   rule?: string;
   /** `waiting`: the goal it comes AFTER that does not hold. */
@@ -116,18 +116,41 @@ export interface Learned {
   steps: Record<string, { commands: string[]; key: string; t: string }>;
 }
 
+/** What a person reads on an escalation: the read set of its verdict, never every fact. */
+export interface Card {
+  title: string;
+  goal?: { name: string; sentence: string; check: { code: string } | { quoted: string } };
+  reads?: { fact: string; value: string }[];
+  window?: {
+    over: string;
+    values?: { fact: string; values: string[]; more?: number }[];
+    lines?: {
+      kinds: { count: number; sample: string; known?: { class: string; by: string } }[];
+      more?: number;
+    };
+  };
+  parts?: { name: string; running: string; newest: string; security: string; notes?: string[] }[];
+  action?: {
+    name: string;
+    label: string;
+    does: string[];
+    changes: string[];
+    held?: { rule: string; because?: string };
+  };
+  undoes?: string;
+  drill?: { name: string; label: string };
+  lines?: string[];
+  summary?: string[];
+  buttons?: { word: string; label: string }[];
+}
+
 export interface Ask {
   n: number;
   service: string;
   goal?: string | null;
   action?: string | null;
   rule?: string | null;
-  title: string;
-  text: string;
-  facts: Record<string, string>;
-  answers: string[];
-  /** Answer word → its button label. */
-  labels: Record<string, string>;
+  card: Card;
   /** Only the person's signed answer on Steery settles it. */
   signed: boolean;
   t: string;

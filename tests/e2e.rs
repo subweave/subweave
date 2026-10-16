@@ -172,6 +172,35 @@ fn signing_key() -> p256::ecdsa::SigningKey {
     p256::ecdsa::SigningKey::from_slice(&[0x2a; 32]).expect("a P-256 scalar")
 }
 
+/// A card's button words, in order.
+fn buttons(card: &Value) -> Vec<String> {
+    card["buttons"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|b| b["word"].as_str().map(String::from))
+        .collect()
+}
+
+/// A card's button for `word`.
+fn label<'a>(card: &'a Value, word: &str) -> &'a Value {
+    card["buttons"]
+        .as_array()
+        .and_then(|bs| bs.iter().find(|b| b["word"] == word))
+        .map_or(&Value::Null, |b| &b["label"])
+}
+
+/// A card's plain lines, one string.
+fn card_lines(card: &Value) -> String {
+    card["lines"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn steery_ok(headers: &HeaderMap) -> bool {
     headers.get("authorization").and_then(|h| h.to_str().ok())
         == Some(&format!("Bearer {STEERY_KEY}"))
@@ -763,7 +792,7 @@ impl Box_ {
         .await;
     }
 
-    /// The open ask for `goal` in the journal: its number and answers.
+    /// The open ask for `goal` in the journal: its number and its buttons' words.
     fn open_ask(&self, goal: &str) -> Option<(u64, Vec<String>)> {
         let j = self.journal();
         let settled: Vec<u64> = j
@@ -775,15 +804,7 @@ impl Box_ {
             .filter(|l| l["kind"] == "ask" && l["goal"] == goal)
             .filter_map(|l| Some((l["n"].as_u64()?, l)))
             .find(|(n, _)| !settled.contains(n))
-            .map(|(n, l)| {
-                let words = l["answers"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|w| w.as_str().map(String::from))
-                    .collect();
-                (n, words)
-            })
+            .map(|(n, l)| (n, buttons(&l["card"])))
     }
 
     /// `subweave do toy rotate`: ASK BEFORE rotate escalates it; the new ask's number.
@@ -1642,12 +1663,11 @@ async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
         .await;
     let ns = signed["n"].as_u64().unwrap();
     assert_eq!(signed["signed"], true, "{signed}");
-    assert_eq!(signed["text"], "Change the rules of toy?", "{signed}");
-    assert_eq!(signed["answers"], json!(["yes", "no"]), "{signed}");
+    assert_eq!(signed["card"]["title"], "Change the rules of toy?", "{signed}");
+    assert_eq!(buttons(&signed["card"]), ["yes", "no"], "{signed}");
+    let lines = card_lines(&signed["card"]);
     assert!(
-        signed["body"].as_str().is_some_and(|t| {
-            t.contains(RULE_WHY) && t.contains(&format!("Added: NEVER \"{WIPE_RULE}\""))
-        }),
+        lines.contains(RULE_WHY) && lines.contains(&format!("Added: NEVER \"{WIPE_RULE}\"")),
         "{signed}"
     );
     let out = b.ok(&["inbox"]).await;
@@ -1691,7 +1711,7 @@ async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
     );
     assert!(mock.throws_for(ns).is_empty(), "a signed escalation goes as no throw");
     assert!(
-        b.lines("note", |l| l["n"] == ns).is_empty(),
+        b.lines("note", |l| l["n"] == ns).is_empty() && b.lines("summary", |l| l["n"] == ns).is_empty(),
         "a signed escalation has no model summary and no agent"
     );
     assert!(!svc_dir.join(format!("escalations/{ns}.log")).exists());
@@ -1728,10 +1748,60 @@ async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
             && !text.contains("# Subweave escalation"),
         "{t5}"
     );
+    // The session's words render the card: the rule that holds rotate, with its BECAUSE.
+    assert!(
+        text.contains("`ASK BEFORE rotate` holds it: a rotate starts the server log over."),
+        "{t5}"
+    );
     b.ok(&["answer", &n5.to_string(), "yes"]).await;
     for (path, body) in &mock.steery().posts {
         assert!(!body.to_string().contains(SECRET), "a Steery {path} holds the secret");
     }
+
+    // 9d. An escalation withdrawn while its summary is written goes out on no channel:
+    // no Steery throw or request, no agent, no webhook.
+    eprintln!("9d withdrawn before it goes");
+    b.ok(&["channel", "add", "agent", &command]).await;
+    let (throws, requests) = (mock.posts("/v1/throws").len(), mock.posts("/v1/requests").len());
+    std::fs::write(dir.join("scene"), "unsure").unwrap();
+    mock.hold_summary.store(true, Ordering::SeqCst);
+    kill_pidfile(&dir.join("toy.pid"));
+    let (nw, _) = b
+        .until("an ask to withdraw", 30, || b.open_ask("running"))
+        .await;
+    std::fs::write(dir.join("scene"), "calm").unwrap();
+    let started_by_hand = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "cd '{}' && nohup python3 -m http.server {port} --bind 127.0.0.1 >/dev/null 2>&1 & echo $! > '{}'",
+            www.display(),
+            dir.join("toy.pid").display()
+        ))
+        .status()
+        .unwrap();
+    assert!(started_by_hand.success());
+    b.until("the withdraw", 30, || {
+        b.lines("withdraw", |l| l["n"] == nw).into_iter().next()
+    })
+    .await;
+    mock.hold_summary.store(false, Ordering::SeqCst);
+    b.until("the withdrawn ask's summary", 20, || {
+        b.lines("summary", |l| l["n"] == nw).into_iter().next()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(mock.throws_for(nw).is_empty(), "the withdrawn #{nw} went as a throw");
+    assert_eq!(mock.posts("/v1/throws").len(), throws, "a throw after the withdraw");
+    assert_eq!(mock.posts("/v1/requests").len(), requests, "a Steery request after the withdraw");
+    assert!(
+        !mock.hooks().iter().any(|h| h["kind"] == "ask" && h["ask"]["n"] == nw),
+        "the withdrawn #{nw} went to the webhook"
+    );
+    assert!(!svc_dir.join(format!("escalations/{nw}.log")).exists(), "an agent ran for the withdrawn #{nw}");
+    assert!(b.lines("sent", |l| l["n"] == nw).is_empty(), "the withdrawn #{nw} was sent");
+    assert!(b.lines("answer", |l| l["n"] == nw).is_empty(), "the withdrawn #{nw} was answered");
+    b.ok(&["channel", "rm", "agent"]).await;
+    b.holds(&["installed", "running", "rotated"], 30).await;
 
     // 9e. stats: this week's repairs by rung, escalations by who settled them, and the
     // two weave changes.
@@ -2160,23 +2230,26 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .await;
     assert_eq!(hook_ask["service"], "toy");
     assert_eq!(hook_ask["goal"], "rotated");
+    let card = &hook_ask["card"];
+    assert_eq!(buttons(card), ["yes", "no", "always", "never"], "{hook_ask}");
+    assert_eq!(label(card, "yes"), "Run it", "{hook_ask}");
+    // The card names the action, what it changes and the rule that holds it, with its
+    // BECAUSE; the goal reads no fact, so the card shows none.
+    assert_eq!(card["goal"]["name"], "rotated", "{hook_ask}");
+    assert_eq!(card["action"]["name"], "rotate", "{hook_ask}");
+    assert_eq!(card["action"]["changes"], json!(["config"]), "{hook_ask}");
     assert_eq!(
-        hook_ask["ask"]["answers"],
-        json!(["yes", "no", "always", "never"])
-    );
-    assert_eq!(hook_ask["ask"]["labels"]["yes"], "Run it", "{hook_ask}");
-    assert!(
-        hook_ask["text"]
-            .as_str()
-            .is_some_and(|t| t.contains("The weave asks you first: a rotate starts the server log over.")),
+        card["action"]["held"],
+        json!({"rule": "ASK BEFORE rotate", "because": "a rotate starts the server log over"}),
         "{hook_ask}"
     );
+    assert!(card.get("reads").is_none() && card.get("window").is_none(), "{hook_ask}");
+    assert!(!hook_ask.to_string().contains("scene"), "an unrelated fact on the card: {hook_ask}");
     // The summary the model wrote leads the card, and its call is journaled with its cost.
-    assert_eq!(hook_ask["summary"], json!(CARD_SUMMARY), "{hook_ask}");
-    let summary = b.lines("note", |l| {
-        l["n"] == n && l["text"].as_str().is_some_and(|t| t.starts_with("card summary by"))
-    });
+    assert_eq!(card["summary"], json!(CARD_SUMMARY), "{hook_ask}");
+    let summary = b.lines("summary", |l| l["n"] == n);
     assert_eq!(summary.len(), 1, "one summary per card");
+    assert_eq!(summary[0]["lines"], json!(CARD_SUMMARY), "{}", summary[0]);
     assert!(summary[0]["usage"]["calls"] == 1 && summary[0]["cost_usd"].as_f64() > Some(0.0), "{}", summary[0]);
     assert!(!dir.join("rotated").exists(), "rotate waits for the answer");
     let out = b.ok(&["answer", &n.to_string(), "yes"]).await;
@@ -2196,7 +2269,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
     );
     b.until("the webhook to hear the answer", 10, || {
         mock.hooks().into_iter().find(|h| {
-            h["title"]
+            h["card"]["title"]
                 .as_str()
                 .is_some_and(|t| t.starts_with(&format!("#{n} answered yes")))
         })
@@ -2389,11 +2462,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
     assert_eq!(withdrawn["text"], "running holds again", "{withdrawn}");
     mock.hold_summary.store(false, Ordering::SeqCst);
     b.until("the withdrawn ask's summary", 20, || {
-        b.lines("note", |l| {
-            l["n"] == n && l["text"].as_str().is_some_and(|t| t.starts_with("card summary"))
-        })
-        .into_iter()
-        .next()
+        b.lines("summary", |l| l["n"] == n).into_iter().next()
     })
     .await;
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -2409,7 +2478,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
     b.until("the webhook to hear the withdrawal", 10, || {
         mock.hooks()
             .into_iter()
-            .find(|h| h["title"] == format!("#{n} withdrawn"))
+            .find(|h| h["card"]["title"] == format!("#{n} withdrawn"))
     })
     .await;
     // An answer after the withdraw settles nothing: the journal keeps it as refused.
@@ -2513,7 +2582,12 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .and_then(|a| a.iter().find(|a| a["n"] == n))
         .unwrap_or_else(|| b.fail(&format!("no #{n} in the mcp inbox: {asks}")));
     assert_eq!(ask["service"], "toy", "{ask}");
-    assert_eq!(ask["answers"], json!(["yes", "no", "always", "never"]), "{ask}");
+    assert_eq!(buttons(&ask["card"]), ["yes", "no", "always", "never"], "{ask}");
+    assert_eq!(ask["card"]["action"]["held"]["rule"], "ASK BEFORE rotate", "{ask}");
+    assert!(
+        ask["text"].as_str().is_some_and(|t| t.contains("`ASK BEFORE rotate` holds it: a rotate starts the server log over.")),
+        "{ask}"
+    );
     let (_, waited) = mcp
         .call("wait_ask", json!({"timeout_secs": 5, "seen": []}))
         .await;
@@ -2612,6 +2686,16 @@ async fn daemon_and_cli_keep_a_toy_service() {
     let (n, _) = b
         .until("calm's escalation", 10, || b.open_ask("calm"))
         .await;
+    // Its card shows the window and its lines by kind, not every fact.
+    let raised = b.lines("ask", |l| l["n"] == n);
+    let card = &raised[0]["card"];
+    assert_eq!(card["window"]["over"], "12s", "{card}");
+    let kinds = &card["window"]["lines"]["kinds"];
+    assert!(
+        kinds.as_array().is_some_and(|ks| ks.iter().any(|k| k["sample"] == ROUTINE && k.get("known").is_none())),
+        "{card}"
+    );
+    assert!(card.get("reads").is_none() && !card.to_string().contains("scene"), "{card}");
     // A daemon restart while the line is still in the window: the rebuilt ring holds it.
     let restarted = jiff::Timestamp::now().as_millisecond();
     assert!(
@@ -2799,10 +2883,39 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .pop()
         .unwrap_or_else(|| b.fail("no ask line"));
     assert_eq!(ask["lines"], json!([CACHE_WARM]), "{ask}");
+    // The card shows only quiet's read set: its window's lines by kind, each with what the
+    // box knows of it and who knows it. No other fact: not `scene`, not `spooled`.
+    let card = &ask["card"];
+    assert_eq!(card["goal"]["name"], "quiet", "{ask}");
+    assert_eq!(card["window"]["over"], "8s", "{ask}");
+    let kinds = card["window"]["lines"]["kinds"].as_array().cloned().unwrap_or_default();
     assert!(
-        ask["body"].as_str().is_some_and(|t| t.contains("known trouble (the model): `cache warmed in 3 passes`")),
+        kinds.iter().any(|k| k["sample"] == CACHE_WARM
+            && k["count"] == 1
+            && k["known"] == json!({"class": "trouble", "by": "the model"})),
         "the card lacks the kind with its verdict: {ask}"
     );
+    for k in &kinds {
+        let s = k["sample"].as_str().unwrap_or_default();
+        assert!(
+            s.starts_with("disk ") || s.starts_with("conn ") || s.starts_with("cache ") || s.starts_with("heartbeat "),
+            "a line not from `events` on the card: {ask}"
+        );
+    }
+    assert!(
+        card.get("reads").is_none() && card.get("parts").is_none() && card["window"].get("values").is_none(),
+        "{ask}"
+    );
+    for unrelated in ["scene", "spooled", "served", "setting", "web."] {
+        assert!(!card.to_string().contains(unrelated), "{unrelated} on quiet's card: {ask}");
+    }
+    // The webhook renders the same card.
+    let hooked = b
+        .until("the webhook to get quiet's ask", 10, || {
+            mock.hooks().into_iter().find(|h| h["kind"] == "ask" && h["ask"]["n"] == n)
+        })
+        .await;
+    assert_eq!(hooked["card"]["window"], card["window"], "{hooked}");
     let out = b
         .ok(&["answer", &n.to_string(), "no", "--known", "normal", "--note", "a warm cache is routine"])
         .await;
@@ -2905,7 +3018,27 @@ async fn daemon_and_cli_keep_a_toy_service() {
     let ask = b.lines("ask", |l| l["n"] == n).remove(0);
     assert_eq!(ask["action"], "purge", "{ask}");
     assert_eq!(ask["rule"], "ASK BEFORE CHANGES data", "{ask}");
-    assert!(ask["body"].as_str().is_some_and(|t| t.contains("It changes data.")), "{ask}");
+    // The card names the effect and the rule that holds purge, and reads only `spooled`.
+    let card = &ask["card"];
+    assert_eq!(card["action"]["name"], "purge", "{ask}");
+    assert_eq!(card["action"]["changes"], json!(["data"]), "{ask}");
+    assert_eq!(
+        card["action"]["held"],
+        json!({"rule": "ASK BEFORE CHANGES data", "because": "it deletes what the spool holds"}),
+        "{ask}"
+    );
+    assert_eq!(card["reads"], json!([{"fact": "spooled", "value": "1"}]), "{ask}");
+    assert!(!card.to_string().contains("scene"), "{ask}");
+    let hooked = b
+        .until("the webhook to get the purge ask", 10, || {
+            mock.hooks().into_iter().find(|h| h["kind"] == "ask" && h["ask"]["n"] == n)
+        })
+        .await;
+    assert_eq!(hooked["card"]["action"], card["action"], "{hooked}");
+    assert!(
+        hooked["card"]["summary"] == json!(CARD_SUMMARY) && !hooked.to_string().contains("scene"),
+        "{hooked}"
+    );
     assert!(dir.join("spool/job-1").exists(), "purge ran before the answer");
     assert!(words.contains(&"yes".to_string()), "{words:?}");
     b.ok(&["answer", &n.to_string(), "yes"]).await;
@@ -2964,6 +3097,21 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .remove(0);
     assert_eq!(read["facts"]["web.newest"], "v1.2.0", "{read}");
     assert_eq!(read["facts"]["web.security"], "yes", "{read}");
+    // The warning that the loop fixes `patched` carries a PART card: running, newest and
+    // whether a security release waits; the part's facts are not read one by one.
+    let warned = b
+        .until("the webhook to get patched's warning", 10, || {
+            mock.hooks()
+                .into_iter()
+                .find(|h| h["kind"] == "warning" && h["goal"] == "patched")
+        })
+        .await;
+    let part = &warned["card"]["parts"][0];
+    assert!(
+        part["name"] == "web" && part["running"] == "1.0.0" && part["newest"] == "v1.2.0" && part["security"] == "yes",
+        "{warned}"
+    );
+    assert!(warned["card"].get("reads").is_none() && !warned.to_string().contains("scene"), "{warned}");
     let verdicts = b.lines("release", |l| l["part"] == "web");
     let mut versions: Vec<&str> = verdicts.iter().filter_map(|l| l["text"].as_str()).collect();
     versions.sort();
@@ -3146,9 +3294,10 @@ async fn daemon_and_cli_keep_a_toy_service() {
             "a webhook body holds the secret: {h}"
         );
     }
+    // A card shows its verdict's read set: `scene`, which no goal reads, is on none.
     assert!(
-        hooks.iter().any(|h| h.to_string().contains("[TOY_TOKEN]")),
-        "the scene fact reached the webhook redacted"
+        !hooks.iter().any(|h| h.to_string().contains("[TOY_TOKEN]")),
+        "the scene fact reached the webhook"
     );
     {
         let seen = mock.seen();
@@ -3279,9 +3428,13 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .await;
     assert_eq!(ask["action"], "drill", "{ask}");
     assert!(
-        ask["text"].as_str().is_some_and(|t| t.contains("`tidy` did not notice")),
+        ask["card"]["title"].as_str().is_some_and(|t| t.contains("`tidy` did not notice")),
         "{ask}"
     );
+    // The card says which drill, and shows tidy's read set.
+    assert_eq!(ask["card"]["drill"], json!({"name": "blind", "label": label}), "{ask}");
+    assert_eq!(ask["card"]["goal"]["name"], "tidy", "{ask}");
+    assert!(!ask["card"].to_string().contains("scene"), "{ask}");
     let out = b.ok(&["ps"]).await;
     assert!(out.contains("blind failed") && out.contains(&format!("drill blind: tidy did not notice {label}")), "{out}");
     b.ok(&["answer", &ask["n"].to_string(), "no"]).await;

@@ -187,8 +187,8 @@ pub(crate) fn human(service: Option<&str>, e: &Event) -> String {
             }
         }
     }
-    if let Kind::Ask { answers, .. } = &e.kind {
-        let _ = write!(text, " [{}]", answers.join(" "));
+    if let Kind::Ask { card, .. } = &e.kind {
+        let _ = write!(text, " [{}]", card.words().join(" "));
     }
     let text = text.trim();
     if !text.is_empty() {

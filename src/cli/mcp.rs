@@ -20,7 +20,7 @@ use crate::paths;
 use crate::weave::Class;
 
 const PROTOCOL: &str = "2025-06-18";
-const INSTRUCTIONS: &str = "This box escalates to you what its ladder (code, the decider, the coder) could not settle. Read the `skill` tool first: it says how to settle an escalation, how to fix the weave with `weave_change`, and what never to do. Then read `inbox`, and call `wait_ask` to block until a new escalation comes. Answer only with one of its `answers`; a signed escalation is the person's alone.";
+const INSTRUCTIONS: &str = "This box escalates to you what its ladder (code, the decider, the coder) could not settle. Read the `skill` tool first: it says how to settle an escalation, how to fix the weave with `weave_change`, and what never to do. Then read `inbox`, and call `wait_ask` to block until a new escalation comes. Answer only with one of its card's buttons; a signed escalation is the person's alone.";
 /// How often `wait_ask` reads the asks.
 const POLL: Duration = Duration::from_secs(2);
 
@@ -135,7 +135,7 @@ fn tools() -> Vec<Value> {
     vec![
         json!({
             "name": "inbox",
-            "description": "Every open escalation on this box: service, n, goal, action, rule, title, text (its body), facts, answers (the only words that answer it), labels (each answer's button on a card), signed (only the person's signed answer on Steery settles it), t (when it was raised) and lines (log lines of kinds nobody knows normal: `answer` with `known` teaches them).",
+            "description": "Every open escalation on this box: service, n, goal, action, rule, card (what every channel shows: title, the goal that does not hold, the facts its condition reads, its window's values or lines by kind with what the box knows of each, the action and the rule that holds it, a part's releases, buttons: the only words that answer it), text (the card as plain text), signed (only the person's signed answer on Steery settles it), t (when it was raised) and lines (log lines of kinds nobody knows normal: `answer` with `known` teaches them).",
             "inputSchema": none,
         }),
         json!({
@@ -160,13 +160,13 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "answer",
-            "description": "Answers an open escalation with one of its `answers`; the daemon acts on it. `note`, why, goes in the journal with the answer. `known` says what the escalation's `lines` are: the box knows lines of their kinds from then on, and never escalates them again. A signed escalation is refused.",
+            "description": "Answers an open escalation with one of its card's button words; the daemon acts on it. `note`, why, goes in the journal with the answer. `known` says what the escalation's `lines` are: the box knows lines of their kinds from then on, and never escalates them again. A signed escalation is refused.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "service": service,
                     "n": {"type": "integer", "description": "The ask's number"},
-                    "word": {"type": "string", "description": "One of the ask's answers"},
+                    "word": {"type": "string", "description": "One of the card's button words"},
                     "note": {"type": "string", "description": "Why, in a sentence"},
                     "known": class.clone(),
                 },
@@ -307,8 +307,8 @@ fn tools() -> Vec<Value> {
 
 async fn call(name: &str, args: Value, by: &str) -> Result<Value> {
     Ok(match name {
-        "inbox" => serde_json::to_value(journal::all_asks()?)?,
-        "wait_ask" => serde_json::to_value(wait_ask(parse(args)?).await?)?,
+        "inbox" => shown(journal::all_asks()?),
+        "wait_ask" => shown(wait_ask(parse(args)?).await?),
         "answer" => answer(parse(args)?, by)?,
         "known" => {
             let a: KnownArgs = parse(args)?;
@@ -413,6 +413,18 @@ async fn wait_ask(a: WaitArgs) -> Result<Vec<Ask>> {
         }
         tokio::time::sleep(POLL.min(end - now)).await;
     }
+}
+
+/// The asks as the agent reads them: each with its card's plain text beside the card.
+fn shown(asks: Vec<Ask>) -> Value {
+    asks.into_iter()
+        .map(|a| {
+            let text = a.card.text();
+            let mut v = json!(a);
+            v["text"] = json!(text);
+            v
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]

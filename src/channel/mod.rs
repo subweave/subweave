@@ -2,6 +2,7 @@
 //! Channels live in `config()/channels.json` (mode 0600). The answering channels are the
 //! escalation targets: an ask the ladder could not settle goes to them.
 
+pub mod card;
 pub mod email;
 pub mod escalation;
 pub mod heartbeat;
@@ -10,7 +11,6 @@ pub mod steery;
 pub mod telegram;
 pub mod webhook;
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
@@ -21,6 +21,8 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
+
+pub use card::Card;
 
 /// What a message is. Order matters: a channel gets messages at or above its `level`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,14 +77,7 @@ pub struct Message {
     /// The goal the message is about, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<String>,
-    pub title: String,
-    /// One plain sentence per line.
-    pub text: String,
-    /// A model's two plain lines that lead an ask's card; none on the rest.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub summary: Vec<String>,
-    #[serde(default)]
-    pub facts: BTreeMap<String, String>,
+    pub card: Card,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask: Option<AskInfo>,
 }
@@ -90,21 +85,9 @@ pub struct Message {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AskInfo {
     pub n: u64,
-    /// `yes`, `no`, `always`, `never` or action names.
-    pub answers: Vec<String>,
-    /// Answer word → its button label.
-    #[serde(default)]
-    pub labels: BTreeMap<String, String>,
     /// Only the person's signed answer on a Steery card settles it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub signed: bool,
-}
-
-impl AskInfo {
-    /// The button for `word`: its label, else the word.
-    pub fn label<'a>(&'a self, word: &'a str) -> &'a str {
-        self.labels.get(word).map_or(word, String::as_str)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,23 +279,35 @@ pub struct Polled {
     pub done: Vec<u64>,
 }
 
+/// Whether the escalation a message carries still needs hearing: read before every
+/// post, so nothing goes out once it is answered or withdrawn. A message with no ask
+/// passes `&always`.
+pub type Open<'a> = &'a (dyn Fn() -> bool + Send + Sync);
+
+pub fn always() -> bool {
+    true
+}
+
 /// Send `msg` if the channel's level lets it through. An ask always goes out: to an
 /// answering channel with its answers, to the rest ending with the `subweave answer`
 /// command. A heartbeat pings on every message, throttled to one a minute.
 /// `Some(Sent)` only for an ask on an answering channel.
-pub async fn send(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
+pub async fn send(ch: &Channel, msg: &Message, open: Open<'_>) -> Result<Option<Sent>> {
     if ch.kind() != ChannelKind::Heartbeat
         && msg.kind != Kind::Ask
         && msg.kind.rank() < ch.level.rank()
     {
         return Ok(None);
     }
-    deliver(ch, msg).await
+    deliver(ch, msg, open).await
 }
 
-async fn deliver(ch: &Channel, msg: &Message) -> Result<Option<Sent>> {
+async fn deliver(ch: &Channel, msg: &Message, open: Open<'_>) -> Result<Option<Sent>> {
+    if !open() {
+        return Ok(None);
+    }
     let sent = match ch.kind() {
-        ChannelKind::Steery => steery::send(ch, msg).await,
+        ChannelKind::Steery => steery::send(ch, msg, open).await,
         ChannelKind::Telegram => telegram::send(ch, msg).await,
         ChannelKind::Slack => slack::send(ch, msg).await.map(|()| None),
         ChannelKind::Email => email::send(ch, msg).await.map(|()| None),
@@ -526,13 +521,13 @@ pub async fn test(name: &str) -> Result<()> {
         host: hostname(),
         service: "subweave".into(),
         goal: None,
-        title: "Channel test".into(),
-        text: format!("This is a test message for channel {name}."),
-        summary: Vec::new(),
-        facts: BTreeMap::new(),
+        card: Card::note(
+            "Channel test",
+            vec![format!("This is a test message for channel {name}.")],
+        ),
         ask: None,
     };
-    deliver(&ch, &msg).await.map(|_| ())
+    deliver(&ch, &msg, &always).await.map(|_| ())
 }
 
 fn file() -> PathBuf {
@@ -626,31 +621,17 @@ pub(crate) fn headline(msg: &Message) -> String {
         Some(ask) => format!("ask #{}", ask.n),
         None => msg.kind.as_str().to_owned(),
     };
-    format!("[{label}] {}/{}: {}", msg.host, msg.service, msg.title)
+    format!("[{label}] {}/{}: {}", msg.host, msg.service, msg.card.title)
 }
 
-/// The summary, the text, goal and facts; for an ask on a channel that cannot answer,
-/// each answer word with its button and, last, the command that gives one.
+/// The card as plain text; for an ask on a channel that cannot answer, each answer word
+/// with its button and, last, the command that gives one.
 pub(crate) fn details(msg: &Message, answering: bool) -> String {
-    let mut out = String::new();
-    if !msg.summary.is_empty() {
-        out.push_str(&msg.summary.join("\n"));
-        out.push_str("\n\n");
-    }
-    out.push_str(msg.text.trim());
-    if let Some(goal) = &msg.goal {
-        out.push_str(&format!("\n\nGoal: {goal}"));
-    }
-    if !msg.facts.is_empty() {
-        out.push_str("\n\nFacts:");
-        for (name, value) in &msg.facts {
-            out.push_str(&format!("\n  {name}: {value}"));
-        }
-    }
+    let mut out = msg.card.text();
     if let (Some(ask), false) = (&msg.ask, answering) {
         out.push_str("\n\nAnswers:");
-        for w in &ask.answers {
-            out.push_str(&format!("\n  {w}: {}", ask.label(w)));
+        for b in &msg.card.buttons {
+            out.push_str(&format!("\n  {}: {}", b.word, b.label));
         }
         out.push_str(&format!("\nsubweave answer {} <word>", ask.n));
     }

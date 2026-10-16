@@ -568,15 +568,13 @@ async fn session(
                             .as_str()
                             .unwrap_or("the coder needs the person")
                             .to_string();
-                        let shown = observe::shown(&values);
                         ctx.ask(AskReq {
                             goal: work.goal_name(),
                             action: Some(work.action.to_string()),
                             rule: None,
                             signed: false,
                             drill: None,
-                            card: card::coder_asks(ctx, work.goal, work.action, task, &q, &shown),
-                            facts: shown,
+                            card: card::coder_asks(ctx, work.goal, work.action, task, &q),
                         });
                         end = Some(End::Asked);
                         String::new()
@@ -795,8 +793,7 @@ async fn judge(
         rule: None,
         signed: false,
         drill: None,
-        card: card::coder_stuck(ctx, work.goal, work.action, task, tried_lines, &now),
-        facts: now,
+        card: card::coder_stuck(ctx, work.goal, work.action, task, tried_lines),
     });
     true
 }
@@ -945,7 +942,6 @@ async fn gate_and_run(
         if rules_ok.iter().any(|ok| *ok == rule) {
             continue;
         }
-        let values = goals::known(ctx, work.goal).await;
         ctx.ask(AskReq {
             goal: work.goal_name(),
             action: Some(work.action.to_string()),
@@ -953,7 +949,6 @@ async fn gate_and_run(
             signed: false,
             drill: None,
             card: card::command(ctx, work.goal, work.action, command, purpose, &rule),
-            facts: observe::shown(&values),
         });
         return Err(());
     }

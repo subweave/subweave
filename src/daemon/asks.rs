@@ -10,14 +10,14 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-use crate::channel::{self, AskInfo, Message};
+use crate::channel::card::DrillShown;
+use crate::channel::{self, AskInfo, Card, Message};
 use crate::model::coder::{Coder, Tally};
 use crate::paths;
 use crate::service::{self as svc, TASK};
 use crate::weave::Class;
 
-use super::card::{self, Card};
-use super::goals;
+use super::{card, goals};
 use super::journal::Journal;
 use super::observe::Snapshot;
 use super::service::Ctx;
@@ -84,7 +84,6 @@ pub(crate) struct AskReq {
     /// The rule that holds the action, as written: its `always`/`never` answers are kept.
     pub rule: Option<String>,
     pub card: Card,
-    pub facts: BTreeMap<String, String>,
     /// Only the person's signed answer on a Steery card settles it: it goes to no other
     /// channel, and no inbox answer is taken.
     pub signed: bool,
@@ -92,28 +91,24 @@ pub(crate) struct AskReq {
     pub drill: Option<String>,
 }
 
-/// Journals the escalation and sends it to every channel. One a person's job raised
-/// carries their `by`: it waits for a person's answer and is never withdrawn. When a
-/// channel will show it, the coder's first model writes its summary first, journaled
-/// with what it cost. Its number, or `None` when the journal refused or could not write
-/// it: nothing is sent then.
+/// Journals the escalation with its card and sends it to every channel. One a person's
+/// job raised carries their `by`: it waits for a person's answer and is never withdrawn.
+/// When a channel will show it, the coder's first model writes its summary first,
+/// journaled with what it cost. Its number, or `None` when the journal refused or could
+/// not write it: nothing is sent then. Whether it is still open is read after the
+/// summary and before each send, throw and agent: once answered or withdrawn, nothing
+/// more goes out.
 pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> Option<u64> {
     let n = ctx.shared.next_ask();
     // A drill runs beside the repair slot: the person whose job runs there did not raise it.
     let by = lock(&ctx.by)
         .clone()
         .filter(|b| !b.is_empty() && req.drill.is_none());
-    let answers = req.card.words();
-    let labels = req.card.labels();
+    let mut card = req.card;
     // Raised while a drill runs: the card says the failure was caused on purpose.
-    let mut title = req.card.title.clone();
-    let mut body = req.card.lines.clone();
     if let Some((name, label)) = super::drill::running(ctx).filter(|_| req.drill.is_none()) {
-        title = format!("Drill {name}: {title}");
-        body.insert(
-            0,
-            format!("This is drill {name}: Subweave caused this on purpose ({label}), to test the weave."),
-        );
+        card.title = format!("Drill {name}: {}", card.title);
+        card.drill = Some(DrillShown { name, label });
     }
     // The kinds of line its goal's window holds that nobody knows normal: an answer may
     // teach them.
@@ -125,7 +120,7 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> Option<u64> {
             .collect(),
         None => Vec::new(),
     };
-    let (title, text, facts) = {
+    let card = {
         let mut j = ctx.journal();
         if let (Some(rule), Some(action)) = (&req.rule, &req.action) {
             j.add(Event {
@@ -148,11 +143,7 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> Option<u64> {
                 goal: req.goal.clone(),
                 action: req.action.clone(),
                 rule: req.rule.clone(),
-                text: title,
-                body: body.join("\n"),
-                facts: req.facts.clone(),
-                answers: answers.clone(),
-                labels: labels.clone(),
+                card,
                 signed: req.signed,
                 lines,
                 drill: req.drill.clone(),
@@ -169,21 +160,16 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> Option<u64> {
             action: req.action.clone().filter(|a| a == TASK),
             text: format!("ask: #{n} {}", card.title),
         });
-        (card.title, card.body, card.facts)
+        card
     };
     let mut msg = Message {
         kind: channel::Kind::Ask,
         host: ctx.shared.host.clone(),
         service: ctx.name.clone(),
         goal: req.goal,
-        title,
-        text,
-        summary: Vec::new(),
-        facts,
+        card,
         ask: Some(AskInfo {
             n,
-            answers,
-            labels,
             signed: req.signed,
         }),
     };
@@ -210,12 +196,14 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> Option<u64> {
         // carry what an agent wrote into what the person signs.
         if let Some(coder) = coder.filter(|_| !signed) {
             let note = summarize(&coder, &msg, about.as_deref()).await;
-            if let Ok(lines) = &note.lines {
-                msg.summary = lines.iter().map(|l| super::redact(l, &secrets)).collect();
-            }
+            let lines: Vec<String> = match &note.lines {
+                Ok(l) => l.iter().map(|l| super::redact(l, &secrets)).collect(),
+                Err(_) => Vec::new(),
+            };
+            msg.card.summary = lines.clone();
             lock(&journal).add(Event {
                 ep: ep.clone(),
-                ..note.event(msg.goal.clone(), n)
+                ..note.event(msg.goal.clone(), n, lines)
             });
         }
         let open = || {
@@ -238,7 +226,7 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> Option<u64> {
                 super::agent::start(shared.clone(), &ch, &msg, secrets.clone());
                 continue;
             }
-            match channel::send(&ch, &msg).await {
+            match channel::send(&ch, &msg, &open).await {
                 Ok(Some(handle)) => {
                     // A watch outlives its escalation; any other handle is read for the
                     // answer, and refused once the escalation settled while it was sent:
@@ -265,7 +253,7 @@ pub(crate) fn raise(ctx: &Ctx, req: AskReq) -> Option<u64> {
 /// The card waits this long for its summary, then goes without one.
 const SUMMARY_WAIT: Duration = Duration::from_secs(20);
 
-/// The summary's lines when they can be used, and what its note says it took.
+/// The summary's lines when they can be used, and what its event says it took.
 struct Summarized {
     lines: Result<Vec<String>, String>,
     text: String,
@@ -274,8 +262,9 @@ struct Summarized {
 }
 
 impl Summarized {
-    /// The note on escalation `n` that says what the summary came to.
-    fn event(self, goal: Option<String>, n: u64) -> Event {
+    /// The summary event of escalation `n`: `lines` as the card shows them, none when it
+    /// goes without.
+    fn event(self, goal: Option<String>, n: u64, lines: Vec<String>) -> Event {
         let (cost_usd, usage) = match self.tally {
             Some((t, model)) => (Some(t.cost_usd), Some(t.usage(model))),
             None => (None, None),
@@ -284,10 +273,10 @@ impl Summarized {
             cost_usd,
             usage,
             ms: self.ms,
-            ..Kind::Note {
+            ..Kind::Summary {
+                n,
                 goal,
-                action: None,
-                n: Some(n),
+                lines,
                 text: self.text,
             }
             .into()
@@ -296,17 +285,19 @@ impl Summarized {
 }
 
 /// The card as the person reads it goes to the model, never the journal's raw facts:
-/// `msg` holds them redacted.
+/// `msg` holds them redacted. Its buttons stay out: the model explains the verdict, it
+/// does not weigh the answers.
 async fn summarize(coder: &Coder, msg: &Message, about: Option<&str>) -> Summarized {
-    let ask = msg.ask.as_ref();
+    let shown = Card {
+        buttons: Vec::new(),
+        summary: Vec::new(),
+        ..msg.card.clone()
+    };
     let card = json!({
         "service": msg.service,
         "host": msg.host,
         "about": about,
-        "title": msg.title,
-        "lines": msg.text.lines().collect::<Vec<_>>(),
-        "facts": msg.facts,
-        "buttons": ask.map(|a| a.answers.iter().map(|w| a.label(w)).collect::<Vec<_>>()),
+        "card": shown,
     });
     let start = Instant::now();
     let model = coder.model(0).to_string();
@@ -323,7 +314,7 @@ async fn summarize(coder: &Coder, msg: &Message, about: Option<&str>) -> Summari
             let mut tally = Tally::default();
             tally.add(&s.reply);
             let text = match &s.lines {
-                Ok(l) => format!("card summary by {model}: {}", l.join(" / ")),
+                Ok(_) => format!("card summary by {model}"),
                 Err(e) => format!("card summary by {model} not used: {e}"),
             };
             Summarized {

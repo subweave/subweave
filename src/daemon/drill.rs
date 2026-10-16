@@ -218,22 +218,17 @@ async fn waited(
 }
 
 /// A drill that failed is a weave defect: its goal's check misses the failure, or its
-/// actions do not repair it. A yes runs the drill again.
+/// actions do not repair it. A yes runs the drill again. Its goal's facts are read fresh
+/// for the card.
 async fn escalate(ctx: &Ctx, d: &Drill, missed: bool, restored: Option<bool>) {
-    let values = goals::known(ctx, ctx.w.goal(&d.expect)).await;
-    let reads = ctx.w.goal(&d.expect).map(|g| ctx.w.reads(g)).unwrap_or_default();
-    let shown: BTreeMap<String, String> = observe::shown(&values)
-        .into_iter()
-        .filter(|(n, _)| reads.contains(n))
-        .collect();
+    goals::fresh(ctx, ctx.w.goal(&d.expect)).await;
     ctx.ask(AskReq {
         goal: None,
         action: Some(DRILL.to_string()),
         rule: None,
         signed: false,
         drill: Some(d.name.clone()),
-        card: card::drill_failed(ctx, d, missed, restored, &shown),
-        facts: shown,
+        card: card::drill_failed(ctx, d, missed, restored),
     });
 }
 

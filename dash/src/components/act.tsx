@@ -1,23 +1,78 @@
 import { useState, type KeyboardEvent } from "react";
-import { api, type Ask } from "../api";
+import { api, type Ask, type Card } from "../api";
 import { ago, useNow } from "../format";
 import { linkClick, servicePath } from "../router";
 import { ErrorLine, errorText, FactsTable } from "./ui";
 
-/** Short fact sets show at once; long ones (a whole log, a config) open on a click. */
-function AskFacts({ facts }: { facts: Record<string, string> }) {
-  const n = Object.keys(facts).length;
-  const long = n > 4 || Object.values(facts).some((v) => v.split("\n").length > 3);
-  const [open, setOpen] = useState(!long);
-  if (!n) return null;
+/** The card's body, as every channel shows it: the goal, the read set of its verdict, the
+ * action and the rule that holds it, a part's releases, then what else it says. */
+export function CardBody({ card }: { card: Card }) {
+  const w = card.window;
+  const a = card.action;
+  const check = card.goal && ("code" in card.goal.check ? card.goal.check.code : card.goal.check.quoted);
+  const reads = Object.fromEntries((card.reads ?? []).map((r) => [r.fact, r.value]));
   return (
-    <div className="ask-facts">
-      {long && (
-        <button type="button" className="disclose" aria-expanded={open} onClick={() => setOpen(!open)}>
-          {n} facts the decider read
-        </button>
+    <div className="ask-card">
+      {card.summary?.map((s, i) => (
+        <p key={`s${i}`} className="ask-text">
+          {s}
+        </p>
+      ))}
+      {card.drill && (
+        <p className="hint">
+          Drill {card.drill.name} ({card.drill.label}): caused on purpose, to test the weave.
+        </p>
       )}
-      {open && <FactsTable facts={facts} />}
+      {card.goal && (
+        <p className="ask-text">
+          Not true now: {card.goal.sentence}{" "}
+          <span className="t-muted">
+            ({card.goal.name}: <code>{check}</code>
+            {w && <> over {w.over}</>})
+          </span>
+        </p>
+      )}
+      {!!card.reads?.length && <FactsTable facts={reads} />}
+      {w?.values?.map((s) => (
+        <p key={s.fact} className="row-sub">
+          <code>{s.fact}</code> in the window: {s.more ? "…, " : ""}
+          {s.values.join(", ")}
+        </p>
+      ))}
+      {w?.lines && (
+        <ul className="row-sub">
+          {!w.lines.kinds.length && <li>No lines in the window.</li>}
+          {w.lines.kinds.map((k, i) => (
+            <li key={i}>
+              {k.count}× {k.known ? `known ${k.known.class} (${k.known.by})` : "not known yet"}: <code>{k.sample}</code>
+            </li>
+          ))}
+          {!!w.lines.more && <li>…and {w.lines.more} more kinds of line.</li>}
+        </ul>
+      )}
+      {card.parts?.map((p) => (
+        <p key={p.name} className="row-sub">
+          Part <code>{p.name}</code> runs {p.running}; newest {p.newest}; security release waits: {p.security}.
+          {!!p.notes?.length && <> Notes: {p.notes.join(" / ")}</>}
+        </p>
+      ))}
+      {a && (
+        <p className="row-sub">
+          “{a.label}”: {a.does.join("; then ")}. It changes {a.changes.length ? a.changes.join(", ") : "nothing"}.
+          {a.held && (
+            <>
+              {" "}
+              <code>{a.held.rule}</code> holds it{a.held.because ? `: ${a.held.because}` : ""}.
+            </>
+          )}
+        </p>
+      )}
+      {card.undoes && <p className="row-sub">It undoes “{card.undoes}”.</p>}
+      {card.lines?.map((l, i) => (
+        <p key={`l${i}`} className="row-sub">
+          {l}
+        </p>
+      ))}
     </div>
   );
 }
@@ -27,7 +82,8 @@ export function AskCard({ ask, showService = false, onAnswered }: { ask: Ask; sh
   const [sent, setSent] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const keeps = ask.answers.some((a) => a === "always" || a === "never");
+  const buttons = ask.card.buttons ?? [];
+  const keeps = buttons.some((b) => b.word === "always" || b.word === "never");
 
   async function answer(word: string) {
     setBusy(true);
@@ -56,32 +112,26 @@ export function AskCard({ ask, showService = false, onAnswered }: { ask: Ask; sh
           {ago(ask.t, now)}
         </span>
       </header>
-      <h4 className="ask-title">{ask.title}</h4>
-      {ask.text && <p className="ask-text">{ask.text}</p>}
-      {(ask.goal || ask.action || ask.rule) && (
-        <p className="ask-meta t-muted">
-          {[ask.action && `action ${ask.action}`, ask.goal && `goal ${ask.goal}`, ask.rule && `rule ${ask.rule}`].filter(Boolean).join(" · ")}
-        </p>
-      )}
-      <AskFacts facts={ask.facts} />
+      <h4 className="ask-title">{ask.card.title}</h4>
+      <CardBody card={ask.card} />
       {ask.signed ? (
         <p className="hint">Only a signed answer on Steery settles this.</p>
       ) : sent ? (
         <p className="ask-sent">
-          Answered <b>{ask.labels[sent] ?? sent}</b>. The daemon picks it up within seconds.
+          Answered <b>{buttons.find((b) => b.word === sent)?.label ?? sent}</b>. The daemon picks it up within seconds.
         </p>
       ) : (
         <>
           <div className="ask-answers">
-            {ask.answers.map((w) => (
+            {buttons.map((b) => (
               <button
-                key={w}
+                key={b.word}
                 type="button"
-                className={w === "yes" ? "btn btn-primary" : "btn"}
+                className={b.word === "yes" ? "btn btn-primary" : "btn"}
                 disabled={busy}
-                onClick={() => answer(w)}
+                onClick={() => answer(b.word)}
               >
-                {ask.labels[w] ?? w}
+                {b.label}
               </button>
             ))}
           </div>

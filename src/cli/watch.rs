@@ -64,8 +64,8 @@ async fn follow_once(host: &str, since: Timestamp) -> Result<()> {
         }
         let text = e.text().unwrap_or("").trim();
         let note = match &e.kind {
-            Kind::Ask { n, answers, .. } => {
-                let words = answers.join("|");
+            Kind::Ask { n, card, .. } => {
+                let words = card.words().join("|");
                 Some((
                     format!("ask #{n}: {service} on {host}"),
                     format!("{text} — subweave answer {n} <{words}>"),

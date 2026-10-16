@@ -252,9 +252,10 @@ async fn learn_and_keep(ctx: &Ctx, fact: &Fact, hint: Option<&str>) -> Option<St
             ctx.message(
                 crate::channel::Kind::Info,
                 None,
-                format!("learned fact {}", fact.name),
-                format!("This box reads `{}` with: {command}", fact.name),
-                Default::default(),
+                crate::channel::Card::note(
+                    format!("learned fact {}", fact.name),
+                    vec![format!("This box reads `{}` with: {command}", fact.name)],
+                ),
             );
             Some(command)
         }

@@ -11,7 +11,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::boxinfo::BoxInfo;
-use crate::channel::{self, Message};
+use crate::channel::card::DrillShown;
+use crate::channel::{self, Card, Message};
 use crate::model::ModelRef;
 use crate::model::coder::Coder;
 use crate::model::decider::Decider;
@@ -257,36 +258,25 @@ impl Ctx {
         }
     }
 
-    /// Journals a message line and sends it to the channels.
-    pub fn message(
-        &self,
-        kind: channel::Kind,
-        goal: Option<String>,
-        title: String,
-        text: String,
-        facts: BTreeMap<String, String>,
-    ) {
-        let title = match super::drill::running(self) {
-            Some((name, _)) => format!("Drill {name}: {}", self.redact(&title)),
-            None => self.redact(&title),
-        };
+    /// Journals a message line and sends it to the channels. Sent while a drill runs, its
+    /// card says so.
+    pub fn message(&self, kind: channel::Kind, goal: Option<String>, mut card: Card) {
+        card.redact(&|s: &str| self.redact(s));
+        if let Some((name, label)) = super::drill::running(self) {
+            card.title = format!("Drill {name}: {}", card.title);
+            card.drill = Some(DrillShown { name, label });
+        }
         self.journal().add(Kind::Message {
             goal: goal.clone(),
             action: None,
-            text: format!("{}: {title}", kind.as_str()),
+            text: format!("{}: {}", kind.as_str(), card.title),
         });
         let msg = Message {
             kind,
             host: self.shared.host.clone(),
             service: self.name.clone(),
             goal,
-            title,
-            text: self.redact(&text),
-            summary: Vec::new(),
-            facts: facts
-                .into_iter()
-                .map(|(k, v)| (k, self.redact(&v)))
-                .collect(),
+            card,
             ask: None,
         };
         super::notify(msg, None);
@@ -547,9 +537,10 @@ impl Loop {
             ctx.message(
                 channel::Kind::Info,
                 None,
-                format!("{} is up: every goal holds", ctx.name),
-                format!("The request \"{}\" is done.", ctx.spec.request),
-                BTreeMap::new(),
+                Card::note(
+                    format!("{} is up: every goal holds", ctx.name),
+                    vec![format!("The request \"{}\" is done.", ctx.spec.request)],
+                ),
             );
         }
         self.start_repair();
@@ -812,9 +803,10 @@ impl Loop {
                 ctx.message(
                     channel::Kind::Info,
                     Some(g.name.clone()),
-                    format!("True again: {}", card::subject(&ctx, g)),
-                    format!("Goal `{}` holds again.", g.name),
-                    shown,
+                    Card::note(
+                        format!("True again: {}", card::subject(&ctx, g)),
+                        vec![format!("Goal `{}` holds again.", g.name)],
+                    ),
                 );
             }
         }
@@ -841,9 +833,10 @@ impl Loop {
             ctx.message(
                 channel::Kind::Info,
                 Some(goal.to_string()),
-                format!("#{n} withdrawn"),
-                format!("{goal} {why}; ask #{n} is closed."),
-                BTreeMap::new(),
+                Card::note(
+                    format!("#{n} withdrawn"),
+                    vec![format!("{goal} {why}; ask #{n} is closed.")],
+                ),
             );
         }
     }
@@ -939,7 +932,6 @@ impl Loop {
                     signed: false,
                     drill: None,
                     card: card::misfit(&ctx),
-                    facts: BTreeMap::new(),
                 });
             }
             if job.by_person() {
@@ -978,18 +970,7 @@ impl Loop {
         }
         t.warned = true;
         let Some(g) = ctx.w.goal(goal) else { return };
-        // The window as the ring holds it now, LINES included: not one check line.
-        let span = goals::span(g, observe::Snapshot::now());
-        let facts = observe::shown(&ctx.observe.values(&ctx.w.reads(g), span));
-        let mut lines = card::goal_lines(&ctx, g, &facts);
-        lines.push("Subweave is fixing it, and asks you only if it needs you.".into());
-        ctx.message(
-            channel::Kind::Warning,
-            Some(goal.to_string()),
-            format!("Fixing: {}", card::subject(&ctx, g)),
-            lines.join("\n"),
-            facts,
-        );
+        ctx.message(channel::Kind::Warning, Some(goal.to_string()), card::fixing(&ctx, g));
     }
 
     fn repaired(&mut self, r: Result<(Option<String>, Outcome), tokio::task::JoinError>) {
@@ -1149,7 +1130,6 @@ impl Loop {
                     action: Some(WEAVE.to_string()),
                     rule: None,
                     card: card::weave_change(&ctx, &pending.by, &pending.why, &change),
-                    facts: BTreeMap::new(),
                     signed: true,
                     drill: None,
                 });

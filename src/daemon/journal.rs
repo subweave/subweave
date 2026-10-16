@@ -3,7 +3,6 @@
 //! it; readers fold it with `Follower`. `state.json` caches a fold with the part of the
 //! journal it covers.
 
-use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -299,8 +298,9 @@ pub(crate) fn read(service: &str) -> ServiceState {
     Follower::open(service).state
 }
 
-/// An open escalation as readers show it. Its rule reads as the box reads it, `$name`
-/// replaced; the escalation keeps it as written, the key of `always` and `never`.
+/// An open escalation as readers show it: its card, as every channel renders it. Its
+/// rule reads as the box reads it, `$name` replaced; the escalation keeps it as written,
+/// the key of `always` and `never`.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Ask {
     pub n: u64,
@@ -308,12 +308,7 @@ pub(crate) struct Ask {
     pub goal: Option<String>,
     pub action: Option<String>,
     pub rule: Option<String>,
-    pub title: String,
-    pub text: String,
-    pub facts: BTreeMap<String, String>,
-    pub answers: Vec<String>,
-    /// Answer word → button label.
-    pub labels: BTreeMap<String, String>,
+    pub card: crate::channel::Card,
     /// Only the person's signed answer on a Steery card settles it.
     pub signed: bool,
     pub t: String,
@@ -334,11 +329,7 @@ pub(crate) fn asks(service: &str, st: &ServiceState) -> Vec<Ask> {
             goal: e.goal.clone(),
             action: e.action.clone(),
             rule: e.rule.as_deref().map(|r| crate::weave::subst(r, &args)),
-            title: e.card.title.clone(),
-            text: e.card.body.clone(),
-            facts: e.card.facts.clone(),
-            answers: e.card.answers.clone(),
-            labels: e.card.labels.clone(),
+            card: e.card.clone(),
             signed: e.signed,
             t: e.raised.clone(),
             lines: e.lines.clone(),

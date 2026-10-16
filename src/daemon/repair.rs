@@ -217,7 +217,6 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
     };
     let span = goals::fresh(ctx, Some(goal)).await;
     let values = ctx.observe.values(&goals::all(&ctx.w), span);
-    let shown = observe::shown(&values);
     // The known trouble lines it fails on: a pass is remembered for their kinds.
     let on = goals::trouble(ctx, goal, span);
     let (a, rules_ok) = match &job.forced {
@@ -241,7 +240,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                     return Outcome::Nothing;
                 }
                 Gate::Ask(rule) => {
-                    ask_gate(ctx, goal, a, rule, &shown);
+                    ask_gate(ctx, goal, a, rule, None);
                     return Outcome::Asked;
                 }
             }
@@ -260,8 +259,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                     rule: None,
                     signed: false,
                     drill: None,
-                    card: card::tries(ctx, goal, n, per, &shown),
-                    facts: shown,
+                    card: card::tries(ctx, goal, n, per),
                 });
                 return Outcome::Asked;
             }
@@ -276,8 +274,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                         rule: None,
                         signed: false,
                         drill: None,
-                        card: card::no_fit(ctx, goal, &refusals, &off, &shown),
-                        facts: shown,
+                        card: card::no_fit(ctx, goal, &refusals, &off),
                     });
                     return Outcome::Asked;
                 }
@@ -297,8 +294,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                                 rule: None,
                                 signed: false,
                                 drill: None,
-                                card: card::which(ctx, goal, &cands, &why, &shown),
-                                facts: shown,
+                                card: card::which(ctx, goal, &cands, &why),
                             });
                             return Outcome::Asked;
                         }
@@ -312,7 +308,7 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
                         out.insert(pick.name.clone());
                     }
                     Gate::Ask(rule) => {
-                        ask_gate(ctx, goal, pick, rule, &shown);
+                        ask_gate(ctx, goal, pick, rule, None);
                         return Outcome::Asked;
                     }
                 }
@@ -323,8 +319,8 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
     let undoes = ctx.journal().state().undoing(&a.name).cloned();
     let ok = run_action(ctx, goal, a, &rules_ok, &on, undoes.as_ref()).await;
     match (ok, &undoes) {
-        (Some(false), Some(u)) => undo_failed(ctx, goal, &u.action, a, "it did not work".into(), &shown),
-        (Some(false), None) => undo(ctx, goal, a, span, &shown).await,
+        (Some(false), Some(u)) => undo_failed(ctx, goal, &u.action, a, "it did not work".into()),
+        (Some(false), None) => undo(ctx, goal, a, span).await,
         _ => {}
     }
     Outcome::Done
@@ -332,39 +328,32 @@ async fn repair(ctx: &Ctx, job: &Repair) -> Outcome {
 
 /// `a` failed: its UNDO runs through the rules, as the undo of `a`. An undo never arms an
 /// undo of its own; one that fails, or cannot run, escalates.
-async fn undo(ctx: &Ctx, goal: &Goal, a: &Action, span: Span, shown: &BTreeMap<String, String>) {
+async fn undo(ctx: &Ctx, goal: &Goal, a: &Action, span: Span) {
     let Some(u) = a.undo.as_deref().and_then(|n| ctx.w.action(n)) else {
         return;
     };
     if is_off(ctx, u, span) {
         let why = format!("its IF is not true: `{}`", u.when_if.as_ref().map(|e| e.to_string()).unwrap_or_default());
-        undo_failed(ctx, goal, &a.name, u, why, shown);
+        undo_failed(ctx, goal, &a.name, u, why);
         return;
     }
     match gate(ctx, goal, u, span, false) {
         Gate::Pass => {
             let watch = ctx.journal().state().undoing(&u.name).cloned();
             if run_action(ctx, goal, u, &[], &[], watch.as_ref()).await == Some(false) {
-                undo_failed(ctx, goal, &a.name, u, "it did not work".into(), shown);
+                undo_failed(ctx, goal, &a.name, u, "it did not work".into());
             }
         }
         Gate::Refused(rule, _) => {
             refused(ctx, goal, u, rule);
-            undo_failed(ctx, goal, &a.name, u, format!("a rule refuses it: {}", rule.text()), shown);
+            undo_failed(ctx, goal, &a.name, u, format!("a rule refuses it: {}", rule.text()));
         }
-        Gate::Ask(rule) => ask_gate(ctx, goal, u, rule, shown),
+        Gate::Ask(rule) => ask_gate(ctx, goal, u, rule, Some(&a.name)),
     }
 }
 
 /// The undo of `of` failed or could not run, for `why`: the person decides.
-fn undo_failed(
-    ctx: &Ctx,
-    goal: &Goal,
-    of: &str,
-    u: &Action,
-    why: String,
-    shown: &BTreeMap<String, String>,
-) {
+fn undo_failed(ctx: &Ctx, goal: &Goal, of: &str, u: &Action, why: String) {
     ctx.journal()
         .note(Some(&goal.name), format!("undo of {of} by {} failed: {why}", u.name));
     ctx.ask(AskReq {
@@ -373,8 +362,7 @@ fn undo_failed(
         rule: None,
         signed: false,
         drill: None,
-        card: card::undo_failed(ctx, goal, of, u, &why, shown),
-        facts: shown.clone(),
+        card: card::undo_failed(ctx, goal, of, u, &why),
     });
 }
 
@@ -502,15 +490,15 @@ fn refused(ctx: &Ctx, goal: &Goal, a: &Action, rule: &Rule) {
     });
 }
 
-fn ask_gate(ctx: &Ctx, goal: &Goal, a: &Action, rule: &Rule, shown: &BTreeMap<String, String>) {
+/// `undoes`: the action `a` is the UNDO of, when it runs as one.
+fn ask_gate(ctx: &Ctx, goal: &Goal, a: &Action, rule: &Rule, undoes: Option<&str>) {
     ctx.ask(AskReq {
         goal: Some(goal.name.clone()),
         action: Some(a.name.clone()),
         rule: Some(rule.text()),
         signed: false,
         drill: None,
-        card: card::gate(ctx, goal, a, rule, shown),
-        facts: shown.clone(),
+        card: card::gate(ctx, goal, a, rule, undoes),
     });
 }
 
@@ -745,12 +733,13 @@ async fn run_action(
         ctx.message(
             channel::Kind::Info,
             Some(goal.name.clone()),
-            format!("learned steps for {slot}"),
-            format!(
-                "{n} commands made {} hold; they run first next time.",
-                goal.name
+            channel::Card::note(
+                format!("learned steps for {slot}"),
+                vec![format!(
+                    "{n} commands made {} hold; they run first next time.",
+                    goal.name
+                )],
             ),
-            BTreeMap::new(),
         );
     }
     Some(ok)

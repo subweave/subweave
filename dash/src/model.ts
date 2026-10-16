@@ -66,7 +66,7 @@ export const KIND_CHIPS = [
   { label: "Actions", kinds: ["action"] },
   { label: "Commands", kinds: ["command"] },
   { label: "Learned", kinds: ["learn"] },
-  { label: "Escalations", kinds: ["ask", "answer", "withdraw", "refused", "sent", "watch", "unwatch"] },
+  { label: "Escalations", kinds: ["ask", "summary", "answer", "withdraw", "refused", "sent", "watch", "unwatch"] },
   { label: "Messages", kinds: ["message"] },
   { label: "Notes", kinds: ["note"] },
 ] as const;
@@ -271,7 +271,7 @@ export function timeline(lines: Line[], running: string | null): Item[] {
             ? l.action
             : undefined;
       if (a && a !== TASK && !actions.includes(a)) actions.push(a);
-      if (l.kind === "note" && l.usage) usage = addUsage(usage, l.usage);
+      if ((l.kind === "note" || l.kind === "summary") && l.usage) usage = addUsage(usage, l.usage);
       cost += l.cost_usd ?? 0;
       const gate = gateOf.get(l.i);
       if (gate && !gate.ep) cost += gate.cost_usd ?? 0;
@@ -298,7 +298,7 @@ export function timeline(lines: Line[], running: string | null): Item[] {
       usage,
       sent: sentEp.get(ep) ?? [],
       steps: all
-        .filter((l) => !gone.has(l.i) && l !== start && l !== hand && !(l.kind === "note" && l.usage))
+        .filter((l) => !gone.has(l.i) && l !== start && l !== hand && !((l.kind === "note" || l.kind === "summary") && l.usage))
         .map((l) => ({ line: l, gate: gateOf.get(l.i), sent: sentOn.get(l.i) ?? [] })),
     };
   }

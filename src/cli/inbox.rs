@@ -49,17 +49,22 @@ pub fn run() -> Result<ExitCode> {
             a.n,
             a.service,
             a.goal.as_deref().unwrap_or("-"),
-            a.title.trim(),
-            a.answers
+            a.card.title.trim(),
+            a.card
+                .buttons
                 .iter()
-                .map(|w| match a.labels.get(w).filter(|l| *l != w) {
-                    Some(l) => format!("{w}: {l}"),
-                    None => w.clone(),
+                .map(|b| if b.label == b.word {
+                    b.word.clone()
+                } else {
+                    format!("{}: {}", b.word, b.label)
                 })
                 .collect::<Vec<_>>()
                 .join(" | "),
             if a.signed { "  signed: answer on Steery" } else { "" },
         );
+        for line in a.card.text().lines().filter(|l| !l.trim().is_empty()) {
+            println!("      {line}");
+        }
     }
     println!("\nanswer with: subweave answer <n> <word>");
     Ok(ExitCode::SUCCESS)
@@ -88,8 +93,9 @@ pub(crate) fn send_answer(
     if esc.signed {
         bail!("#{n}: only a signed answer on Steery settles this");
     }
-    if !esc.card.answers.iter().any(|a| a == word) {
-        bail!("#{n} takes {}, not {word:?}", esc.card.answers.join(", "));
+    let words = esc.card.words();
+    if !words.iter().any(|a| a == word) {
+        bail!("#{n} takes {}, not {word:?}", words.join(", "));
     }
     if known.is_some() && esc.lines.is_empty() {
         bail!("#{n} holds no log lines to teach");
