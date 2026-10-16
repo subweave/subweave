@@ -10,7 +10,14 @@ use serde_json::{Value, json};
 
 use super::{Answer, Channel, Message, Sent, client, http_json, plain, write_private};
 
-const API: &str = "https://api.telegram.org";
+/// `TELEGRAM_API_URL` moves the Bot API.
+fn api() -> String {
+    std::env::var("TELEGRAM_API_URL")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| "https://api.telegram.org".into())
+}
+
 const WAIT_SECS: u64 = 50;
 
 #[derive(Serialize, Deserialize)]
@@ -74,7 +81,7 @@ async fn call<T: serde::de::DeserializeOwned>(
     let reply: Reply<T> = http_json(
         &format!("telegram {method}"),
         client()
-            .post(format!("{API}/bot{token}/{method}"))
+            .post(format!("{}/bot{token}/{method}", api()))
             .json(body),
     )
     .await?;

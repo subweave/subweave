@@ -22,7 +22,8 @@ enum Cmd {
     Add {
         /// steery, telegram, slack, email, webhook, heartbeat or agent
         kind: ChannelKind,
-        /// telegram: the chat id; slack: the channel id, for a bot token; email: the address; webhook, heartbeat: the URL; agent: the command, run with sh -c once per escalation
+        /// telegram: the chat id (a group's is negative); slack: the channel id, for a bot token; email: the address; webhook, heartbeat: the URL; agent: the command, run with sh -c once per escalation
+        #[arg(allow_negative_numbers = true)]
         target: Option<String>,
         /// The lowest message it gets: ask, warning or info
         #[arg(long)]

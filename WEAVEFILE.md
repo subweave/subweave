@@ -737,6 +737,7 @@ subweave channel test steery
 - `heartbeat`: a service such as healthchecks.io alerts when the pings stop. That is the only alert when the whole box is down: see [LIMITS.md](LIMITS.md#9-one-box-no-failover).
 - On the person's computer, `subweave watch` shows every box's messages as system notifications.
 - Channel keys stay on the box in `/etc/subweave/channels.json`, mode 600. They never go to a model.
+- `TELEGRAM_API_URL` moves the Telegram Bot API; `SLACK_API_URL` moves the Slack Web API.
 
 ### Cards
 

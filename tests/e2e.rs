@@ -1,8 +1,9 @@
 //! One end-to-end scenario: the built `subweave` binary runs as a daemon and as CLI
 //! commands against a temporary state and config directory. Only the vendors are
 //! mocked: one local HTTP server plays OpenRouter (`/systemone` for the decider,
-//! `/chat/completions` for the coder), Steery (`/v1/…`, signing as a pinned phone) and
-//! a webhook receiver.
+//! `/chat/completions` for the coder), Steery (`/v1/…`, signing as a pinned phone),
+//! Telegram's Bot API (`/telegram/…`), Slack's Web API (`/slack/…`) and a webhook
+//! receiver; an SMTP sink in the test takes the mail.
 //!
 //! The mock answers by what each request asks (question keys, the failing goal, the
 //! box's facts, the coder's earlier tool calls), never by call order.
@@ -29,6 +30,13 @@ const STEERY_KEY: &str = "sk-e2e-3b9d0c51";
 const WORKSPACE: &str = "0199f3a0-1c2d-7e4f-8a5b-6c7d8e9f0a1b";
 const SIGNER: &str = "0199f3a0-2d3e-7f40-9b6c-7d8e9f0a1b2c";
 const SIGNER_NAME: &str = "e2e phone";
+const TG_TOKEN: &str = "123456:e2e-bot-7Hq2";
+const TG_CHAT: &str = "-1001234567";
+/// Who presses Telegram's buttons.
+const TG_PERSON: &str = "e2e_person";
+const SLACK_TOKEN: &str = "xoxb-e2e-4d1f";
+const SLACK_CHANNEL: &str = "C0E2E0001";
+const MAIL_TO: &str = "ops@e2e.test";
 /// How an agent elsewhere runs subweave on the toy's box.
 const REACH: &str = "root@box-e2e";
 /// Lines of the toy's event log: a kind the weave knows normal, a routine kind the model
@@ -52,6 +60,23 @@ struct Seen {
     traces: Vec<Vec<u8>>,
     /// GitHub release list requests.
     releases: usize,
+    /// Telegram Bot API calls but `getUpdates`: (method, body, result).
+    telegram: Vec<(String, Value, Value)>,
+    /// Telegram button presses, for `getUpdates`.
+    updates: Vec<Value>,
+    /// Slack `chat.postMessage` bodies.
+    slack: Vec<Value>,
+    /// What the SMTP sink took.
+    mails: Vec<Mail>,
+}
+
+/// One mail, decoded as its reader sees it.
+#[derive(Debug, Clone, Default)]
+struct Mail {
+    from: String,
+    to: Vec<String>,
+    subject: String,
+    body: String,
 }
 
 /// What the Steery mock holds.
@@ -164,6 +189,56 @@ impl Mock {
             "at": at,
             "signature": URL_SAFE_NO_PAD.encode(signature.to_der().as_bytes()),
         });
+    }
+
+    /// The bodies of Telegram `method` calls.
+    fn telegram(&self, method: &str) -> Vec<Value> {
+        self.seen()
+            .telegram
+            .iter()
+            .filter(|(m, _, _)| m == method)
+            .map(|(_, b, _)| b.clone())
+            .collect()
+    }
+
+    /// Escalation `n`'s Telegram message, and the message `sendMessage` made of it.
+    fn tg_ask(&self, n: u64) -> Option<(Value, Value)> {
+        let head = format!("[ask #{n}] ");
+        self.seen()
+            .telegram
+            .iter()
+            .find(|(m, b, _)| m == "sendMessage" && b["text"].as_str().is_some_and(|t| t.starts_with(&head)))
+            .map(|(_, b, r)| (b.clone(), r.clone()))
+    }
+
+    /// The person presses `word` under escalation `n`'s Telegram message.
+    fn press(&self, n: u64, word: &str) {
+        let (_, posted) = self.tg_ask(n).expect("Telegram got the ask");
+        let mut s = self.seen();
+        let update_id = s.updates.len() + 1;
+        s.updates.push(json!({"update_id": update_id, "callback_query": {
+            "id": format!("cb-{update_id}"),
+            "from": {"first_name": "E2E", "username": TG_PERSON},
+            "message": posted,
+            "data": format!("{n}:{word}"),
+        }}));
+    }
+
+    fn slack(&self) -> Vec<Value> {
+        self.seen().slack.clone()
+    }
+
+    fn mails(&self) -> Vec<Mail> {
+        self.seen().mails.clone()
+    }
+
+    /// Each thing Telegram, Slack and the SMTP sink got, as text.
+    fn channel_texts(&self) -> Vec<String> {
+        let s = self.seen();
+        let telegram = s.telegram.iter().map(|(m, b, _)| format!("telegram {m} {b}"));
+        let slack = s.slack.iter().map(|b| format!("slack {b}"));
+        let mails = s.mails.iter().map(|m| format!("mail {}\n{}", m.subject, m.body));
+        telegram.chain(slack).chain(mails).collect()
     }
 }
 
@@ -584,6 +659,221 @@ async fn hook(State(m): State<Mock>, body: String) -> &'static str {
     "ok"
 }
 
+/// Telegram's Bot API, `/bot<token>/<method>`. `getUpdates` holds until a press waits at
+/// its offset or its `timeout` ends, as Telegram's long poll does.
+async fn telegram(
+    State(m): State<Mock>,
+    UrlPath((bot, method)): UrlPath<(String, String)>,
+    body: String,
+) -> (StatusCode, axum::Json<Value>) {
+    let b: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    if bot != format!("bot{TG_TOKEN}") {
+        m.seen().unexpected.push(format!("telegram {method} with another token"));
+        let refused = json!({"ok": false, "error_code": 401, "description": "Unauthorized"});
+        return (StatusCode::UNAUTHORIZED, axum::Json(refused));
+    }
+    let result = match method.as_str() {
+        "getUpdates" => {
+            let offset = b["offset"].as_u64().unwrap_or(0);
+            let end = Instant::now() + Duration::from_secs(b["timeout"].as_u64().unwrap_or(0).min(50));
+            loop {
+                let waiting: Vec<Value> = m
+                    .seen()
+                    .updates
+                    .iter()
+                    .filter(|u| u["update_id"].as_u64() >= Some(offset))
+                    .cloned()
+                    .collect();
+                if !waiting.is_empty() || Instant::now() >= end {
+                    return (StatusCode::OK, axum::Json(json!({"ok": true, "result": waiting})));
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        "sendMessage" => {
+            let mut s = m.seen();
+            let id = 1 + s.telegram.iter().filter(|(m, _, _)| m == "sendMessage").count();
+            let chat: i64 = b["chat_id"].as_str().and_then(|c| c.parse().ok()).unwrap_or(0);
+            let posted = json!({"message_id": id, "chat": {"id": chat}});
+            s.telegram.push((method, b, posted.clone()));
+            posted
+        }
+        "editMessageReplyMarkup" | "answerCallbackQuery" => {
+            m.seen().telegram.push((method, b, json!(true)));
+            json!(true)
+        }
+        other => {
+            m.seen().unexpected.push(format!("telegram {other}"));
+            let refused = json!({"ok": false, "error_code": 404, "description": "Not Found"});
+            return (StatusCode::NOT_FOUND, axum::Json(refused));
+        }
+    };
+    (StatusCode::OK, axum::Json(json!({"ok": true, "result": result})))
+}
+
+/// Slack's `chat.postMessage`: 200 with `ok: false` on a refusal, as Slack answers.
+async fn slack_post(State(m): State<Mock>, headers: HeaderMap, body: String) -> axum::Json<Value> {
+    let auth = headers.get("authorization").and_then(|h| h.to_str().ok());
+    if auth != Some(&format!("Bearer {SLACK_TOKEN}")) {
+        m.seen().unexpected.push("slack chat.postMessage with another token".into());
+        return axum::Json(json!({"ok": false, "error": "invalid_auth"}));
+    }
+    m.seen()
+        .slack
+        .push(serde_json::from_str(&body).unwrap_or(Value::String(body)));
+    axum::Json(json!({"ok": true}))
+}
+
+/// An SMTP server that takes every mail.
+async fn smtp_sink(listener: tokio::net::TcpListener, m: Mock) {
+    while let Ok((sock, _)) = listener.accept().await {
+        tokio::spawn(smtp_session(sock, m.clone()));
+    }
+}
+
+/// One SMTP conversation: the envelope, then the message up to its lone dot.
+async fn smtp_session(sock: tokio::net::TcpStream, m: Mock) -> std::io::Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let (r, mut w) = sock.into_split();
+    let mut lines = tokio::io::BufReader::new(r).lines();
+    let angle = |l: &str| {
+        l.split_once('<')
+            .and_then(|(_, rest)| rest.split_once('>'))
+            .map_or_else(String::new, |(addr, _)| addr.to_owned())
+    };
+    w.write_all(b"220 e2e.test ESMTP\r\n").await?;
+    let (mut from, mut to) = (String::new(), Vec::new());
+    while let Some(line) = lines.next_line().await? {
+        let verb = line.get(..4).unwrap_or_default().to_ascii_uppercase();
+        let reply: &[u8] = match verb.as_str() {
+            "EHLO" | "HELO" => b"250 e2e.test\r\n",
+            "MAIL" => {
+                from = angle(&line);
+                b"250 ok\r\n"
+            }
+            "RCPT" => {
+                to.push(angle(&line));
+                b"250 ok\r\n"
+            }
+            "DATA" => {
+                w.write_all(b"354 end with a lone dot\r\n").await?;
+                let mut raw = Vec::new();
+                while let Some(l) = lines.next_line().await? {
+                    if l == "." {
+                        break;
+                    }
+                    raw.push(l.strip_prefix('.').map_or_else(|| l.clone(), str::to_owned));
+                }
+                let mail = Mail::read(std::mem::take(&mut from), std::mem::take(&mut to), &raw);
+                m.seen().mails.push(mail);
+                b"250 queued\r\n"
+            }
+            "QUIT" => {
+                w.write_all(b"221 bye\r\n").await?;
+                return Ok(());
+            }
+            "RSET" | "NOOP" => b"250 ok\r\n",
+            _ => {
+                m.seen().unexpected.push(format!("SMTP {line}"));
+                b"502 not here\r\n"
+            }
+        };
+        w.write_all(reply).await?;
+    }
+    Ok(())
+}
+
+impl Mail {
+    /// The message's lines, dot-unstuffed: headers unfolded, the subject's encoded words
+    /// and the body's transfer encoding decoded.
+    fn read(from: String, to: Vec<String>, raw: &[String]) -> Mail {
+        use base64::engine::general_purpose::STANDARD;
+        let split = raw.iter().position(|l| l.is_empty()).unwrap_or(raw.len());
+        let mut headers: Vec<String> = Vec::new();
+        for l in &raw[..split] {
+            match headers.last_mut() {
+                Some(h) if l.starts_with([' ', '\t']) => h.push_str(l),
+                _ => headers.push(l.clone()),
+            }
+        }
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find_map(|h| {
+                    let (k, v) = h.split_once(':')?;
+                    k.eq_ignore_ascii_case(name).then(|| v.trim().to_owned())
+                })
+                .unwrap_or_default()
+        };
+        let body = raw.get(split + 1..).unwrap_or_default();
+        let body = match header("Content-Transfer-Encoding").to_ascii_lowercase().as_str() {
+            "base64" => String::from_utf8_lossy(&STANDARD.decode(body.concat()).unwrap_or_default()).into_owned(),
+            "quoted-printable" => quoted_printable(body),
+            _ => body.join("\n"),
+        };
+        Mail {
+            from,
+            to,
+            subject: encoded_words(&header("Subject")),
+            body: body.trim_end().to_owned(),
+        }
+    }
+}
+
+fn quoted_printable(lines: &[String]) -> String {
+    let mut out = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        let (l, soft) = match l.strip_suffix('=') {
+            Some(l) => (l, true),
+            None => (l.as_str(), false),
+        };
+        let mut k = 0;
+        while k < l.len() {
+            let hex = l.get(k + 1..k + 3).and_then(|h| u8::from_str_radix(h, 16).ok());
+            match (l.as_bytes()[k], hex) {
+                (b'=', Some(byte)) => {
+                    out.push(byte);
+                    k += 3;
+                }
+                (byte, _) => {
+                    out.push(byte);
+                    k += 1;
+                }
+            }
+        }
+        if !soft && i + 1 < lines.len() {
+            out.push(b'\n');
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A header's RFC 2047 `=?utf-8?b?…?=` words decoded; the space between two of them goes.
+fn encoded_words(v: &str) -> String {
+    use base64::engine::general_purpose::STANDARD;
+    let mut out = String::new();
+    let mut after_encoded = false;
+    for (i, word) in v.split(' ').enumerate() {
+        let decoded = word
+            .strip_prefix("=?")
+            .and_then(|w| w.strip_suffix("?="))
+            .and_then(|w| {
+                let mut p = w.splitn(3, '?');
+                let (_charset, enc, text) = (p.next()?, p.next()?, p.next()?);
+                enc.eq_ignore_ascii_case("b")
+                    .then(|| STANDARD.decode(text).ok())
+                    .flatten()
+                    .and_then(|b| String::from_utf8(b).ok())
+            });
+        if i > 0 && !(after_encoded && decoded.is_some()) {
+            out.push(' ');
+        }
+        after_encoded = decoded.is_some();
+        out.push_str(decoded.as_deref().unwrap_or(word));
+    }
+    out
+}
+
 /// The temporary box: directories, the daemon, the dashboard, the toy server's pid file.
 struct Box_ {
     dir: PathBuf,
@@ -633,6 +923,8 @@ impl Box_ {
             .env("STEERY_URL", &self.steery_url)
             .env("TOY_TOKEN", SECRET)
             .env("GITHUB_API_URL", &self.steery_url)
+            .env("TELEGRAM_API_URL", format!("{}/telegram", self.steery_url))
+            .env("SLACK_API_URL", format!("{}/slack", self.steery_url))
             .env_remove("OPENROUTER_API_KEY")
             .env_remove("GITHUB_TOKEN")
             .stdin(Stdio::null());
@@ -1759,7 +2051,7 @@ async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
     }
 
     // 9d. An escalation withdrawn while its summary is written goes out on no channel:
-    // no Steery throw or request, no agent, no webhook.
+    // no Steery throw or request, no agent, no webhook, nothing to Telegram, Slack or email.
     eprintln!("9d withdrawn before it goes");
     b.ok(&["channel", "add", "agent", &command]).await;
     let (throws, requests) = (mock.posts("/v1/throws").len(), mock.posts("/v1/requests").len());
@@ -1784,6 +2076,7 @@ async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
         b.lines("withdraw", |l| l["n"] == nw).into_iter().next()
     })
     .await;
+    let sends = mock.channel_texts().len();
     mock.hold_summary.store(false, Ordering::SeqCst);
     b.until("the withdrawn ask's summary", 20, || {
         b.lines("summary", |l| l["n"] == nw).into_iter().next()
@@ -1796,6 +2089,13 @@ async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
     assert!(
         !mock.hooks().iter().any(|h| h["kind"] == "ask" && h["ask"]["n"] == nw),
         "the withdrawn #{nw} went to the webhook"
+    );
+    let head = format!("[ask #{nw}] ");
+    let texts = mock.channel_texts();
+    assert_eq!(texts.len(), sends, "Telegram, Slack or email got a send after the withdraw: {:?}", &texts[sends..]);
+    assert!(
+        !texts.iter().any(|t| t.contains(&head)),
+        "the withdrawn #{nw} went to Telegram, Slack or email"
     );
     assert!(!svc_dir.join(format!("escalations/{nw}.log")).exists(), "an agent ran for the withdrawn #{nw}");
     assert!(b.lines("sent", |l| l["n"] == nw).is_empty(), "the withdrawn #{nw} was sent");
@@ -1850,7 +2150,8 @@ async fn daemon_and_cli_keep_a_toy_service() {
     std::fs::write(dir.join("web-version"), "1.2.0\n").unwrap();
     let weave = weave_dir.display().to_string();
 
-    // The vendors: OpenRouter and a webhook, on one local server.
+    // The vendors: OpenRouter, Steery, GitHub, Telegram, Slack and a webhook on one local
+    // server; an SMTP sink beside it.
     let mock = Mock {
         seen: Arc::new(Mutex::new(Seen::default())),
         steery: Arc::new(Mutex::new(Steery::default())),
@@ -1869,6 +2170,8 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .route("/v1/requests", post(request_create))
         .route("/v1/requests/{id}", get(request_get))
         .route("/repos/{org}/{repo}/releases", get(releases))
+        .route("/telegram/{bot}/{method}", post(telegram))
+        .route("/slack/chat.postMessage", post(slack_post))
         .with_state(mock.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mock_url = format!("http://{}", listener.local_addr().unwrap());
@@ -1884,6 +2187,21 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .ok(&["channel", "add", "webhook", &hook_url, "--level", "info"])
         .await;
     assert!(out.contains("added webhook"), "{out}");
+    let smtp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let smtp_url = format!("smtp://{}", smtp.local_addr().unwrap());
+    tokio::spawn(smtp_sink(smtp, mock.clone()));
+    for (kind, target, secret) in [
+        ("telegram", TG_CHAT, TG_TOKEN),
+        ("slack", SLACK_CHANNEL, SLACK_TOKEN),
+        ("email", MAIL_TO, smtp_url.as_str()),
+    ] {
+        let o = b.sw_stdin(&["channel", "add", kind, target], secret).await;
+        let out = both(&o);
+        assert!(
+            o.status.success() && out.contains(&format!("added {kind}: {kind} {target}, level warning")),
+            "{out}"
+        );
+    }
 
     let models = [
         "--decide",
@@ -3041,7 +3359,96 @@ async fn daemon_and_cli_keep_a_toy_service() {
     );
     assert!(dir.join("spool/job-1").exists(), "purge ran before the answer");
     assert!(words.contains(&"yes".to_string()), "{words:?}");
-    b.ok(&["answer", &n.to_string(), "yes"]).await;
+    // Telegram, Slack and email show the same card: the effect, the rule with its BECAUSE,
+    // the answers, and no fact the verdict did not read.
+    let head = format!(
+        "[ask #{n}] {}/toy: {}",
+        hooked["host"].as_str().unwrap_or_default(),
+        card["title"].as_str().unwrap_or_default()
+    );
+    let shows_purge = |text: &str| {
+        text.contains(&format!("\n\n{}\n{}\n\n", CARD_SUMMARY[0], CARD_SUMMARY[1]))
+            && text.contains("\n`spooled` now: 1\n")
+            && text.contains("\nIt changes data.\n")
+            && text.contains("\n`ASK BEFORE CHANGES data` holds it: it deletes what the spool holds.")
+            && !text.contains("scene")
+            && !text.contains("served")
+    };
+    let labelled = |w: &String| label(card, w).as_str().unwrap_or_default().to_owned();
+    let (tg, posted) = b.until("Telegram to get the purge ask", 10, || mock.tg_ask(n)).await;
+    let tg_text = tg["text"].as_str().unwrap_or_default();
+    eprintln!("the purge card on Telegram:\n{tg_text}");
+    assert!(
+        tg["chat_id"] == TG_CHAT
+            && tg_text.starts_with(&head)
+            && shows_purge(tg_text)
+            && !tg_text.contains("subweave answer"),
+        "{tg}"
+    );
+    let keyboard: Vec<(String, String)> = tg["reply_markup"]["inline_keyboard"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| Some((row[0]["callback_data"].as_str()?.to_owned(), row[0]["text"].as_str()?.to_owned())))
+        .collect();
+    let want: Vec<(String, String)> = words.iter().map(|w| (format!("{n}:{w}"), labelled(w))).collect();
+    assert_eq!(keyboard, want, "{tg}");
+    // Slack and email cannot answer: each answer word with its button, then the command.
+    let answers: String = words
+        .iter()
+        .map(|w| format!("\n  {w}: {}", labelled(w)))
+        .chain([format!("\nsubweave answer {n} <word>")])
+        .collect();
+    let answers = format!("\n\nAnswers:{answers}");
+    let slack_escaped = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let slack = b
+        .until("Slack to get the purge ask", 10, || {
+            mock.slack()
+                .into_iter()
+                .find(|p| p["text"].as_str().is_some_and(|t| t.starts_with(&format!("[ask #{n}] "))))
+        })
+        .await;
+    let slack_text = slack["text"].as_str().unwrap_or_default();
+    assert!(
+        slack["channel"] == SLACK_CHANNEL
+            && slack_text.starts_with(&slack_escaped(&head))
+            && shows_purge(slack_text)
+            && slack_text.ends_with(&slack_escaped(&answers)),
+        "{slack}"
+    );
+    let mail = b
+        .until("the purge ask's mail", 10, || {
+            mock.mails().into_iter().find(|m| m.subject.starts_with(&format!("[ask #{n}] ")))
+        })
+        .await;
+    assert!(
+        mail.from == "subweave@127.0.0.1"
+            && mail.to == [MAIL_TO]
+            && mail.subject == head
+            && shows_purge(&format!("\n\n{}", mail.body))
+            && mail.body.ends_with(&answers),
+        "{mail:?}"
+    );
+    // The person presses yes in Telegram: it settles the ask, and the buttons go.
+    mock.press(n, "yes");
+    let answer = b.answered(n, 20).await;
+    assert_eq!(answer["text"], "yes", "{answer}");
+    assert_eq!(answer["by"], format!("telegram:@{TG_PERSON}"), "{answer}");
+    assert!(
+        mock.telegram("answerCallbackQuery")
+            .iter()
+            .any(|a| a["callback_query_id"] == "cb-1" && a["text"] == "Answered yes"),
+        "{:?}",
+        mock.telegram("answerCallbackQuery")
+    );
+    b.until("the purge ask's buttons to go", 10, || {
+        mock.telegram("editMessageReplyMarkup").into_iter().find(|e| {
+            e["chat_id"] == posted["chat"]["id"]
+                && e["message_id"] == posted["message_id"]
+                && e["reply_markup"] == json!({"inline_keyboard": []})
+        })
+    })
+    .await;
     b.until("purge to pass", 20, || (b.passes("purge") == 1).then_some(())).await;
     assert!(!dir.join("spool/job-1").exists());
     b.holds(&["tidy"], 10).await;
@@ -3276,7 +3683,7 @@ async fn daemon_and_cli_keep_a_toy_service() {
         "{spans:?}"
     );
 
-    // 6d. The secret never left the box: journal, state, webhook, model requests.
+    // 6d. The secret never left the box: journal, state, channels, model requests.
     let journal_text = std::fs::read_to_string(b.service().join("journal.jsonl")).unwrap();
     assert!(
         !journal_text.contains(SECRET),
@@ -3299,6 +3706,14 @@ async fn daemon_and_cli_keep_a_toy_service() {
         !hooks.iter().any(|h| h.to_string().contains("[TOY_TOKEN]")),
         "the scene fact reached the webhook"
     );
+    let texts = mock.channel_texts();
+    assert!(!texts.is_empty());
+    for t in &texts {
+        assert!(
+            !t.contains(SECRET) && !t.contains("[TOY_TOKEN]"),
+            "the secret or the scene fact reached a channel: {t}"
+        );
+    }
     {
         let seen = mock.seen();
         for (path, _, body) in &seen.requests {

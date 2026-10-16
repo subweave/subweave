@@ -7,6 +7,14 @@ use serde_json::json;
 
 use super::{Channel, Message, client, http, http_json, plain};
 
+/// `SLACK_API_URL` moves the Web API.
+fn api() -> String {
+    std::env::var("SLACK_API_URL")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| "https://slack.com/api".into())
+}
+
 #[derive(Deserialize)]
 struct Posted {
     ok: bool,
@@ -32,7 +40,7 @@ pub(super) async fn send(ch: &Channel, msg: &Message) -> Result<()> {
     let posted: Posted = http_json(
         "slack chat.postMessage",
         client()
-            .post("https://slack.com/api/chat.postMessage")
+            .post(format!("{}/chat.postMessage", api()))
             .bearer_auth(secret)
             .json(&json!({ "channel": channel, "text": text, "unfurl_links": false })),
     )

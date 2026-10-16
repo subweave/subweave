@@ -1,5 +1,5 @@
 //! Escalations: numbered daemon-wide, journaled, sent to every channel; answers come
-//! from the inbox or from the answering channels, which one background task polls.
+//! from the inbox or from the answering channels, each polled by its own background task.
 //! Where each went is an event on it, so its answer is read back from the fold.
 
 use std::collections::BTreeMap;
@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tokio::sync::mpsc;
-use tokio::task::JoinSet;
+use tokio::task::JoinHandle;
 
 use crate::channel::card::DrillShown;
 use crate::channel::{self, AskInfo, Card, Message};
@@ -333,70 +333,73 @@ async fn summarize(coder: &Coder, msg: &Message, about: Option<&str>) -> Summari
     }
 }
 
-/// Polls every answering channel for what the services' folds say it reads: the open
-/// escalations sent to it and its watches. Answers go to `tx` with the channel's name.
+/// Polls every answering channel, each in its own loop: one channel's long poll never
+/// holds up another's next round. Answers go to `tx` with the channel's name.
 pub(crate) async fn poll_loop(
     shared: Arc<Shared>,
     tx: mpsc::UnboundedSender<(channel::Answer, String)>,
 ) {
+    let mut polling: BTreeMap<String, JoinHandle<()>> = BTreeMap::new();
     loop {
-        let channels: Vec<channel::Channel> = channel::ls()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|c| c.kind().answers())
-            .collect();
-        let mut read: BTreeMap<String, Vec<(u64, channel::Sent)>> = BTreeMap::new();
-        for name in svc::names().unwrap_or_default() {
-            let journal = shared.journal(&name);
-            let j = lock(&journal);
-            for (n, ch, handle) in j.state().polled() {
-                read.entry(ch.to_string())
-                    .or_default()
-                    .push((n, handle.clone()));
+        polling.retain(|_, h| !h.is_finished());
+        for ch in channel::ls().unwrap_or_default() {
+            if ch.kind().answers() && !polling.contains_key(&ch.name) {
+                let task = poll_channel(shared.clone(), tx.clone(), ch.name.clone());
+                polling.insert(ch.name, tokio::spawn(task));
             }
         }
-        let mut set = JoinSet::new();
-        for ch in channels {
-            let Some(open) = read.remove(&ch.name) else {
-                continue;
-            };
-            set.spawn(async move {
-                let r = channel::poll(&ch, &open).await;
-                (ch.name, r)
-            });
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// One answering channel's rounds, each for what the services' folds say it reads: the
+/// open escalations sent to it and its watches. Ends once the channel is removed.
+async fn poll_channel(
+    shared: Arc<Shared>,
+    tx: mpsc::UnboundedSender<(channel::Answer, String)>,
+    name: String,
+) {
+    loop {
+        let Some(ch) = channel::ls()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|c| c.name == name && c.kind().answers())
+        else {
+            return;
+        };
+        let mut open: Vec<(u64, channel::Sent)> = Vec::new();
+        for service in svc::names().unwrap_or_default() {
+            let journal = shared.journal(&service);
+            let j = lock(&journal);
+            open.extend(
+                j.state()
+                    .polled()
+                    .filter(|(_, c, _)| *c == name)
+                    .map(|(n, _, handle)| (n, handle.clone())),
+            );
         }
-        if set.is_empty() {
+        if open.is_empty() {
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         }
-        let mut failed = false;
-        while let Some(r) = set.join_next().await {
-            match r {
-                Ok((name, Ok(polled))) => {
-                    for a in polled.answers {
-                        let _ = tx.send((a, name.clone()));
-                    }
-                    for n in polled.done {
-                        if let Some((_, journal)) = shared.find(n) {
-                            lock(&journal).add(Kind::Unwatch {
-                                n,
-                                channel: name.clone(),
-                            });
-                        }
-                    }
+        match channel::poll(&ch, &open).await {
+            Ok(polled) => {
+                for a in polled.answers {
+                    let _ = tx.send((a, name.clone()));
                 }
-                Ok((name, Err(e))) => {
-                    tracing::warn!(channel = %name, error = %format!("{e:#}"), "polling a channel failed");
-                    failed = true;
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "a channel poll ended");
-                    failed = true;
+                for n in polled.done {
+                    if let Some((_, journal)) = shared.find(n) {
+                        lock(&journal).add(Kind::Unwatch {
+                            n,
+                            channel: name.clone(),
+                        });
+                    }
                 }
             }
-        }
-        if failed {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            Err(e) => {
+                tracing::warn!(channel = %name, error = %format!("{e:#}"), "polling a channel failed");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
         }
     }
 }
