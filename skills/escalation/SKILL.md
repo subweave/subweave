@@ -64,11 +64,11 @@ same tools.
 - Write the new Weavefile and propose it: `subweave weave <service> --change <file>
   --why "<reason>"`, or the MCP tool `weave_change`. Never write the Weavefile on the
   box in place.
-- The box checks the change first: it must parse, and the request check must pass
-  with the service's ARGs.
-- FACT, GOAL, ACTION, SKILL and KNOWN changes apply at once. Every other change
-  (NEVER, ASK, DRILL, ARG, SECRET, MODEL, NEEDS, FROM, ABOUT) is a rule change: it
-  waits for the person's signed answer. Propose it; do not insist.
+- The box checks the change first: it must parse, pass the checks, and pass the
+  request check with the service's ARGs.
+- FACT, PART, GOAL, ACTION, SKILL and KNOWN changes apply at once. Every other change
+  (NEVER, ASK, DRILL, ARG, SECRET, MODEL, NEEDS, FROM, ABOUT, an action's CHANGES) is
+  a rule change: it waits for the person's signed answer. Propose it; do not insist.
 - Write the general rule, not the incident. Leave out hostnames, versions and
   one-off strings unless the weave's job needs them.
 

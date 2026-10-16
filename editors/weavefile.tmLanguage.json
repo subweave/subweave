@@ -22,7 +22,7 @@
       "captures": { "1": { "name": "punctuation.definition.comment.weavefile" } }
     },
     "heredoc-shell": {
-      "begin": "^\\s*(?:(RUN)|(FACT)\\s+([a-z_][a-z0-9_-]*)\\s+(BOOL|NUMBER(?:\\s+(?:%|ms|s|m|h|d|B|KB|MB|GB|TB))?|TEXT|VERSION|LINES))\\s+(<<)([A-Z]+)\\s*$",
+      "begin": "^\\s*(?:(RUN|RESTORE)|(FACT)\\s+([a-z_][a-z0-9_-]*)\\s+(BOOL|NUMBER(?:\\s+(?:%|ms|s|m|h|d|B|KB|MB|GB|TB))?|TEXT|VERSION|LINES))\\s+(<<)([A-Z]+)\\s*$",
       "beginCaptures": {
         "1": { "name": "keyword.control.instruction.weavefile" },
         "2": { "name": "keyword.control.instruction.weavefile" },
@@ -90,7 +90,7 @@
       "contentName": "string.unquoted.file.weavefile"
     },
     "run-line": {
-      "begin": "^\\s*(RUN)\\s+",
+      "begin": "^\\s*(RUN|RESTORE)\\s+",
       "beginCaptures": { "1": { "name": "keyword.control.instruction.weavefile" } },
       "end": "(?<!\\\\)\\n",
       "contentName": "meta.embedded.line.shell",
@@ -122,7 +122,7 @@
     "instruction": {
       "patterns": [
         {
-          "begin": "^\\s*(ARG|SECRET|FACT|GOAL|ACTION|SKILL)\\s+([A-Za-z_][A-Za-z0-9_-]*)",
+          "begin": "^\\s*(ARG|SECRET|FACT|GOAL|ACTION|SKILL|DRILL)\\s+([A-Za-z_][A-Za-z0-9_-]*)",
           "beginCaptures": {
             "1": { "name": "keyword.control.instruction.weavefile" },
             "2": { "name": "entity.name.weavefile" }
@@ -180,7 +180,7 @@
     "keyword": {
       "patterns": [
         { "match": "\\b(MUST|SHOULD|MAY)\\b", "name": "storage.modifier.level.weavefile" },
-        { "match": "\\b(AFTER|EVERY|OVER|TRIES|PER|FOR|WITHIN|CHANGES|UNDO|IF|BEFORE|BECAUSE|THEN|DECIDE|CODE|NORMAL|TROUBLE)\\b", "name": "keyword.other.weavefile" },
+        { "match": "\\b(AFTER|EVERY|OVER|TRIES|PER|FOR|WITHIN|CHANGES|UNDO|IF|BEFORE|BECAUSE|THEN|DECIDE|CODE|NORMAL|TROUBLE|BREAK|EXPECT|FAILS|HOLDS)\\b", "name": "keyword.other.weavefile" },
         { "match": "(?<=CHANGES\\s|,\\s|,)(restart|config|version|data|network|nothing)\\b", "name": "constant.language.effect.weavefile" },
         { "match": "\\b(BOOL|NUMBER|TEXT|VERSION|LINES)\\b", "name": "storage.type.fact.weavefile" },
         { "match": "\\b(AND|OR|NOT)\\b", "name": "keyword.operator.logical.weavefile" },

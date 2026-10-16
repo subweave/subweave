@@ -2,21 +2,21 @@ FROM   ubuntu:24.04
 ARG    version=18  SHOULD "a PostgreSQL major release, like 18"
 ARG    bucket      SHOULD "an S3 URL for backups, like s3://acme-pg/db1"
 NEVER  "drop or truncate a database, or delete table rows"
-ASK    BEFORE restore
+ASK    BEFORE restore BECAUSE "a restore replaces the live data"
 
-FACT up        runuser -u postgres -- pg_isready -q
-FACT archived  "1 when WAL archiving works, else 0"
+FACT up        BOOL  runuser -u postgres -- pg_isready -q
+FACT archived  BOOL  "exits 0 when WAL archiving works"
 
-GOAL running                              up
-GOAL archiving  AFTER running  EVERY 5m   archived == 1   IF bucket
-GOAL backed     AFTER archiving           SINCE(backup) < 25h
+GOAL running   "PostgreSQL is running"                          up
+GOAL archiving "every change is copied"  AFTER running  EVERY 5m  archived  IF bucket
+GOAL backed    "a full backup is fresh"  AFTER archiving          SINCE(backup) < 25h
 
-ACTION restart FOR running WITHIN 2m
+ACTION restart "Restart PostgreSQL" FOR running WITHIN 2m CHANGES restart
   WHEN "postgres crashed once, and nothing on disk is wrong"
   RUN  systemctl restart postgresql@$version-main
-ACTION restore FOR running WITHIN 6h IF bucket
+ACTION restore "Restore the newest backup" FOR running WITHIN 6h CHANGES data, restart IF bucket
   WHEN "postgres reports lost or corrupt data"
   DO   "restore the newest wal-g backup and replay the archived WAL"
-ACTION backup FOR backed WITHIN 6h
+ACTION backup "Take a full backup" FOR backed WITHIN 6h CHANGES data
   WHEN "the newest base backup is older than a day"
   DO   "push a base backup with wal-g"

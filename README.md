@@ -8,6 +8,9 @@ A Weavefile says what must stay true on a Linux box. The Subweave daemon keeps i
 </picture>
 
 ```
+curl -fsSL https://subweave.com/install.sh | sh
+subweave key openrouter        # reads the key from stdin
+subweave run box               # once per box: disk room, clock, journal size, SSH, security updates
 subweave run postgres "postgres 18 for our app, private network, backups to s3://acme-pg/db1"
 ```
 
@@ -27,14 +30,14 @@ The run picks both models; a Weavefile only hints. One [OpenRouter](https://open
 The format is in [WEAVEFILE.md](WEAVEFILE.md): capital keywords, as in a Dockerfile, and one file per service. A weave says what, and keeps commands for when the exact command is the knowledge:
 
 ```Dockerfile
-ARG bucket  SHOULD "an S3 URL for base backups and WAL, like s3://acme-pg/db1"
+FACT logs_gb  NUMBER GB  "the size of /var/log/postgresql"
 
-FACT disk  "percent used of the filesystem that holds /var/lib/postgresql, a number"
-GOAL room  EVERY 5m  disk < 85
+GOAL old-logs  "old PostgreSQL logs leave the disk room" \
+               AFTER installed  EVERY 10m  box:disk < 85% OR logs_gb < 1GB
 
-ACTION free-disk FOR room WITHIN 10m
-  WHEN "old logs, not data or WAL, fill the disk"
-  DO   "delete compressed PostgreSQL logs older than 7 days and shrink the systemd journal to 200 MB"
+ACTION free-logs "Delete old logs" FOR old-logs WITHIN 10m CHANGES data
+  WHEN "old PostgreSQL logs, not data or WAL, take room on a full disk"
+  DO   "delete compressed PostgreSQL logs older than 7 days"
 ```
 
 `subweave plan` checks a request before anything runs, and shows each finding as an error, an ask, a warning or info:
@@ -43,28 +46,19 @@ ACTION free-disk FOR room WITHIN 10m
 $ subweave plan postgres "postgres 18, private network, backups to acme-pg, keep 14"
 
 # error    bucket    `acme-pg` is not an S3 URL for base backups and WAL, like s3://acme-pg/db1   0.04
-# info     version   18   0.73
-# info     access    private: connections from the private network, with a password and TLS   0.95
+# info     version   18   0.71
+# info     access    private: connections from the private network, with a password and TLS   0.97
 ```
 
-## Examples
+## Weaves
 
-| Weave | For | Box | Shows |
-|---|---|---|---|
-| [postgres](https://github.com/subweave/library/tree/main/postgres) | a 6-person SaaS team with no DBA | Hetzner VM, object storage | the reference: skills, restore drills, a major upgrade by sentence |
-| [ethereum](https://github.com/subweave/library/tree/main/ethereum) | a wallet startup leaving hosted RPC | dedicated server, 2 TB | a `MUST` network, thresholds as code, gated coder commands |
-| [vllm](https://github.com/subweave/library/tree/main/vllm) | a team serving its own open model | rented GPU | a `MUST` model, faults the box cannot fix |
-| [store-edge](https://github.com/subweave/library/tree/main/store-edge) | a 300-shop retail chain | fanless PC on DSL | no coder, works offline, a heartbeat |
-| [valkey](https://github.com/subweave/library/tree/main/valkey) | an agency with 40 client boxes | small VMs | a `MUST` role, one inbox for every box |
-| [minecraft](https://github.com/subweave/library/tree/main/minecraft) | a teacher with a coding club | one VPS | untrusted text, update and rollback |
-
-The weaves live in [subweave/library](https://github.com/subweave/library); `examples/` is its submodule (`git clone --recursive`).
+The weaves live in [subweave/library](https://github.com/subweave/library), one line each in its [README](https://github.com/subweave/library#weaves); `examples/` is its submodule (`git clone --recursive`).
 
 Each weave's README says what it cannot do. [LIMITS.md](LIMITS.md) says what Subweave does badly, with the decider calls that show it in [evidence/](evidence).
 
 ## Dashboard
 
-`subweave dash` serves a web dashboard for a box: goals, live activity, metrics, logs, learned commands and the weave. From it you answer escalations, run an action, give the coder a task in words (`subweave task` on the CLI) and change settings in words. It always needs a password: set one with `subweave dash --password`. It listens on 127.0.0.1:7400; `--bind 0.0.0.0` opens it to the network, and `subweave dash --install` makes it a systemd unit. See [Dashboard](WEAVEFILE.md#dashboard).
+`subweave dash` serves a web dashboard for a box: answer escalations, run an action, give the coder a task, change settings in words. See [Dashboard](WEAVEFILE.md#dashboard).
 
 ## Metrics, logs, traces
 
@@ -111,7 +105,7 @@ systemctl edit subweave   # [Service] Environment=OTEL_EXPORTER_OTLP_ENDPOINT=ht
 
 ## For weave authors
 
-`subweave review <weave>` scores a Weavefile from 0 to 100 against its authoring rules and points at the lines to fix. The shipped postgres weave passes every rule.
+`subweave review <weave>` scores a Weavefile from 0 to 100 against its authoring rules and points at the lines to fix ([Review](WEAVEFILE.md#review)).
 
 ## License
 

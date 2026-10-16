@@ -6,10 +6,10 @@ endif
 syn case match
 
 syn match   weaveComment     "^\s*#.*$"
-syn match   weaveInstruction "^\s*\zs\(ABOUT\|FROM\|NEEDS\|MODEL\|ARG\|SECRET\|FACT\|PART\|GOAL\|ACTION\|WHEN\|RUN\|DO\|ADD\|NEVER\|ASK\|SKILL\|KNOWN\)\>"
-syn match   weaveName        "\(^\s*\(ARG\|SECRET\|FACT\|PART\|GOAL\|ACTION\|SKILL\)\s\+\)\@<=[A-Za-z_][A-Za-z0-9_-]*"
+syn match   weaveInstruction "^\s*\zs\(ABOUT\|FROM\|NEEDS\|MODEL\|ARG\|SECRET\|FACT\|PART\|GOAL\|ACTION\|WHEN\|RUN\|DO\|ADD\|NEVER\|ASK\|SKILL\|KNOWN\|DRILL\|RESTORE\)\>"
+syn match   weaveName        "\(^\s*\(ARG\|SECRET\|FACT\|PART\|GOAL\|ACTION\|SKILL\|DRILL\)\s\+\)\@<=[A-Za-z_][A-Za-z0-9_-]*"
 syn keyword weaveLevel       MUST SHOULD MAY
-syn keyword weaveKeyword     AFTER EVERY OVER TRIES PER FOR WITHIN CHANGES UNDO IF BEFORE BECAUSE THEN DECIDE CODE NORMAL TROUBLE
+syn keyword weaveKeyword     AFTER EVERY OVER TRIES PER FOR WITHIN CHANGES UNDO IF BEFORE BECAUSE THEN DECIDE CODE NORMAL TROUBLE BREAK EXPECT FAILS HOLDS
 syn match   weaveEffect      "\(CHANGES\s\+\([a-z]\+,\s*\)*\)\@<=\(restart\|config\|version\|data\|network\|nothing\)\>"
 syn keyword weaveType        BOOL NUMBER TEXT VERSION LINES
 syn keyword weaveLogic       AND OR NOT

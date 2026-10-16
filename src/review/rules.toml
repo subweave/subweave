@@ -1,5 +1,5 @@
-# The rules of `subweave review`. The engine compiles this file in; each rule's wording was
-# measured on typesafe/jev-1.13 against the six examples and broken copies of them.
+# The rules of `subweave review`. The engine compiles this file in; each `ask` wording is
+# measured on typesafe/jev-1.13 against the library's weaves and broken copies of them.
 #
 # A rule checks every element of one kind (`on`) in one of three ways:
 #   ask            a yes/no question to the decider; passes when the answer is `pass`
@@ -115,14 +115,6 @@ says = "every ARG and slot is read by a command, quoted text, an IF or a skill"
 # ── SECRETs ───────────────────────────────────────────────
 
 [[rule]]
-id = "secret-name"
-area = "secrets"
-weight = 1
-on = "secret"
-code = "secret-name"
-says = "a SECRET is named in capitals, as its program reads it"
-
-[[rule]]
 id = "secret-used"
 area = "secrets"
 weight = 2
@@ -181,10 +173,10 @@ says = "a FACT command only reads"
 why = "Facts run every few minutes: LIMITS.md#7."
 
 [[rule]]
-id = "follow-trusted"
+id = "lines-trusted"
 area = "facts"
 weight = 2
-on = "fact-follow"
+on = "fact-lines"
 ask = "Whose words can the lines described in `source` contain?"
 choices = { service = "only messages the service and the system write about their own work, such as warnings and errors", outsiders = "also words chosen by outside people, such as chat messages, request paths, user agents or queries sent by an app" }
 pass = "service"
@@ -284,7 +276,7 @@ on = "action"
 unless = "asked-before"
 ask = "Could the work in `steps` delete or overwrite the service's live data, or keep the service down for much longer than a restart does?"
 pass = "no"
-says = "an action that can lose data or keep the service down has ASK BEFORE"
+says = "an action that can lose data or keep the service down has ASK BEFORE, by name or by CHANGES"
 
 [[rule]]
 id = "do-specific"

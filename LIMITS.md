@@ -2,7 +2,7 @@
 
 What Subweave does badly, and what the design does about it.
 Sections 1 to 7 are measured: 126 calls to `typesafe/jev-1.13` (build `jev-1.13-20260917`) on 2026-10-13 and 2026-10-14. Each call, with its request and answer, is one line of [evidence/jev-1.13-2026-10-13.jsonl](evidence/jev-1.13-2026-10-13.jsonl); `#n` below is that line. They are examples, not a benchmark.
-Sections 8 to 13 follow from the design.
+Sections 8 to 15 follow from the design.
 
 ## 1. Numbers inside prose
 
@@ -58,7 +58,7 @@ The framing halves the damage and does not remove it. A separate yes/no question
 
 The last wording also catches an injected line with no claim of the owner's approval: 0.95 `#35`.
 
-**Design:** each decision also asks `steered`, in the last wording; at 0.5 or more the daemon asks the person and runs nothing. `ASK BEFORE restore` stops a restore by name, in code, whatever the decider says. A weave reads only the log lines it needs: the `minecraft` weave reads `WARN` and `ERROR`, never chat.
+**Design:** each decision also asks `steered`; at 0.5 or more the daemon asks the person and runs nothing. The shipped wording (`STEERED` in [src/daemon/repair.rs](src/daemon/repair.rs)) extends the last row's: it also names words addressed to an AI or an agent and a request to skip a rule, and lists a program's own warnings and advice as evidence. The table does not measure it. `ASK BEFORE restore` stops a restore by name, in code, whatever the decider says. A weave reads only the log lines it needs: the `minecraft` weave reads `WARN` and `ERROR`, never chat.
 
 ## 4. The decider rarely asks on its own
 
@@ -101,7 +101,7 @@ A rule wider than its service gates the box's own access. On the test box, `NEVE
 
 ## 6. Checking a request
 
-The request check finds each `ARG`'s value, then asks whether it fits. Asking both at once fails: v4 asked "which option does the request choose", and "backups to acme-pg" read as no bucket at all, `unsaid` 0.86 `#40`. The person said something wrong and would have heard that they said nothing.
+The request check finds each `ARG`'s value, then asks whether it fits. Asking both at once fails: the one question "which option does the request choose" read "backups to acme-pg" as no bucket at all, `unsaid` 0.86 `#40`. The person said something wrong and would have heard that they said nothing.
 
 | Step | Case | Answer |
 |---|---|---|
@@ -182,9 +182,9 @@ Facts, log lines and coder transcripts go to OpenRouter, then to TypeSafe and De
 - A task stops after 40 commands without passing its goal check.
 - Learned steps run again in code, through the code rules only: the quoted rules judged them once, when the coder wrote them.
 - Only Steery card answers are signed. A Telegram answer is as safe as the bot's chat.
-- An agent's answer is not signed: it is as safe as the agent, its model and the machine it runs on. An agent can run any action, give the coder a task, and change facts, goals, actions and skills. A rule change waits for the person's signed answer on a Steery card.
+- An agent's answer is not signed: it is as safe as the agent, its model and the machine it runs on. An agent can run any action, give the coder a task, and change facts, parts, goals, actions, skills and `KNOWN` lines. A rule change waits for the person's signed answer on a Steery card.
 - The shell can read the daemon's files, channel and provider keys among them. The daemon replaces every key's value in what goes to a model, a channel or the journal; a key the coder re-encodes (base64, split) gets past that.
-- On this Mac, one toy task: the coder installed a page in 3 calls ($0.00046) and fixed a stopped server in 7 calls and 9 commands ($0.0040). No `DO` task has run on a real box yet.
+- On this Mac, one toy task: the coder installed a page in 3 calls ($0.00046) and fixed a stopped server in 7 calls and 9 commands ($0.0040). No `DO` task has run on a real box.
 
 ## 12. Speed and cost
 

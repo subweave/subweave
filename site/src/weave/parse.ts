@@ -18,8 +18,13 @@ export interface Arg {
 
 export interface Goal {
   name: string;
+  // What the goal keeps true, for the person.
+  sentence: string;
+  // This weave's goals it comes AFTER; `<service>:<goal>` ones go in `others`.
   after: string[];
+  others: string[];
   every: string | null;
+  over: string | null;
   tries: string | null;
   cond: string;
   quoted: boolean;
@@ -110,19 +115,26 @@ function parseGoal(weave: string, line: string): Goal {
     return m;
   };
   const name = take(/^([a-z][\w-]*)/);
-  if (!name) throw new Error(`${weave}: cannot read ${line}`);
-  let after: string[] = [];
+  const sentence = take(/^"((?:[^"\\]|\\.)*)"/);
+  if (!name || !sentence) throw new Error(`${weave}: cannot read ${line}`);
+  let refs: string[] = [];
   let every: string | null = null;
+  let over: string | null = null;
   let tries: string | null = null;
   for (;;) {
-    const a = take(/^AFTER\s+([a-z][\w-]*(?:\s*,\s*[a-z][\w-]*)*)/);
+    const a = take(/^AFTER\s+((?:[a-z0-9-]+:)?[a-z][\w-]*(?:\s*,\s*(?:[a-z0-9-]+:)?[a-z][\w-]*)*)/);
     if (a) {
-      after = a[1].split(/\s*,\s*/);
+      refs = a[1].split(/\s*,\s*/);
       continue;
     }
     const e = take(/^EVERY\s+(\S+)/);
     if (e) {
       every = e[1];
+      continue;
+    }
+    const o = take(/^OVER\s+(\S+)/);
+    if (o) {
+      over = o[1];
       continue;
     }
     const t = take(/^TRIES\s+(\d+\s+PER\s+\S+)/);
@@ -132,6 +144,8 @@ function parseGoal(weave: string, line: string): Goal {
     }
     break;
   }
+  const after = refs.filter((r) => !r.includes(":"));
+  const others = refs.filter((r) => r.includes(":"));
   let cond: string;
   let when: string | null = null;
   const quoted = rest.startsWith('"');
@@ -148,7 +162,7 @@ function parseGoal(weave: string, line: string): Goal {
     }
     cond = rest.trim().replace(/\s+/g, " ");
   }
-  return { name: name[1], after, every, tries, cond, quoted, when };
+  return { name: name[1], sentence: sentence[1], after, others, every, over, tries, cond, quoted, when };
 }
 
 export interface Row {

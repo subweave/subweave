@@ -15,7 +15,6 @@ pub const CHECKS: &[&str] = &[
     "option-slot",
     "one-option",
     "arg-used",
-    "secret-name",
     "secret-used",
     "bash-syntax",
     "goal-has-action",
@@ -77,11 +76,6 @@ pub fn check(id: &str, w: &Weave, el: &Element) -> bool {
                 texts.iter().any(|t| dollar_ref(t, n)) || exprs.iter().any(|e| reads(e, n))
             })
         }
-        "secret-name" => {
-            let mut b = name.bytes();
-            b.next().is_some_and(|c| c.is_ascii_uppercase())
-                && b.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
-        }
         "secret-used" => texts(w).iter().any(|t| {
             t.match_indices(name).any(|(i, _)| {
                 !t[..i].chars().next_back().is_some_and(is_word)
@@ -89,10 +83,9 @@ pub fn check(id: &str, w: &Weave, el: &Element) -> bool {
             })
         }),
         "bash-syntax" => bash_parses(el.str("command")),
-        "goal-has-action" => w
-            .actions
-            .iter()
-            .any(|a| a.for_goals.is_empty() || a.for_goals.iter().any(|g| g == name)),
+        "goal-has-action" => w.actions.iter().any(|a| {
+            (a.for_goals.is_empty() && !w.undoes(&a.name)) || a.for_goals.iter().any(|g| g == name)
+        }),
         "goal-since-action" => {
             let Some(Condition::Code(e)) = w.goal(name).map(|g| &g.cond) else {
                 return true;

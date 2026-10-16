@@ -759,7 +759,7 @@ pub fn elements(w: &Weave) -> IndexMap<&'static str, Vec<Element>> {
         add("fact", f.name.clone(), f.line, json!({ "name": f.name }));
         match &f.source {
             FactSource::Command(c) | FactSource::Quoted(c) if f.ty == FactType::Lines => add(
-                "fact-follow",
+                "fact-lines",
                 f.name.clone(),
                 f.line,
                 json!({ "name": f.name, "source": norm(c) }),
@@ -841,7 +841,7 @@ pub fn elements(w: &Weave) -> IndexMap<&'static str, Vec<Element>> {
                 _ => {}
             }
         }
-        if a.for_goals.is_empty() {
+        if a.for_goals.is_empty() && !w.undoes(&a.name) {
             let task: Vec<String> = a
                 .steps
                 .iter()

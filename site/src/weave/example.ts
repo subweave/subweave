@@ -18,7 +18,7 @@ export function heroFindings(eth: Weave): { findings: Finding[]; ask: string } {
   const rule = eth.rules.find((r) => r.startsWith("ASK IF") && r.includes("blocks"));
   const updates = eth.args.find((a) => a.name === "updates");
   if (!rule || !updates?.default) throw new Error("ethereum: no ASK IF on blocks, or no updates default");
-  const ask = rule.slice("ASK IF ".length).replace("blocks", BLOCKS);
+  const ask = rule.slice("ASK IF ".length).replace(/\s+BECAUSE\s+".*"$/, "").replace("blocks", BLOCKS);
   return {
     ask,
     findings: [

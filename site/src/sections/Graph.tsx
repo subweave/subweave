@@ -10,22 +10,11 @@ const rows = goalRows(pg.goals);
 const BUCKET = "s3://acme-pg/db1";
 const FAILING = "archiving";
 
-// A few words per goal of the postgres weave; the code condition sits beside them.
-const WORDS: Record<string, string> = {
-  installed: "PostgreSQL and wal-g are installed",
-  configured: "access is what the request asked",
-  running: "accepts connections",
-  archiving: "WAL reaches the bucket",
-  backed: "a base backup in the last day",
-  drilled: "a restore drill this month",
-  connections: "under 80% of max connections",
-  "short-tx": "no session idle in a transaction",
-  frozen: "transaction IDs far from wraparound",
-  patched: "no minor release pending",
-  current: "the major release asked for",
-  quiet: "the logs show nothing to act on",
-  room: "the disk is under 85% full",
-};
+// Each goal's own sentence, with `$name` read as the ARG's default; the code condition sits beside it.
+const defaults = Object.fromEntries(pg.args.map((a) => [a.name, a.default ?? a.name]));
+const WORDS: Record<string, string> = Object.fromEntries(
+  pg.goals.map((g) => [g.name, g.sentence.replace(/\$(\w+)/g, (_, n: string) => defaults[n] ?? n)]),
+);
 
 const waiting = (() => {
   const out: string[] = [];

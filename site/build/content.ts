@@ -8,7 +8,7 @@ import { highlight, type Lang } from "./shiki.ts";
 import { DOCKERFILE, SHELL } from "./snippets.ts";
 import { parseWeave, type Weave } from "../src/weave/parse.ts";
 
-export const EXAMPLES = ["ethereum", "postgres", "valkey", "minecraft", "vllm", "store-edge"] as const;
+export const EXAMPLES = ["box", "ethereum", "postgres", "valkey", "minecraft", "vllm", "store-edge"] as const;
 
 export interface WeaveCard extends Weave {
   forWho: string;
@@ -125,14 +125,21 @@ export function readContent(root: string, files: string[] = []): Content {
 
   // A quoted FACT and a DO step of the postgres weave, for "Learned commands".
   const pg = sources.postgres.text.split("\n");
-  weavefile("fact", one(pg.filter((l) => l.startsWith("FACT disk ")), "FACT disk").replace(/^FACT disk\s+/, "FACT disk "));
-  const action = pg.findIndex((l) => l.startsWith("ACTION free-disk"));
-  weavefile("do", one(pg.slice(action).filter((l) => /^\s+DO\s/.test(l)), "free-disk DO").trim().replace(/^DO\s+/, "DO "));
+  weavefile("fact", one(pg.filter((l) => l.startsWith("FACT logs_gb ")), "FACT logs_gb").replace(/^FACT logs_gb\s+/, "FACT logs_gb "));
+  const action = pg.findIndex((l) => l.startsWith("ACTION free-logs"));
+  weavefile("do", one(pg.slice(action).filter((l) => /^\s+DO\s/.test(l)), "free-logs DO").trim().replace(/^DO\s+/, "DO "));
 
   // The postgres weave's update rule, for "What about costs?": the version ARG, the goal, the action.
-  const line = (prefix: string) => one(pg.filter((l) => l.startsWith(prefix)), prefix);
+  // The lines of the instruction that starts with `prefix`, its `\` continuations included.
+  const instruction = (prefix: string) => {
+    const at = pg.findIndex((l) => l.startsWith(prefix));
+    if (at < 0) throw new Error(`site content: no ${prefix}`);
+    let end = at;
+    while (pg[end].endsWith("\\")) end++;
+    return pg.slice(at, end + 1);
+  };
   const patch = pg.findIndex((l) => l.startsWith("ACTION patch "));
-  weavefile("intent", [line("ARG version="), "", line("GOAL patched "), "", ...pg.slice(patch, patch + 3)].join("\n"));
+  weavefile("intent", [...instruction("ARG version="), "", ...instruction("GOAL patched "), "", ...pg.slice(patch, patch + 3)].join("\n"));
 
   const spec = blocks(read("WEAVEFILE.md"));
   const journal = one(spec.filter((b) => b.info === "json" && b.body.includes('"kind":"decide"')), "journal");

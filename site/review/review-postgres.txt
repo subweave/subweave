@@ -1,4 +1,4 @@
-postgres  100/100   48 rules, 221 checks, $0.0020
+postgres  98/100   51 rules, 225 checks, $0.0020
 
 area       score  failed
 header       100
@@ -9,4 +9,7 @@ goals        100
 actions      100
 rules        100
 skills       100
-coverage     100
+coverage      93  box-shared (1)
+
+Weavefile:1    warning  box-shared   postgres   no goal repeats what the box weave keeps   0.90
+                                                The box weave keeps these once per box; a service goes AFTER box:<goal> or reads box:<fact>: WEAVEFILE.md#composition.
