@@ -2,7 +2,8 @@
 //! conversations over the one stream the Steery channel's key holds outbound. Steery's
 //! wire (its specs/OUTPOSTS.md): `PUT /v1/outposts` names the outpost, its `holder` and
 //! its tools; `GET /v1/events` streams `invocation.sent` to this key; each invocation
-//! is answered with `POST /v1/invocations/{id}/report`.
+//! is answered with `POST /v1/invocations/{id}/report`; each card it raised ends with
+//! `POST /v1/requests/{id}/report` (`consumed`, or `withdrawn` when nothing waits on it).
 //!
 //! A free tool runs at once. A gated one runs only after the person's Go on a signed
 //! card, raised through the one path escalation cards take and verified here against the
@@ -174,11 +175,16 @@ pub(crate) async fn run(cfg: &Config, holder: &Arc<Holder>, tools: Tools, mut st
         return Ended::Refused(format!("{why}: add the Steery channel with --outpost <name>"));
     }
     // The stream from the log's head, so nothing older is read and the key is online
-    // before it puts.
+    // before it puts; the key's id, to find the cards an earlier holder left.
     let mut failures = 0;
-    let head = loop {
+    let (head, key_id) = loop {
         let failed = match api(cfg, reqwest::Method::GET, "/v1/me", None).await {
-            Ok(me) => break me["workspace"]["head"].as_i64(),
+            Ok(me) => {
+                break (
+                    me["workspace"]["head"].as_i64(),
+                    me["key"]["id"].as_str().map(str::to_owned),
+                );
+            }
             Err(Failure::Refused(401 | 403, why)) => return Ended::Revoked(why),
             Err(e) => e,
         };
@@ -227,6 +233,10 @@ pub(crate) async fn run(cfg: &Config, holder: &Arc<Holder>, tools: Tools, mut st
         }
     };
     tracing::info!(outpost = %cfg.name, holder = %holder.id, tools = tools.list.len(), "outpost: held");
+    match &key_id {
+        Some(key) => withdraw_left(cfg, key).await,
+        None => tracing::warn!("outpost: Steery named no key; the cards an earlier holder left stay open"),
+    }
 
     let running = Arc::new(Running {
         cfg: cfg.clone(),
@@ -380,7 +390,11 @@ impl Running {
         if let Err(e) = raise(&self.cfg.key, &raised, Some(mine)).await {
             return Some(Report::Failed(line(&format!("could not ask: {e:#}"))));
         }
-        let waiting = self.report(sent.id, &Report::Waiting(raised.id.clone())).await?;
+        let Some(waiting) = self.report(sent.id, &Report::Waiting(raised.id.clone())).await else {
+            // Nothing waits on the card: take it back.
+            request_report(&self.cfg, &raised.id, "withdrawn").await;
+            return None;
+        };
         let Some(deadline) = timestamp(&waiting["deadline"]) else {
             tracing::warn!(invocation = %sent.id, "outpost: the waiting invocation has no deadline");
             return None;
@@ -404,6 +418,7 @@ impl Running {
                     if !lock(&self.holder.consumed).insert(raised.id.clone()) {
                         return None;
                     }
+                    request_report(&self.cfg, &raised.id, "consumed").await;
                     tracing::info!(invocation = %sent.id, tool = %sent.tool, %by, "outpost: a signed Go");
                     return self.call(sent, deadline).await;
                 }
@@ -510,6 +525,45 @@ async fn api(cfg: &Config, method: reqwest::Method, path: &str, body: Option<&Va
         return Err(Failure::Refused(status.as_u16(), said(&text)));
     }
     Err(Failure::Down(anyhow!("steery {path}: HTTP {}: {}", status.as_u16(), said(&text))))
+}
+
+/// Say what became of a card this key raised: `consumed`, or `withdrawn` while open.
+async fn request_report(cfg: &Config, request: &str, state: &str) {
+    let path = format!("/v1/requests/{request}/report");
+    let body = json!({"state": state});
+    if let Err(e) = api(cfg, reqwest::Method::POST, &path, Some(&body)).await {
+        tracing::warn!(%request, state, error = %e, "outpost: reporting a card");
+    }
+}
+
+/// Withdraw every open card this key raised for this outpost: an earlier holder left
+/// them, and none of them runs here.
+async fn withdraw_left(cfg: &Config, key: &str) {
+    let mut before: Option<i64> = None;
+    loop {
+        let mut path = format!("/v1/requests?status=open&key={key}");
+        if let Some(before) = before {
+            path.push_str(&format!("&before={before}"));
+        }
+        let page = match api(cfg, reqwest::Method::GET, &path, None).await {
+            Ok(page) => page,
+            Err(e) => {
+                tracing::warn!(error = %e, "outpost: reading the cards an earlier holder left");
+                return;
+            }
+        };
+        for request in page["items"].as_array().into_iter().flatten() {
+            if request["payload"]["outpost"] == cfg.name.as_str()
+                && let Some(id) = request["id"].as_str()
+            {
+                request_report(cfg, id, "withdrawn").await;
+            }
+        }
+        match page["next"].as_i64() {
+            Some(next) => before = Some(next),
+            None => return,
+        }
+    }
 }
 
 /// Steery's error message in `text`, else its first 300 characters.

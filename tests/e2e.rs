@@ -42,6 +42,8 @@ const OUTPOST: &str = "box-e2e";
 /// The Steery key that invokes the outpost's tools, and its person's handle.
 const CALLER_KEY: &str = "0199f3a0-5a6b-7c8d-9e0f-1a2b3c4d5e6f";
 const CALLER: &str = "e2e";
+/// The box's own Steery key, as `/v1/me` names it.
+const BOX_KEY: &str = "0199f3a0-5a6b-7c8d-9e0f-1a2b3c4d5e70";
 /// Why a weave change through the outpost.
 const OUTPOST_WHY: &str = "rotate twice as rarely";
 /// Lines of the toy's event log: a kind the weave knows normal, a routine kind the model
@@ -99,6 +101,8 @@ struct Steery {
     frames: Vec<(Option<i64>, String)>,
     /// Each `POST /v1/invocations/{id}/report`: (id, body).
     reports: Vec<(String, Value)>,
+    /// Each `POST /v1/requests/{id}/report`: (id, state).
+    request_reports: Vec<(String, String)>,
     /// Event streams open now.
     streams: usize,
 }
@@ -352,7 +356,7 @@ async fn steery_me(headers: HeaderMap) -> (StatusCode, axum::Json<Value>) {
     if !steery_ok(&headers) {
         return (StatusCode::UNAUTHORIZED, axum::Json(json!({})));
     }
-    let me = json!({"workspace": {"id": WORKSPACE, "name": "e2e", "head": 0}});
+    let me = json!({"workspace": {"id": WORKSPACE, "name": "e2e", "head": 0}, "key": {"id": BOX_KEY}});
     (StatusCode::OK, axum::Json(me))
 }
 
@@ -438,6 +442,48 @@ async fn request_get(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// `GET /v1/requests`: the requests in `status` this mock's one key raised, when `key`
+/// names it; one page.
+async fn request_list(
+    State(m): State<Mock>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, axum::Json<Value>) {
+    if !steery_ok(&headers) {
+        return (StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+    }
+    let items: Vec<Value> = m
+        .steery()
+        .requests
+        .values()
+        .filter(|_| q.get("key").map(String::as_str) == Some(BOX_KEY))
+        .filter(|r| q.get("status").is_none_or(|s| r["status"] == s.as_str()))
+        .cloned()
+        .collect();
+    (StatusCode::OK, axum::Json(json!({"items": items})))
+}
+
+/// `POST /v1/requests/{id}/report`: kept; `withdrawn` withdraws it.
+async fn request_report(
+    State(m): State<Mock>,
+    UrlPath(id): UrlPath<String>,
+    headers: HeaderMap,
+    body: String,
+) -> (StatusCode, axum::Json<Value>) {
+    let r: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    let mut s = m.steery();
+    let state = r["state"].as_str().unwrap_or_default().to_string();
+    s.request_reports.push((id.clone(), state.clone()));
+    let Some(request) = s.requests.get_mut(&id).filter(|_| steery_ok(&headers)) else {
+        return (StatusCode::NOT_FOUND, axum::Json(json!({"error": {"code": "not_found"}})));
+    };
+    if state == "withdrawn" {
+        request["status"] = json!("withdrawn");
+        request["reason"] = json!("raiser");
+    }
+    (StatusCode::OK, axum::Json(request.clone()))
 }
 
 /// `PUT /v1/outposts`: kept, and answered as the outpost, put now.
@@ -2405,6 +2451,11 @@ async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
         .await;
     assert!(done["result"]["content"].is_array() && done["result"]["isError"].is_null(), "{done}");
     assert_eq!(std::fs::read_to_string(svc_dir.join("Weavefile")).unwrap(), next);
+    let consumed = |card: &Value| {
+        let id = card["id"].as_str().unwrap_or_default().to_string();
+        mock.steery().request_reports.contains(&(id, "consumed".to_string()))
+    };
+    assert!(consumed(&card), "the Go is reported consumed");
     mock.invoke(signed, OUTPOST, &holder, "weave_change", &change);
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(mock.reports(signed).len(), 2, "the re-sent gated invocation was reported again");
@@ -2422,8 +2473,17 @@ async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(mock.reports(late).is_empty(), "a stopped outpost ran an invocation");
 
-    // A changed channel holds it again, with the same holder; `end {reconnect: false}`
-    // stops it and every channel hears why.
+    // A changed channel holds it again, with the same holder, and withdraws the open
+    // cards an earlier holder of that outpost left; `end {reconnect: false}` stops it and
+    // every channel hears why.
+    let (left, other) = (
+        "0199f3a0-7a01-7c00-8000-0000000000a1",
+        "0199f3a0-7a01-7c00-8000-0000000000a2",
+    );
+    for (id, outpost) in [(left, "e2e-two"), (other, "elsewhere")] {
+        let card = json!({"id": id, "workspace": WORKSPACE, "status": "open", "title": "Run «task»?", "payload": {"id": id, "outpost": outpost, "tool": "task", "arguments": {}}});
+        mock.steery().requests.insert(id.to_string(), card);
+    }
     b.ok(&["channel", "rm", "steery"]).await;
     let o = b
         .sw_stdin(&["channel", "add", "steery", "--outpost", "e2e-two"], STEERY_KEY)
@@ -2435,6 +2495,11 @@ async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
         })
         .await;
     assert_eq!(again["holder"], holder.as_str(), "one holder per daemon start");
+    b.until("the left card withdrawn", 20, || {
+        (mock.steery().requests[left]["status"] == "withdrawn").then_some(())
+    })
+    .await;
+    assert_eq!(mock.steery().requests[other]["status"], "open", "another outpost's card was withdrawn");
     b.until("the outpost's stream again", 20, || (mock.steery().streams > 0).then_some(()))
         .await;
     mock.end(false, "this key was revoked");
@@ -2498,8 +2563,9 @@ async fn daemon_and_cli_keep_a_toy_service() {
         .route("/v1/signers", get(steery_signers))
         .route("/v1/throws", post(throw_create))
         .route("/v1/throws/{id}", get(throw_get))
-        .route("/v1/requests", post(request_create))
+        .route("/v1/requests", get(request_list).post(request_create))
         .route("/v1/requests/{id}", get(request_get))
+        .route("/v1/requests/{id}/report", post(request_report))
         .route("/v1/outposts", put(outpost_put))
         .route("/v1/events", get(events))
         .route("/v1/invocations/{id}/report", post(invocation_report))
