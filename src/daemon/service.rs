@@ -543,6 +543,9 @@ impl Loop {
                 ),
             );
         }
+        if ctx.misfit.is_empty() {
+            self.withdraw(None, "this box fits the weave now");
+        }
         self.start_repair();
         self.start_drill().await;
     }
@@ -644,7 +647,7 @@ impl Loop {
             why,
         };
         self.unchecked(goal, state, e, blocked);
-        self.withdraw(goal, "no longer applies: its IF, or a parent's, is false");
+        self.withdraw(Some(goal), "no longer applies: its IF, or a parent's, is false");
     }
 
     /// Whether `g` may be checked now: the goals it comes AFTER hold (one of this
@@ -703,7 +706,7 @@ impl Loop {
             on,
         };
         self.unchecked(goal, state, e, true);
-        self.withdraw(goal, &why);
+        self.withdraw(Some(goal), &why);
     }
 
     /// A goal that cannot be judged: another service it comes AFTER or reads does not
@@ -717,7 +720,7 @@ impl Loop {
             why: why.clone(),
         };
         self.unchecked(goal, state, e, true);
-        self.withdraw(goal, &format!("cannot be judged: {why}"));
+        self.withdraw(Some(goal), &format!("cannot be judged: {why}"));
     }
 
     /// A goal not checked now, journaled as `e` when it was not in `state` yet: a failed
@@ -811,31 +814,42 @@ impl Loop {
             }
         }
         if state.holds() {
-            self.withdraw(&g.name, "holds again");
+            self.withdraw(Some(&g.name), "holds again");
         }
     }
 
-    /// Escalations for `goal` the loop raised are moot once it holds or turns off (`why`):
-    /// each is withdrawn, its channel messages lose their buttons, and the channels hear
-    /// it. Checked on every pass, not only on the change.
-    fn withdraw(&self, goal: &str, why: &str) {
+    /// Escalations the loop raised for `goal`, or for the box when `None`, are moot once
+    /// it holds, turns off or fits (`why`): each is withdrawn, its channel messages lose
+    /// their buttons, and the channels hear it. Checked on every pass, not only on the
+    /// change.
+    fn withdraw(&self, goal: Option<&str>, why: &str) {
         let ctx = &self.ctx;
-        let open = ctx.journal().state().open_for(goal);
+        let open = match goal {
+            Some(g) => ctx.journal().state().open_for(g),
+            None => ctx.journal().state().open_box(),
+        };
+        if open.is_empty() {
+            return;
+        }
+        let what = match goal {
+            Some(g) => format!("{g} {why}"),
+            None => why.to_string(),
+        };
         for n in open {
             let withdraw = Kind::Withdraw {
                 n,
-                goal: Some(goal.to_string()),
-                why: format!("{goal} {why}"),
+                goal: goal.map(str::to_string),
+                why: what.clone(),
             };
             if !asks::settle(&ctx.shared, &mut ctx.journal(), withdraw.into()) {
                 continue;
             }
             ctx.message(
                 channel::Kind::Info,
-                Some(goal.to_string()),
+                goal.map(str::to_string),
                 Card::note(
                     format!("#{n} withdrawn"),
-                    vec![format!("{goal} {why}; ask #{n} is closed.")],
+                    vec![format!("{what}; ask #{n} is closed.")],
                 ),
             );
         }

@@ -960,6 +960,11 @@ impl Escalation {
         matches!(self.state, EscalationState::Open { .. })
     }
 
+    /// About the box itself, not a goal, action or rule: a box that does not fit the weave.
+    pub fn on_box(&self) -> bool {
+        self.goal.is_none() && self.action.is_none() && self.rule.is_none()
+    }
+
     /// Where it went, while it is open.
     pub fn sent(&self) -> &[Sent] {
         match &self.state {
@@ -1479,6 +1484,15 @@ impl ServiceState {
             .collect()
     }
 
+    /// The open escalations about the box itself the loop raised: none a person's job
+    /// raised.
+    pub fn open_box(&self) -> Vec<u64> {
+        self.open()
+            .filter(|e| e.on_box() && e.by.is_none())
+            .map(|e| e.n)
+            .collect()
+    }
+
     /// A person's task waits for the answer to its escalation.
     pub fn task_waits(&self) -> bool {
         self.open().any(|e| e.action.as_deref() == Some(TASK))
@@ -1606,9 +1620,7 @@ impl ServiceState {
     /// The person said yes to a box that does not fit the weave.
     pub fn box_approved(&self) -> bool {
         self.escalations.values().any(|e| {
-            e.goal.is_none()
-                && e.action.is_none()
-                && e.rule.is_none()
+            e.on_box()
                 && matches!(&e.state, EscalationState::Answered { word, .. } if word == "yes" || word == "always")
         })
     }

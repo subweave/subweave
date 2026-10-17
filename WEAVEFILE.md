@@ -110,7 +110,7 @@ MODEL  CODE deepseek/deepseek-v4-flash-0731 THEN deepseek/deepseek-v4-pro
 ```
 
 - `FROM` is required.
-- The daemon checks `FROM` and `NEEDS` against the box before the first action.
+- The daemon checks `FROM` and `NEEDS` against the box before the first action. A box that does not fit escalates, `Run <service> on a box that does not fit?`; a later run whose weave fits withdraws it.
 - `MODEL DECIDE` and `MODEL CODE` are hints: the models the weave's author recommends for each role. The run chooses; see [Models](#models).
 - `THEN`: the next model takes over a `DO` task after two failed goal checks.
 

@@ -3719,6 +3719,61 @@ async fn daemon_and_cli_keep_a_toy_service() {
     let o = b.sw(&["run", &cycle, "--yes", "-d"]).await;
     assert!(!o.status.success() && both(&o).contains(want), "{}", both(&o));
 
+    // 6o. A box that does not fit FROM: the loop asks before it repairs. Run again under
+    // the same name with a FROM that fits, the ask is moot: withdrawn, off the inbox, and
+    // the channels hear it.
+    phase("6o misfit withdrawn");
+    let odd_dir = dir.join("examples/odd");
+    std::fs::create_dir_all(&odd_dir).unwrap();
+    let odd_weave = |from: &str| {
+        format!(
+            "ABOUT \"waits for a mark\"\nFROM {from}\nFACT mark BOOL test -f {}/odd-mark\nGOAL marked \"the mark is there\" EVERY 1s mark\n",
+            dir.display()
+        )
+    };
+    let unfit = format!("{}:999", from_line().split(':').next().unwrap_or_default());
+    std::fs::write(odd_dir.join("Weavefile"), odd_weave(&unfit)).unwrap();
+    let odd = odd_dir.display().to_string();
+    let mut args = vec!["run", &odd, "--yes", "-d"];
+    args.extend(models);
+    let out = b.ok(&args).await;
+    assert!(out.contains("handed odd to the daemon"), "{out}");
+    let misfit = "Run odd on a box that does not fit?";
+    let ask = b
+        .until("the misfit ask", 30, || {
+            b.journal_of("odd")
+                .into_iter()
+                .find(|l| l["kind"] == "ask" && l["card"]["title"] == misfit)
+        })
+        .await;
+    let n = ask["n"].as_u64().unwrap();
+    assert!(ask["goal"].is_null() && ask["action"].is_null(), "{ask}");
+    let out = b.ok(&["inbox"]).await;
+    assert!(out.lines().any(|l| l.starts_with(&format!("#{n} ")) && l.contains(misfit)), "{out}");
+    std::fs::write(dir.join("odd-mark"), "").unwrap();
+    std::fs::write(odd_dir.join("Weavefile"), odd_weave(&from_line())).unwrap();
+    let out = b.ok(&args).await;
+    assert!(out.contains("handed odd to the daemon"), "{out}");
+    let withdrawn = b
+        .until("the misfit ask withdrawn", 10, || {
+            b.journal_of("odd")
+                .into_iter()
+                .find(|l| l["kind"] == "withdraw" && l["n"] == n)
+        })
+        .await;
+    assert_eq!(withdrawn["text"], "this box fits the weave now", "{withdrawn}");
+    let out = b.ok(&["inbox"]).await;
+    assert!(!out.contains(misfit), "{out}");
+    b.until("the webhook to hear the misfit withdrawal", 10, || {
+        mock.hooks().into_iter().find(|h| {
+            h["service"] == "odd"
+                && h["card"]["title"] == format!("#{n} withdrawn")
+                && h["card"]["lines"][0] == format!("this box fits the weave now; ask #{n} is closed.")
+        })
+    })
+    .await;
+    b.ok(&["rm", "odd", "--yes"]).await;
+
     // 6l. ASK BEFORE CHANGES data gates purge, which it never names.
     phase("6l effects, undo, part");
     std::fs::write(dir.join("spool/job-1"), "x").unwrap();
