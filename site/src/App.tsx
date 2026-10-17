@@ -75,9 +75,6 @@ export function App() {
             <li>
               <a href={`${REPO}/blob/main/WEAVEFILE.md`}>WEAVEFILE.md</a>
             </li>
-            <li>
-              <a href={`${REPO}/blob/main/LIMITS.md`}>LIMITS.md</a>
-            </li>
           </ul>
         </div>
       </footer>

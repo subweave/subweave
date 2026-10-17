@@ -1,4 +1,4 @@
-postgres  100/100   48 rules, 221 checks, $0.0020
+postgres  100/100   48 rules, 234 checks, $0.0021
 
 area       score  failed
 header       100

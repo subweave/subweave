@@ -231,7 +231,7 @@ A code condition:
 - On a goal's first check, `PREV()` has no value, so the goal waits for the second check.
 - A goal that reads a quoted fact the box has not learned stays unknown, and no repair runs for it.
 
-A quoted condition goes to the decider as one yes/no question. Its backticked names say which facts it reads. All quoted goals due in one tick share one decider request. A threshold is code, never prose: see [LIMITS.md](LIMITS.md#1-numbers-inside-prose).
+A quoted condition goes to the decider as one yes/no question. Its backticked names say which facts it reads. All quoted goals due in one tick share one decider request. A threshold is code, never prose: the decider does not compare numbers inside a sentence.
 
 ## ACTION
 
@@ -258,7 +258,7 @@ ACTION fix WITHIN 30m
 - `IF`: the action does not run while the expression is false.
   - An `IF` on facts, `SINCE` or `PREV` is a precondition: while false, the action is no fix at all.
   - An `IF` on ARGs only says how the box is set up: the action is the person's here. When its `FOR` names the failing goal and the decider picks it, the person gets a card that names the fix, like `Update reth and Lighthouse yourself?`. `subweave do` and an answer never run it.
-- `WHEN` says when the action is the right fix, not what it does. The decider chooses by the name and `WHEN` alone. See [LIMITS.md](LIMITS.md#2-the-action-description-is-the-decision).
+- `WHEN` says when the action is the right fix, not what it does. The decider chooses by the name and `WHEN` alone.
 - Steps run in order. A `RUN` that exits non-zero ends the action as failed.
 - `DO` hands the task to the coder, unless this box already learned its steps.
 - `ADD <<EOF <path>` writes the heredoc to the path, byte for byte, with no `$name` replaced.
@@ -288,7 +288,7 @@ ASK   IF blocks < 10064 BECAUSE "the chain is too short to be mainnet"
 - A quoted rule checks what the person asked and what the coder writes. The author's own text passes the code rules only: an action the decider picks, a `RUN` step, a recipe, a learned step.
 - A rule that turns on a number is code: `NEVER IF version < 14`, not `NEVER "versions before 14"`.
 - Every box also has the daemon's own rule, `NEVER "cut off SSH access to this box, or risk it: a firewall change that does not allow SSH in the same command, stopping sshd, or taking the network down"`. The person and `--on` reach the box over SSH.
-- Name the service in a rule about the network: `"let PostgreSQL accept connections from the internet"`. SSH is also a connection from the internet, so the wider rule refuses the command that keeps SSH open ([LIMITS.md](LIMITS.md#5-gating-shell-commands-depends-on-their-stated-purpose)).
+- Name the service in a rule about the network: `"let PostgreSQL accept connections from the internet"`. SSH is also a connection from the internet, so the wider rule refuses the command that keeps SSH open.
 - After a refusal, the loop picks again or escalates.
 - `BECAUSE "<why>"`: why a code rule asks or refuses, in plain words for the person's card. A quoted rule is its own reason.
 - The answer is `yes`, `no`, `always` or `never`. The daemon keeps `always` and `never` in the journal for that rule and action, and does not ask again. A changed `BECAUSE` keeps them.
@@ -393,7 +393,7 @@ The decider's request, for a failing goal:
 }
 ```
 
-`steered` at 0.5 or more makes the daemon escalate and run nothing. See [LIMITS.md](LIMITS.md#3-text-on-the-box-can-steer-the-decider).
+`steered` at 0.5 or more makes the daemon escalate and run nothing.
 
 `journal` holds only this goal's past action outcomes. With failed checks and earlier asks beside them, Jev picked `ask` over a plain restart (confidence 0.13 to 0.35); with outcomes alone, `restart` scored 0.83. Repeat failures are `TRIES`, counted in code.
 
@@ -415,7 +415,7 @@ A weave says what; each box learns how, once, and then runs code.
 - `subweave learned <service>` lists them. `subweave forget <service> <fact or action>` drops one.
 - `subweave learn <service>` turns learned steps into draft `SKILL` recipes for the weave's author.
 
-So the loop needs the coder on the first install and on new trouble, not on every check. Offline, the learned commands still run: see [LIMITS.md](LIMITS.md#8-offline-means-code-only).
+So the loop needs the coder on the first install and on new trouble, not on every check. Offline, the learned commands still run.
 
 ## The coder
 
@@ -479,7 +479,7 @@ subweave run postgres "postgres 18" --decide jev-1.13.0@typesafe
 - The decider needs a System One model: the loop's thresholds read its probabilities, and a chat model gives none.
 - A provider with no key sends no `Authorization` header.
 - `key` stores the key on each box that uses the provider, with mode 600, like a `SECRET`. It never goes to a model.
-- [LIMITS.md](LIMITS.md) measures `typesafe/jev-1.13`. Another decider needs its own measurement.
+- The loop's thresholds are measured on `typesafe/jev-1.13`. Another decider needs its own measurement.
 
 ## Requests
 
@@ -585,7 +585,7 @@ subweave channel test steery
 - The first answer settles the escalation. The other channels show who answered.
 - A withdrawn escalation loses its buttons in `telegram`. Steery has no withdraw call: a request the daemon stops polling is withdrawn by Steery after 15 minutes.
 - `steery` cards: the daemon raises each card as a request with its own key, and reads the answer with a long poll, so the box needs no open port. The summary leads the card; its lines and facts sit under it. The answer is a signature from the person's device, which the daemon checks before it acts.
-- `heartbeat`: a service such as healthchecks.io alerts when the pings stop. That is the only alert when the whole box is down: see [LIMITS.md](LIMITS.md#9-one-box-no-failover).
+- `heartbeat`: a service such as healthchecks.io alerts when the pings stop. That is the only alert when the whole box is down.
 - On the person's computer, `subweave watch` shows every box's messages as system notifications.
 - Channel keys stay on the box in `/etc/subweave/channels.json`, mode 600. They never go to a model.
 
