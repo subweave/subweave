@@ -132,10 +132,6 @@ export function Hero() {
             <p className="hero-sub">Like Docker containers, but powered by LLMs and decision models.</p>
           </div>
           <div className="hero-side">
-            <p className="hero-line">
-              Write a runbook for a service in human language. Subweave installs it on your Linux box and maintains it
-              indefinitely.
-            </p>
             <ol className="hero-commands">
               <li>
                 <Step n={1}>Install the daemon</Step>
