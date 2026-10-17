@@ -8,12 +8,14 @@ description: Use when a Subweave box escalates to you: settle the escalation, fi
 Each command below runs on the box: `subweave …`, or over MCP, `subweave mcp`.
 
 From a Steery conversation, the box is an outpost: the escalation names it. Read its
-tools with `outposts_get`, then call one with `invocations_create` (`outpost`, `tool`,
-`arguments`, `wait_secs`). Each command below is the tool of the same name: `inbox`,
-`answer`, `log`, `weave`, `weave_change`, `known`, `task`, `do`, `drill`, `skill`.
+tools with `steery outposts get <outpost>`, then call one with
+`steery invocations create --json '{"outpost": "<outpost>", "tool": "<tool>",
+"arguments": {…}, "wait_secs": 60}'`. Each command below is the tool of the same name:
+`inbox`, `answer`, `log`, `weave`, `weave_change`, `known`, `task`, `do`, `drill`, `skill`.
 
 - `task` and `weave_change` run only after the person's Go on a signed card: the
-  invocation is `waiting` until they decide. Read it again with `invocations_get`.
+  invocation is `waiting` until they decide. Read it again with
+  `steery invocations get <id> --wait-secs 60`.
   Every other tool runs at once, through the weave's own rules.
 - `refused`, `failed` and `expired` are final; a new attempt is a new `id`.
 

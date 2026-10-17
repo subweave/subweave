@@ -785,7 +785,7 @@ The words hold the escalation as a card shows it, the box and the service, the o
 While a Steery channel exists, the daemon offers the box's MCP tools to the workspace's conversations as a Steery outpost. The box opens no port: the daemon holds one outbound event stream with the channel's key.
 
 - One outpost per box, from its first Steery channel: `--outpost <name>`, else the hostname (`[a-z0-9-]`, 2–40).
-- An agent reads the tools with `outposts_get` and calls one with `invocations_create`. The tools are `subweave mcp`'s, in its order; a call acts as `outpost:<caller's handle>`.
+- An agent reads the tools with `steery outposts get <name>` and calls one with `steery invocations create`. The tools are `subweave mcp`'s, in its order; a call acts as `outpost:<caller's handle>`.
 - Each invocation runs at most once while the daemon lives, never within 5 seconds of its deadline. Its result is redacted as the journal is.
 
 | Tool | Runs |

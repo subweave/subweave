@@ -40,7 +40,7 @@ pub(crate) fn body(msg: &Message, outpost: Option<&str>, skill: bool) -> String 
         Some(o) => {
             let _ = write!(
                 out,
-                "\n\nTools: this box is the Steery outpost `{o}`. Read its tools' schemas with `outposts_get` (`name: \"{o}\"`), then call each with `invocations_create` (`outpost: \"{o}\"`, `tool`, `arguments`):\n- `inbox`: the open escalations\n- `answer` (`service: \"{service}\"`, `n: {n}`, `word`, `note`): settle this one\n- `log` (`service: \"{service}\"`): what the ladder tried\n- `weave` (`service: \"{service}\"`): the running weave and its ARGs\n- `task` and `weave_change` run only after the person's Go on Steery: the invocation waits for it.\n\n"
+                "\n\nTools: this box is the Steery outpost `{o}`. Read its tools' schemas with `steery outposts get {o}`, then call each with `steery invocations create --json '{{\"outpost\": \"{o}\", \"tool\": \"<tool>\", \"arguments\": {{…}}, \"wait_secs\": 60}}'`:\n- `inbox`: the open escalations\n- `answer` (`service: \"{service}\"`, `n: {n}`, `word`, `note`): settle this one\n- `log` (`service: \"{service}\"`): what the ladder tried\n- `weave` (`service: \"{service}\"`): the running weave and its ARGs\n- `task` and `weave_change` run only after the person's Go on Steery: the invocation waits for it; read it again with `steery invocations get <id> --wait-secs 60`.\n\n"
             );
         }
     }

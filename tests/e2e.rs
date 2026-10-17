@@ -2053,7 +2053,7 @@ async fn escalation(b: &Box_, mock: &Mock, weave: &str, port: u16, www: &Path) {
     let text = throw["body"].as_str().unwrap_or_default();
     for want in [
         format!("this box is the Steery outpost `{OUTPOST}`"),
-        format!("`outposts_get` (`name: \"{OUTPOST}\"`)"),
+        format!("`steery outposts get {OUTPOST}`"),
         format!("`answer` (`service: \"toy\"`, `n: {n1}`, `word`, `note`)"),
         "`task` and `weave_change` run only after the person's Go on Steery".to_string(),
         "# Subweave escalation".to_string(),
