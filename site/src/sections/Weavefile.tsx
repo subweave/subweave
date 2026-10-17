@@ -32,8 +32,8 @@ export function Weavefile({ n, selected, onSelect }: { n: number; selected: stri
       id="weavefile"
       n={n}
       kicker="The Weavefile"
-      title="Each weave is one file. Read them in full."
-      lede="Keywords in capitals, as in a Dockerfile. Quoted text goes to a model; everything else is code. Say what, not how: each box learns the how."
+      title="An agent writes the weave. Each escalation refines it."
+      lede="Nobody writes a Weavefile by hand. An agent writes the first version, or starts from one in the library. Each time the box escalates, the agent that settles the case also changes the weave, so the box settles the next case itself. Each weave becomes an operations harness built for your own services, one layer above the software they run."
     >
       <div className="tabs">
         <div className="tabs-head">

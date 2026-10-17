@@ -285,14 +285,6 @@ code.kw {
   letter-spacing: -0.05em;
 }
 
-.hero-line {
-  font-size: clamp(17px, 1.6vw, 20px);
-  line-height: 1.45;
-  color: var(--ink-2);
-  max-width: 34ch;
-  margin-bottom: 18px;
-}
-
 .hero-sub {
   margin-top: 20px;
   max-width: 32ch;
