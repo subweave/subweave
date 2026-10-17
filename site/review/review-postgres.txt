@@ -11,5 +11,5 @@ rules        100
 skills       100
 coverage      93  box-shared (1)
 
-Weavefile:1    warning  box-shared   postgres   no goal repeats what the box weave keeps   0.90
+Weavefile:1    warning  box-shared   postgres   no goal repeats what the box weave keeps   0.64
                                                 The box weave keeps these once per box; a service goes AFTER box:<goal> or reads box:<fact>: WEAVEFILE.md#composition.

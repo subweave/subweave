@@ -54,7 +54,7 @@ on = "arg-value"
 ask = "Does `what` say what kind of value the setting takes, such as a number, a version, a URL, a name, a size or a duration?"
 pass = "yes"
 says = "an ARG's description says its kind of value"
-why = "The request check asks whether each value fits this description: LIMITS.md#6."
+why = "The request check asks whether each value fits this description."
 
 [[rule]]
 id = "arg-what-example"
@@ -102,7 +102,7 @@ weight = 1
 on = "arg-options"
 code = "option-slot"
 says = "an option holds no <slot>; a value ARG reads better"
-why = "The decider picked the wrong option with a slot at 0.35 and 0.47: LIMITS.md#6."
+why = "The decider picked the wrong option with a slot at 0.35 and 0.47."
 
 [[rule]]
 id = "arg-used"
@@ -170,7 +170,7 @@ on = "fact-command"
 ask = "Does `command` change anything on the box: install, write, delete, restart, or refresh a cache?"
 pass = "no"
 says = "a FACT command only reads"
-why = "Facts run every few minutes: LIMITS.md#7."
+why = "Facts run every few minutes."
 
 [[rule]]
 id = "lines-trusted"
@@ -181,7 +181,7 @@ ask = "Whose words can the lines described in `source` contain?"
 choices = { service = "only messages the service and the system write about their own work, such as warnings and errors", outsiders = "also words chosen by outside people, such as chat messages, request paths, user agents or queries sent by an app" }
 pass = "service"
 says = "a LINES fact reads only lines the service writes about itself"
-why = "Text on the box can steer the decider: LIMITS.md#3."
+why = "Text on the box can steer the decider."
 
 [[rule]]
 id = "command-syntax"
@@ -225,7 +225,7 @@ on = "goal-quoted"
 ask = "Does `condition` compare a number with a limit, such as a size, a count, a percentage or an age?"
 pass = "no"
 says = "a threshold is code, not prose"
-why = "The decider does not compare numbers inside a sentence: LIMITS.md#1."
+why = "The decider does not compare numbers inside a sentence."
 
 # ── ACTIONs ───────────────────────────────────────────────
 
@@ -239,7 +239,7 @@ ask = "Which describes `when`?"
 choices = { situation = "what is wrong or what happened, such as a crash, a full disk, a missing package or an old backup", steps = "what to do, such as restarting, deleting, installing or upgrading something" }
 pass = "situation"
 says = "WHEN says when the action is the fix, not what it does"
-why = "The decider picks an action by its WHEN alone: LIMITS.md#2."
+why = "The decider picks an action by its WHEN alone."
 
 [[rule]]
 id = "whens-apart"
@@ -344,7 +344,7 @@ on = "rule-quoted"
 ask = "Does `text` set a limit with a number, such as a minimum version, a maximum size, a count or a time limit?"
 pass = "no"
 says = "a rule on a number is NEVER IF or ASK IF, in code"
-why = "LIMITS.md#1."
+why = "The decider does not compare numbers inside a sentence."
 
 [[rule]]
 id = "rule-concrete"
@@ -355,7 +355,7 @@ ask = "The coder runs shell commands, each with a one-line purpose, and each is 
 choices = { concrete = "names an action on the box that one command and its purpose can show, such as deleting a directory, opening a port, dropping a table or upgrading a named program", vague = "names a quality or an outcome that no single command shows, such as being careful, secure or fast" }
 pass = "concrete"
 says = "a quoted rule names something one command can do"
-why = "Quoted rules gate each coder command: LIMITS.md#5."
+why = "Quoted rules gate each coder command."
 
 # ── SKILLs ────────────────────────────────────────────────
 

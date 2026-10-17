@@ -54,7 +54,7 @@ $ subweave plan postgres "postgres 18, private network, backups to acme-pg, keep
 
 The weaves live in [subweave/library](https://github.com/subweave/library), one line each in its [README](https://github.com/subweave/library#weaves); `examples/` is its submodule (`git clone --recursive`).
 
-Each weave's README says what it cannot do. [LIMITS.md](LIMITS.md) says what Subweave does badly, with the decider calls that show it in [evidence/](evidence).
+Each weave's README says what it cannot do.
 
 ## Dashboard
 
